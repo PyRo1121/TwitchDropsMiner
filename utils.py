@@ -380,17 +380,21 @@ def json_load(path: Path, defaults: _JSON_T, *, merge: bool = True) -> _JSON_T:
 
 
 def json_save(path: Path, contents: Mapping[Any, Any], *, sort: bool = False) -> None:
-    new_path: Path = path.with_name(f"{path.name}.new")
-    with new_path.open('w', encoding="utf8") as file:
-        json.dump(contents, file, default=_serialize, sort_keys=sort, indent=4)
-    new_path.replace(path)
+    def writer(new_path: Path) -> None:
+        with new_path.open("w", encoding="utf8") as file:
+            json.dump(contents, file, default=_serialize, sort_keys=sort, indent=4)
+
+    atomic_write(path, writer, mode=None)
 
 
-def atomic_write(path: Path, writer: Callable[[Path], None], *, mode: int = 0o600) -> None:
+def atomic_write(
+    path: Path, writer: Callable[[Path], None], *, mode: int | None = 0o600
+) -> None:
     """Write `path` atomically via a `<path>.new` sibling, then `replace()` over it.
 
-    Guards against symlink substitution on the temp path, applies ``mode`` to both the
-    temp and final file, and removes the temp even on failure so the last good file survives.
+    Guards against symlink substitution on the temp path, optionally applies ``mode``
+    to both the temp and final file, and removes the temp even on failure so the last
+    good file survives.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f"{path.name}.new")
@@ -398,9 +402,11 @@ def atomic_write(path: Path, writer: Callable[[Path], None], *, mode: int = 0o60
         if temporary_path.is_symlink():
             raise OSError(f"Temporary path is a symlink: {temporary_path}")
         writer(temporary_path)
-        temporary_path.chmod(mode)
+        if mode is not None:
+            temporary_path.chmod(mode)
         temporary_path.replace(path)
-        path.chmod(mode)
+        if mode is not None:
+            path.chmod(mode)
     finally:
         with suppress(OSError):
             temporary_path.unlink()
