@@ -191,13 +191,6 @@ class Channel:
         return URLType(f"{self._twitch._client_type.CLIENT_URL}/{self._login}")
 
     @property
-    def iid(self) -> str:
-        """
-        Returns a string to be used as ID/key of the columns inside channel list.
-        """
-        return str(self.id)
-
-    @property
     def online(self) -> bool:
         """
         Returns True if the streamer is online and is currently streaming, False otherwise.
