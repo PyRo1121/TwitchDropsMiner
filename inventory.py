@@ -59,7 +59,7 @@ class Benefit:
         self.type: BenefitType = (
             BenefitType(distribution_type)
             if isinstance(distribution_type, str)
-            and distribution_type in BenefitType.__members__.keys()
+            and distribution_type in BenefitType.__members__
             else BenefitType.UNKNOWN
         )
         self.image_url: URLType = URLType(image_url)
