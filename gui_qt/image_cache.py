@@ -98,6 +98,12 @@ class QtImageCache:
             raise ValueError("invalid image cache path")
         return candidate
 
+    @staticmethod
+    def _open_image(source: Any) -> Image.Image:
+        with Image.open(source) as opened:
+            opened.load()
+            return opened.copy()
+
     @classmethod
     def _decode(cls, payload: bytes) -> Image.Image | None:
         if len(payload) > cls.MAX_IMAGE_BYTES:
@@ -105,9 +111,7 @@ class QtImageCache:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
-                with Image.open(io.BytesIO(payload)) as opened:
-                    opened.load()
-                    return opened.copy()
+                return cls._open_image(io.BytesIO(payload))
         except (
             Image.DecompressionBombError,
             Image.DecompressionBombWarning,
@@ -140,9 +144,7 @@ class QtImageCache:
                     path = self._cache_file(image_hash)
                     image = self._images.get(image_hash)
                     if image is None:
-                        with Image.open(path) as opened:
-                            opened.load()
-                            image = opened.copy()
+                        image = self._open_image(path)
                         self._images[image_hash] = image
                     entry["expires"] = self._expires()
                     self._altered = True
