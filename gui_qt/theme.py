@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtGui import QColor
 
 
 @dataclass(frozen=True)
@@ -28,10 +27,6 @@ class Palette:
     error: str
     info: str
     idle: str
-
-    def rgb(self, name: str) -> tuple[int, int, int]:
-        color = QColor(getattr(self, name))
-        return color.red(), color.green(), color.blue()
 
 
 # The ultraviolet/aqua signal palette gives the cockpit its own identity

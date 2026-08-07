@@ -489,10 +489,6 @@ class ExponentialBackoff:
             self.variance_min = 1 - variance
             self.variance_max = 1 + variance
 
-    @property
-    def exp(self) -> int:
-        return max(0, self.steps - 1)
-
     def __iter__(self) -> abc.Iterator[float]:
         return self
 
@@ -563,9 +559,6 @@ class AwaitableValue(Generic[_T]):
     def __init__(self):
         self._value: _T
         self._event = asyncio.Event()
-
-    def has_value(self) -> bool:
-        return self._event.is_set()
 
     def wait(self) -> abc.Coroutine[Any, Any, Literal[True]]:
         return self._event.wait()
