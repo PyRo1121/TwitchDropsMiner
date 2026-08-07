@@ -2289,17 +2289,10 @@ class Twitch:
                 fetched_data[campaign_id] = campaign_data
         return self._merge_data(campaign_ids, fetched_data)
 
-    async def fetch_inventory(self) -> None:
-        status_update = self.gui.status.update
-        status_update(_("gui", "status", "fetching_inventory"))
-        # fetch in-progress campaigns (inventory)
-        response = await self.gql_request(GQL_QUERIES["Inventory"])
-        try:
-            inventory = response["data"]["currentUser"]["inventory"]
-        except (KeyError, TypeError) as exc:
-            raise RequestException("Twitch inventory response was malformed") from exc
-        if not isinstance(inventory, dict):
-            raise RequestException("Twitch inventory response was malformed")
+    @staticmethod
+    def _parse_inventory_snapshot(
+        inventory: JsonType,
+    ) -> tuple[dict[str, JsonType], dict[str, datetime]]:
         raw_ongoing = inventory.get("dropCampaignsInProgress") or []
         ongoing_campaigns = raw_ongoing if isinstance(raw_ongoing, list) else []
         # This contains claimed benefit edge IDs, not drop IDs.
@@ -2322,6 +2315,20 @@ class Twitch:
             if isinstance(campaign_data, dict)
             and isinstance(campaign_data.get("id"), str)
         }
+        return inventory_data, claimed_benefits
+
+    async def fetch_inventory(self) -> None:
+        status_update = self.gui.status.update
+        status_update(_("gui", "status", "fetching_inventory"))
+        # fetch in-progress campaigns (inventory)
+        response = await self.gql_request(GQL_QUERIES["Inventory"])
+        try:
+            inventory = response["data"]["currentUser"]["inventory"]
+        except (KeyError, TypeError) as exc:
+            raise RequestException("Twitch inventory response was malformed") from exc
+        if not isinstance(inventory, dict):
+            raise RequestException("Twitch inventory response was malformed")
+        inventory_data, claimed_benefits = self._parse_inventory_snapshot(inventory)
         # fetch general available campaigns data (campaigns)
         response = await self.gql_request(GQL_QUERIES["Campaigns"])
         try:
