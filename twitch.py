@@ -531,6 +531,18 @@ class _AuthState:
                 and validated_user_id == self.user_id
             )
 
+    async def _ensure_device_id(
+        self, client_info: ClientInfo, jar: aiohttp.CookieJar
+    ) -> None:
+        async with self._twitch.request(
+            "GET", client_info.CLIENT_URL, headers=self.headers()
+        ) as response:
+            page_html = await response.text("utf8")
+            assert page_html is not None
+        # doing the request ends up setting the "unique_id" value in the cookie
+        cookie = jar.filter_cookies(client_info.CLIENT_URL)
+        self.device_id = cookie["unique_id"].value
+
     async def _validate(self):
         if not hasattr(self, "session_id"):
             self.session_id = create_nonce(CHARS_HEX_LOWER, 16)
@@ -558,14 +570,7 @@ class _AuthState:
         if not self._hasattrs("device_id"):
             if jar is None:
                 raise RuntimeError("Authentication cookie jar is unavailable")
-            async with self._twitch.request(
-                "GET", client_info.CLIENT_URL, headers=self.headers()
-            ) as response:
-                page_html = await response.text("utf8")
-                assert page_html is not None
-            # doing the request ends up setting the "unique_id" value in the cookie
-            cookie = jar.filter_cookies(client_info.CLIENT_URL)
-            self.device_id = cookie["unique_id"].value
+            await self._ensure_device_id(client_info, jar)
         if not self._hasattrs("access_token", "user_id"):
             if jar is None:
                 raise RuntimeError("Authentication cookie jar is unavailable")
