@@ -808,8 +808,9 @@ class QtGUIManager(QMainWindow):
 
     def apply_theme(self, dark: bool) -> None:
         self._theme_dark = dark
-        apply_theme(self._app, make_theme(dark))
-        palette = make_theme(dark).p
+        theme = make_theme(dark)
+        apply_theme(self._app, theme)
+        palette = theme.p
         if hasattr(self, "hero"):
             self._apply_ring_theme()
         active = getattr(self, "_active_page", "overview")
