@@ -105,6 +105,30 @@ async def _read_json(
         raise exception_type(message) from exc
 
 
+def _retry_after_delay(response: aiohttp.ClientResponse, fallback: float) -> float:
+    """Parse server rate-limit hints into a retry delay in seconds."""
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            return max(1.0, float(retry_after))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError, OverflowError):
+                pass
+            else:
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(1.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    reset = response.headers.get("Ratelimit-Reset")
+    if reset is not None:
+        try:
+            return max(1.0, int(reset) - time())
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return max(1.0, fallback)
+
+
 def _open_dump(mode: Literal["w", "a"]) -> Any:
     try:
         return open(DUMP_PATH, mode, encoding="utf8")
@@ -278,15 +302,8 @@ class _AuthState:
                     response_json = {}
                 error = response_json.get("message") or response_json.get("error")
                 if response.status == 429 or error == "slow_down":
-                    retry_after = response.headers.get("Retry-After")
-                    if retry_after is None:
-                        retry_delay = interval + 5
-                    else:
-                        try:
-                            retry_delay = max(1, int(float(retry_after)))
-                        except ValueError:
-                            retry_delay = interval + 5
-                    interval = max(interval + 5, retry_delay)
+                    retry_delay = _retry_after_delay(response, interval + 5)
+                    interval = int(max(interval + 5, retry_delay))
                     continue
                 if error == "authorization_pending":
                     continue
@@ -2037,29 +2054,6 @@ class Twitch:
                 self._rate_limit_reset.isoformat() if self._rate_limit_reset else None,
             )
 
-    @staticmethod
-    def _response_retry_delay(response: aiohttp.ClientResponse, fallback: float) -> float:
-        retry_after = response.headers.get("Retry-After")
-        if retry_after is not None:
-            try:
-                return max(1.0, float(retry_after))
-            except ValueError:
-                try:
-                    retry_at = parsedate_to_datetime(retry_after)
-                except (TypeError, ValueError, OverflowError):
-                    pass
-                else:
-                    if retry_at.tzinfo is None:
-                        retry_at = retry_at.replace(tzinfo=timezone.utc)
-                    return max(1.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
-        reset = response.headers.get("Ratelimit-Reset")
-        if reset is not None:
-            try:
-                return max(1.0, int(reset) - time())
-            except (TypeError, ValueError, OverflowError):
-                pass
-        return max(1.0, fallback)
-
     @asynccontextmanager
     async def request(
         self, method: str, url: URL | str, *, invalidate_after: datetime | None = None, **kwargs
@@ -2107,7 +2101,7 @@ class Twitch:
                     return
                 await response.read()
                 if response.status == 429:
-                    sleep_delay = self._response_retry_delay(response, delay)
+                    sleep_delay = _retry_after_delay(response, delay)
                     logger.warning(
                         "Twitch rate limit response; retrying in %.1fs (%s)",
                         sleep_delay,
