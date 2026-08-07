@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from translate import _
 from game_metadata import SteamMetadata
 
+from .contracts import ImageCache
 from .widgets import (
     Badge,
     Card,
@@ -587,7 +588,7 @@ class DropRow(Card):
         self.body().addWidget(self._status)
         self.refresh()
 
-    async def load_images(self, cache: Any) -> None:
+    async def load_images(self, cache: ImageCache) -> None:
         for benefit in self.drop.benefits:
             image = QLabel()
             image.setFixedSize(56, 56)
@@ -691,7 +692,7 @@ class CampaignCard(Card):
     def _open_link(self) -> None:
         QDesktopServices.openUrl(QUrl(str(self.campaign.link_url)))
 
-    async def load_images(self, cache: Any) -> None:
+    async def load_images(self, cache: ImageCache) -> None:
         self.image.setPixmap(await cache.get(self.campaign.image_url, (108, 144)))
         self.image.setText("")
         for row in self._drop_rows.values():
@@ -786,7 +787,7 @@ class InventoryPage(QWidget):
     def set_refresh_callback(self, callback: Any) -> None:
         self._refresh_button.clicked.connect(callback)
 
-    async def add_campaign(self, campaign: DropsCampaign, cache: Any) -> None:
+    async def add_campaign(self, campaign: DropsCampaign, cache: ImageCache) -> None:
         if campaign.id in self._campaigns:
             self._campaigns[campaign.id].refresh()
             return

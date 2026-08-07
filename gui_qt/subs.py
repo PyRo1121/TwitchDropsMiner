@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 
 import qtawesome as qta
@@ -30,6 +30,7 @@ from constants import PriorityMode, State
 from translate import _
 from utils import format_duration, webopen
 from .autostart import AutostartError, AutostartManager
+from .contracts import ImageCache, LoginManager
 from .pages import (
     ActivityLog,
     ChannelsPage,
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 
 
 class QtStatusBar:
-    def __init__(self, label: QLabel, on_update: Any = None) -> None:
+    def __init__(self, label: QLabel, on_update: Callable[[str], None] | None = None) -> None:
         self._label = label
         self._on_update = on_update
 
@@ -87,7 +88,7 @@ class QtWebsocketStatus:
 
 
 class QtLoginForm:
-    def __init__(self, card: LoginPanel, manager: Any) -> None:
+    def __init__(self, card: LoginPanel, manager: LoginManager) -> None:
         self._card = card
         self._manager = manager
         self._confirm = asyncio.Event()
@@ -222,9 +223,9 @@ class QtChannelList:
         self,
         page: ChannelsPage,
         *,
-        on_watching: Any = None,
-        on_cleared: Any = None,
-        on_changed: Any = None,
+        on_watching: Callable[[Channel], None] | None = None,
+        on_cleared: Callable[[], None] | None = None,
+        on_changed: Callable[[], None] | None = None,
     ) -> None:
         self._page = page
         self._on_watching = on_watching
@@ -285,7 +286,7 @@ class QtConsole:
 
 
 class QtInventory:
-    def __init__(self, page: InventoryPage, cache: Any) -> None:
+    def __init__(self, page: InventoryPage, cache: ImageCache) -> None:
         self._page = page
         self._cache = cache
 
