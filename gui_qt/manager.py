@@ -541,8 +541,7 @@ class QtGUIManager(QMainWindow):
             return
         self._context_key = context_key
         self._metadata_generation += 1
-        if self._metadata_task is not None:
-            self._metadata_task.cancel()
+        self._cancel_metadata_task()
         baseline = SteamMetadata(game_name)
         slug = str(getattr(game, "slug", ""))
         twitch_url = f"https://www.twitch.tv/directory/category/{slug}" if slug else ""
@@ -556,6 +555,11 @@ class QtGUIManager(QMainWindow):
         self._metadata_task = asyncio.create_task(
             self._load_game_context(game_name, image_url, twitch_url, generation)
         )
+
+    def _cancel_metadata_task(self) -> None:
+        if self._metadata_task is not None:
+            self._metadata_task.cancel()
+            self._metadata_task = None
 
     async def _load_game_context(
         self, game_name: str, image_url: str, twitch_url: str, generation: int
@@ -727,9 +731,7 @@ class QtGUIManager(QMainWindow):
     def stop(self) -> None:
         self._started = False
         self.progress.stop_timer()
-        if self._metadata_task is not None:
-            self._metadata_task.cancel()
-            self._metadata_task = None
+        self._cancel_metadata_task()
         self._steam_metadata.save()
         self._image_cache.save()
 
@@ -747,9 +749,7 @@ class QtGUIManager(QMainWindow):
         self._closing = True
         try:
             self._metrics_timer.stop()
-            if self._metadata_task is not None:
-                self._metadata_task.cancel()
-                self._metadata_task = None
+            self._cancel_metadata_task()
             logger.removeHandler(self._log_handler)
             self.tray.stop()
             try:
@@ -789,9 +789,7 @@ class QtGUIManager(QMainWindow):
         self.progress.display(None)
         self._context_key = None
         self._metadata_generation += 1
-        if self._metadata_task is not None:
-            self._metadata_task.cancel()
-            self._metadata_task = None
+        self._cancel_metadata_task()
         self.hero.clear()
         self.tray.update_title(None)
 
