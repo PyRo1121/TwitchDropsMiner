@@ -1,12 +1,21 @@
-class MinerException(Exception):
-    """
-    Base exception class for this application.
-    """
+class _DefaultMessage(Exception):
+    """Base for exceptions that fall back to a default message when none is given."""
+
+    _default_message = "Unknown error"
+
     def __init__(self, *args: object):
         if args:
             super().__init__(*args)
         else:
-            super().__init__("Unknown miner error")
+            super().__init__(self._default_message)
+
+
+class MinerException(_DefaultMessage):
+    """
+    Base exception class for this application.
+    """
+
+    _default_message = "Unknown miner error"
 
 
 class ExitRequest(MinerException):
@@ -15,6 +24,7 @@ class ExitRequest(MinerException):
 
     Intended for internal use only.
     """
+
     def __init__(self):
         super().__init__("Application was requested to exit")
 
@@ -25,6 +35,7 @@ class ReloadRequest(MinerException):
 
     Intended for internal use only.
     """
+
     def __init__(self):
         super().__init__("Application was requested to reload entirely")
 
@@ -33,11 +44,8 @@ class RequestException(MinerException):
     """
     Raised for cases where a web request doesn't return what we wanted it to.
     """
-    def __init__(self, *args: object):
-        if args:
-            super().__init__(*args)
-        else:
-            super().__init__("Unknown error during request")
+
+    _default_message = "Unknown error during request"
 
 
 class RequestInvalid(RequestException):
@@ -46,6 +54,7 @@ class RequestInvalid(RequestException):
 
     Intended for internal use only.
     """
+
     def __init__(self):
         super().__init__("Request became invalid during its retry loop")
 
@@ -59,11 +68,14 @@ class WebsocketClosed(RequestException):
     received: bool
         `True` if the closing was caused by our side receiving a close frame, `False` otherwise.
     """
+
+    _default_message = "Websocket has been closed"
+
     def __init__(self, *args: object, received: bool = False):
         if args:
             super().__init__(*args)
         else:
-            super().__init__("Websocket has been closed")
+            super().__init__(self._default_message)
         self.received: bool = received
 
 
@@ -71,17 +83,15 @@ class LoginException(RequestException):
     """
     Raised when an exception occurs during login phase.
     """
-    def __init__(self, *args: object):
-        if args:
-            super().__init__(*args)
-        else:
-            super().__init__("Unknown error during login")
+
+    _default_message = "Unknown error during login"
 
 
 class CaptchaRequired(LoginException):
     """
     The most dreaded thing about automated scripts...
     """
+
     def __init__(self):
         super().__init__("Captcha is required")
 
@@ -90,5 +100,6 @@ class GQLException(RequestException):
     """
     Raised when a GQL request returns an error response.
     """
+
     def __init__(self, message: str):
         super().__init__(message)
