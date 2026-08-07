@@ -437,7 +437,7 @@ class Translator:
     def __init__(self) -> None:
         self._langs: list[str] = []
         # start with (and always copy) the default translation
-        self._translation: Translation = default_translation.copy()
+        self._translation: Translation = self._new_default()
         # if we're in dev, update the template English.json file
         if not IS_PACKAGED:
             default_langpath = LANG_PATH.joinpath(f"{DEFAULT_LANG}.json")
@@ -451,23 +451,29 @@ class Translator:
             self._langs.remove(DEFAULT_LANG)
         self._langs.insert(0, DEFAULT_LANG)
 
+    def _new_default(self) -> Translation:
+        return default_translation.copy()
+
+    def _lang_name(self) -> str:
+        return cast(dict[str, Any], self._translation).get("language_name", DEFAULT_LANG)
+
     @property
     def languages(self) -> abc.Iterable[str]:
         return iter(self._langs)
 
     @property
     def current(self) -> str:
-        return cast(dict[str, Any], self._translation).get("language_name", DEFAULT_LANG)
+        return self._lang_name()
 
     def set_language(self, language: str):
         if language not in self._langs:
             raise ValueError("Unrecognized language")
-        elif cast(dict[str, Any], self._translation).get("language_name") == language:
+        elif self._lang_name() == language:
             # same language as loaded selected
             return
         elif language == DEFAULT_LANG:
             # default language selected - use the memory value
-            self._translation = default_translation.copy()
+            self._translation = self._new_default()
         else:
             self._translation = json_load(
                 LANG_PATH.joinpath(f"{language}.json"), default_translation
