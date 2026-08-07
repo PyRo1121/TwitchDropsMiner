@@ -884,6 +884,12 @@ class Twitch:
             topics.append(WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id))
         return topics
 
+    def _rank_channels(self, channels: abc.Iterable[Channel]) -> list[Channel]:
+        ordered = sorted(channels, key=self._viewers_key, reverse=True)
+        ordered.sort(key=lambda channel: channel.acl_based, reverse=True)
+        ordered.sort(key=self.get_priority)
+        return ordered
+
     async def run(self):
         if self.settings.dump:
             with _open_dump("w"):
@@ -1135,11 +1141,7 @@ class Twitch:
         # sort them descending by viewers, by priority and by game priority
         # NOTE: Viewers sort also ensures ONLINE channels are sorted to the top
         # NOTE: We can drop using the set now, because there's no more channels being added
-        ordered_channels: list[Channel] = sorted(
-            new_channels, key=self._viewers_key, reverse=True
-        )
-        ordered_channels.sort(key=lambda ch: ch.acl_based, reverse=True)
-        ordered_channels.sort(key=self.get_priority)
+        ordered_channels = self._rank_channels(new_channels)
         # ensure that we won't end up with more channels than we can handle
         # NOTE: we trim from the end because that's where the non-priority,
         # offline (or online but low viewers) channels end up
@@ -1551,9 +1553,7 @@ class Twitch:
         self, preferred: Channel | None = None
     ) -> list[tuple[Channel, TimedDrop]]:
         """Select up to two assignments with a unique game and drop per target."""
-        ordered = sorted(self.channels.values(), key=self._viewers_key, reverse=True)
-        ordered.sort(key=lambda candidate: candidate.acl_based, reverse=True)
-        ordered.sort(key=self.get_priority)
+        ordered = self._rank_channels(self.channels.values())
         if preferred is not None and preferred in ordered:
             ordered.remove(preferred)
             ordered.insert(0, preferred)
