@@ -57,6 +57,7 @@ from constants import (
     OAUTH_TOKEN_PATH,
     MAX_CHANNELS,
     MAX_WATCH_CHANNELS,
+    GQL_BATCH_SIZE,
     GQL_QUERIES,
     WATCH_INTERVAL,
     State,
@@ -2413,7 +2414,7 @@ class Twitch:
         status_update(_("gui", "status", "fetching_campaigns"))
         fetch_campaigns_tasks: list[asyncio.Task[Any]] = [
             asyncio.create_task(self.fetch_campaigns(campaigns_chunk))
-            for campaigns_chunk in chunk(available_campaigns.items(), 20)
+            for campaigns_chunk in chunk(available_campaigns.items(), GQL_BATCH_SIZE)
         ]
         try:
             for coro in asyncio.as_completed(fetch_campaigns_tasks):
@@ -2569,7 +2570,7 @@ class Twitch:
             return
         stream_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
             asyncio.create_task(self.gql_request(stream_gql_chunk))
-            for stream_gql_chunk in chunk(stream_gql_ops, 20)
+            for stream_gql_chunk in chunk(stream_gql_ops, GQL_BATCH_SIZE)
         ]
         try:
             for coro in asyncio.as_completed(stream_gql_tasks):
@@ -2595,7 +2596,7 @@ class Twitch:
             ]
             available_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
                 asyncio.create_task(self.gql_request(available_gql_chunk))
-                for available_gql_chunk in chunk(available_gql_ops, 20)
+                for available_gql_chunk in chunk(available_gql_ops, GQL_BATCH_SIZE)
             ]
             try:
                 for coro in asyncio.as_completed(available_gql_tasks):

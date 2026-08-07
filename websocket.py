@@ -11,7 +11,13 @@ import aiohttp
 
 from translate import _
 from exceptions import MinerException, WebsocketClosed
-from constants import PING_INTERVAL, PING_TIMEOUT, MAX_WEBSOCKETS, WS_TOPICS_LIMIT
+from constants import (
+    PING_INTERVAL,
+    PING_TIMEOUT,
+    MAX_WEBSOCKETS,
+    WS_TOPICS_LIMIT,
+    WS_TOPIC_BATCH_SIZE,
+)
 from utils import (
     CHARS_ASCII,
     chunk,
@@ -233,7 +239,7 @@ class Websocket:
         if removed:
             topics_list = list(map(str, removed))
             ws_logger.debug(f"Websocket[{self._idx}]: Removing topics: {', '.join(topics_list)}")
-            for topics in chunk(topics_list, 20):
+            for topics in chunk(topics_list, WS_TOPIC_BATCH_SIZE):
                 await self.send(
                     {
                         "type": "UNLISTEN",
@@ -249,7 +255,7 @@ class Websocket:
         if added:
             topics_list = list(map(str, added))
             ws_logger.debug(f"Websocket[{self._idx}]: Adding topics: {', '.join(topics_list)}")
-            for topics in chunk(topics_list, 20):
+            for topics in chunk(topics_list, WS_TOPIC_BATCH_SIZE):
                 await self.send(
                     {
                         "type": "LISTEN",
