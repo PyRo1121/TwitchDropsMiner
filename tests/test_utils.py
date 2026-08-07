@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from constants import LANG_PATH, WORKING_DIR
-from utils import json_load, timestamp
+from utils import json_load, json_save, timestamp
 
 
 class JsonLoadTests(unittest.TestCase):
@@ -26,6 +26,15 @@ class JsonLoadTests(unittest.TestCase):
 
         self.assertEqual(second, defaults)
         self.assertEqual(defaults, {"priority": [], "exclude": set()})
+
+    def test_json_save_replaces_without_leaving_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            json_save(path, {"value": 1})
+            json_save(path, {"value": 2})
+
+            self.assertEqual(json_load(path, {}, merge=False), {"value": 2})
+            self.assertFalse(path.with_name("settings.json.new").exists())
 
     def test_rfc3339_timestamps_normalize_to_utc(self) -> None:
         self.assertEqual(
