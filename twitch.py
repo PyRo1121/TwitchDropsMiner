@@ -987,114 +987,7 @@ class Twitch:
                     self.print(_("status", "no_campaign"))
                     self.change_state(State.IDLE)
             elif self._state is State.CHANNELS_FETCH:
-                # Channel objects are replaced below; cancel watch tasks before
-                # clearing the channel map so an old task cannot race a relink.
-                self.stop_watching()
-                self.gui.status.update(_("gui", "status", "gathering"))
-                # start with all current channels, clear the memory and GUI
-                new_channels: set[Channel] = set(channels.values())
-                channels.clear()
-                self.gui.channels.clear()
-                # gather and add ACL channels from campaigns
-                # NOTE: we consider only campaigns that can be progressed
-                # NOTE: we use another set so that we can set them online separately
-                no_acl: set[Game] = set()
-                acl_channels: set[Channel] = set()
-                next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
-                for campaign in self.inventory:
-                    if (
-                        campaign.game in self.wanted_games
-                        and campaign.can_earn_within(next_hour)
-                    ):
-                        if campaign.allowed_channels:
-                            acl_channels.update(campaign.allowed_channels)
-                        else:
-                            no_acl.add(campaign.game)
-                # remove all ACL channels that already exist from the other set
-                acl_channels.difference_update(new_channels)
-                # use the other set to set them online if possible
-                await self.bulk_check_online(acl_channels)
-                # finally, add them as new channels
-                new_channels.update(acl_channels)
-                for game in no_acl:
-                    # for every campaign without an ACL, for it's game,
-                    # add a list of live channels with drops enabled
-                    new_channels.update(await self.get_live_streams(game, drops_enabled=True))
-                # sort them descending by viewers, by priority and by game priority
-                # NOTE: Viewers sort also ensures ONLINE channels are sorted to the top
-                # NOTE: We can drop using the set now, because there's no more channels being added
-                ordered_channels: list[Channel] = sorted(
-                    new_channels, key=self._viewers_key, reverse=True
-                )
-                ordered_channels.sort(key=lambda ch: ch.acl_based, reverse=True)
-                ordered_channels.sort(key=self.get_priority)
-                # ensure that we won't end up with more channels than we can handle
-                # NOTE: we trim from the end because that's where the non-priority,
-                # offline (or online but low viewers) channels end up
-                to_remove_channels = ordered_channels[MAX_CHANNELS:]
-                ordered_channels = ordered_channels[:MAX_CHANNELS]
-                if to_remove_channels:
-                    # tracked channels and gui were cleared earlier, so no need to do it here
-                    # just make sure to unsubscribe from their topics
-                    to_remove_topics = []
-                    for channel in to_remove_channels:
-                        to_remove_topics.append(
-                            WebsocketTopic.as_str("Channel", "StreamState", channel.id)
-                        )
-                        to_remove_topics.append(
-                            WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id)
-                        )
-                    self.websocket.remove_topics(to_remove_topics)
-                    del to_remove_channels, to_remove_topics
-                # set our new channel list
-                for channel in ordered_channels:
-                    channels[channel.id] = channel
-                    channel.display(add=True)
-                # subscribe to these channel's state updates
-                to_add_topics: list[WebsocketTopic] = []
-                for channel_id in channels:
-                    to_add_topics.append(
-                        WebsocketTopic(
-                            "Channel", "StreamState", channel_id, self.process_stream_state
-                        )
-                    )
-                    to_add_topics.append(
-                        WebsocketTopic(
-                            "Channel", "StreamUpdate", channel_id, self.process_stream_update
-                        )
-                    )
-                self.websocket.add_topics(to_add_topics)
-                # relink watching channel after cleanup,
-                # or stop watching it if it no longer qualifies
-                # NOTE: this replaces 'self.watching_channel's internal value with the new object
-                watching_channel = self.watching_channel.get_with_default(None)
-                if watching_channel is not None:
-                    new_watching: Channel | None = channels.get(watching_channel.id)
-                    if new_watching is not None and self.can_watch(new_watching):
-                        self.watch(new_watching, update_status=False)
-                    else:
-                        # we've removed a channel we were watching
-                        self.stop_watching()
-                    del new_watching
-                # pre-display the active drop with a substracted minute
-                for channel in channels.values():
-                    # check if there's any channels we can watch first
-                    if self.can_watch(channel):
-                        if (
-                            (active_campaign := self.get_active_campaign(channel)) is not None
-                            and (active_drop := active_campaign.first_drop) is not None
-                        ):
-                            active_drop.display(countdown=False, subone=True)
-                        break
-                self.change_state(State.CHANNEL_SWITCH)
-                del (
-                    no_acl,
-                    acl_channels,
-                    new_channels,
-                    to_add_topics,
-                    ordered_channels,
-                    watching_channel,
-                )
+                await self._fetch_channels(channels)
             elif self._state is State.CHANNEL_SWITCH:
                 if self.settings.dump:
                     self.gui.close()
@@ -1144,6 +1037,118 @@ class Twitch:
                 # we've been requested to exit the application
                 break
             await self._state_change.wait()
+
+    async def _fetch_channels(
+        self, channels: OrderedDict[int, Channel]
+    ) -> None:
+        # Channel objects are replaced below; cancel watch tasks before
+        # clearing the channel map so an old task cannot race a relink.
+        self.stop_watching()
+        self.gui.status.update(_("gui", "status", "gathering"))
+        # start with all current channels, clear the memory and GUI
+        new_channels: set[Channel] = set(channels.values())
+        channels.clear()
+        self.gui.channels.clear()
+        # gather and add ACL channels from campaigns
+        # NOTE: we consider only campaigns that can be progressed
+        # NOTE: we use another set so that we can set them online separately
+        no_acl: set[Game] = set()
+        acl_channels: set[Channel] = set()
+        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+        for campaign in self.inventory:
+            if (
+                campaign.game in self.wanted_games
+                and campaign.can_earn_within(next_hour)
+            ):
+                if campaign.allowed_channels:
+                    acl_channels.update(campaign.allowed_channels)
+                else:
+                    no_acl.add(campaign.game)
+        # remove all ACL channels that already exist from the other set
+        acl_channels.difference_update(new_channels)
+        # use the other set to set them online if possible
+        await self.bulk_check_online(acl_channels)
+        # finally, add them as new channels
+        new_channels.update(acl_channels)
+        for game in no_acl:
+            # for every campaign without an ACL, for it's game,
+            # add a list of live channels with drops enabled
+            new_channels.update(await self.get_live_streams(game, drops_enabled=True))
+        # sort them descending by viewers, by priority and by game priority
+        # NOTE: Viewers sort also ensures ONLINE channels are sorted to the top
+        # NOTE: We can drop using the set now, because there's no more channels being added
+        ordered_channels: list[Channel] = sorted(
+            new_channels, key=self._viewers_key, reverse=True
+        )
+        ordered_channels.sort(key=lambda ch: ch.acl_based, reverse=True)
+        ordered_channels.sort(key=self.get_priority)
+        # ensure that we won't end up with more channels than we can handle
+        # NOTE: we trim from the end because that's where the non-priority,
+        # offline (or online but low viewers) channels end up
+        to_remove_channels = ordered_channels[MAX_CHANNELS:]
+        ordered_channels = ordered_channels[:MAX_CHANNELS]
+        if to_remove_channels:
+            # tracked channels and gui were cleared earlier, so no need to do it here
+            # just make sure to unsubscribe from their topics
+            to_remove_topics = []
+            for channel in to_remove_channels:
+                to_remove_topics.append(
+                    WebsocketTopic.as_str("Channel", "StreamState", channel.id)
+                )
+                to_remove_topics.append(
+                    WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id)
+                )
+            self.websocket.remove_topics(to_remove_topics)
+            del to_remove_channels, to_remove_topics
+        # set our new channel list
+        for channel in ordered_channels:
+            channels[channel.id] = channel
+            channel.display(add=True)
+        # subscribe to these channel's state updates
+        to_add_topics: list[WebsocketTopic] = []
+        for channel_id in channels:
+            to_add_topics.append(
+                WebsocketTopic(
+                    "Channel", "StreamState", channel_id, self.process_stream_state
+                )
+            )
+            to_add_topics.append(
+                WebsocketTopic(
+                    "Channel", "StreamUpdate", channel_id, self.process_stream_update
+                )
+            )
+        self.websocket.add_topics(to_add_topics)
+        # relink watching channel after cleanup,
+        # or stop watching it if it no longer qualifies
+        # NOTE: this replaces 'self.watching_channel's internal value with the new object
+        watching_channel = self.watching_channel.get_with_default(None)
+        if watching_channel is not None:
+            new_watching: Channel | None = channels.get(watching_channel.id)
+            if new_watching is not None and self.can_watch(new_watching):
+                self.watch(new_watching, update_status=False)
+            else:
+                # we've removed a channel we were watching
+                self.stop_watching()
+            del new_watching
+        # pre-display the active drop with a substracted minute
+        for channel in channels.values():
+            # check if there's any channels we can watch first
+            if self.can_watch(channel):
+                if (
+                    (active_campaign := self.get_active_campaign(channel)) is not None
+                    and (active_drop := active_campaign.first_drop) is not None
+                ):
+                    active_drop.display(countdown=False, subone=True)
+                break
+        self.change_state(State.CHANNEL_SWITCH)
+        del (
+            no_acl,
+            acl_channels,
+            new_channels,
+            to_add_topics,
+            ordered_channels,
+            watching_channel,
+        )
 
     async def _watch_sleep(self, event: asyncio.Event, delay: float) -> bool:
         # Each watched channel owns an event so a restart wakes every watch loop.
