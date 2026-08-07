@@ -6,6 +6,7 @@ import re
 import sys
 import json
 import random
+import unicodedata
 import string
 import asyncio
 import logging
@@ -213,6 +214,21 @@ def format_duration(seconds: float, *, pad_hours: bool = True) -> str:
     minutes, seconds_part = divmod(remainder, 60)
     hours_text = f"{hours:02}" if pad_hours else f"{hours:>2}"
     return f"{hours_text}:{minutes:02}:{seconds_part:02}"
+
+
+def slugify(name: str) -> str:
+    """Create Twitch's dash-separated game slug from a display name."""
+    slug_text = re.sub(r"'", "", name.lower())
+    slug_text = re.sub(r"\W+", "-", slug_text)
+    return re.sub(r"-{2,}", "-", slug_text.strip("-"))
+
+
+def normalize_key(name: str) -> str:
+    """Create a conservative ASCII key for exact name matching."""
+    normalized = unicodedata.normalize("NFKD", name).encode(
+        "ascii", "ignore"
+    ).decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", normalized.lower())
 
 
 CHARS_ASCII = string.ascii_letters + string.digits

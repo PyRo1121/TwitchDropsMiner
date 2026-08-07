@@ -5,9 +5,8 @@ domain state and callers can import ``Game`` eagerly without pulling in utils.
 """
 from __future__ import annotations
 
-import re
-
 from constants import JsonType
+from utils import slugify
 
 
 class Game:
@@ -23,7 +22,7 @@ class Game:
             raise ValueError("Game data must contain a name")
         self.name: str = name
         slug = data.get("slug")
-        self.slug: str = slug if isinstance(slug, str) and slug else self._make_slug(name)
+        self.slug: str = slug if isinstance(slug, str) and slug else slugify(name)
 
     def __str__(self) -> str:
         return self.name
@@ -38,19 +37,6 @@ class Game:
 
     def __hash__(self) -> int:
         return self.id
-
-    @staticmethod
-    def _make_slug(name: str) -> str:
-        """
-        Converts the game name into a slug, useable for the GQL API.
-        """
-        # remove specific characters
-        slug_text = re.sub(r'\'', '', name.lower())
-        # remove non alpha-numeric characters
-        slug_text = re.sub(r'\W+', '-', slug_text)
-        # strip and collapse dashes
-        slug_text = re.sub(r'-{2,}', '-', slug_text.strip('-'))
-        return slug_text
 
     def is_special(self) -> bool:
         return self.id in self.SPECIAL_GAME_IDS

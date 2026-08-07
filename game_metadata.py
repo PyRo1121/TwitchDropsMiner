@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
-import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import quote_plus
@@ -18,7 +16,7 @@ from urllib.parse import quote_plus
 from yarl import URL
 
 from constants import CACHE_PATH
-from utils import json_load, json_save, safe_int
+from utils import json_load, json_save, normalize_key, safe_int
 
 logger = logging.getLogger("TwitchDrops.ui")
 
@@ -85,10 +83,7 @@ class SteamMetadataProvider:
     @staticmethod
     def normalize_name(name: str) -> str:
         """Normalize names for exact, conservative Steam matching."""
-        normalized = unicodedata.normalize("NFKD", name).encode(
-            "ascii", "ignore"
-        ).decode("ascii")
-        return re.sub(r"[^a-z0-9]+", "", normalized.lower())
+        return normalize_key(name)
 
     async def get(self, game_name: str) -> SteamMetadata:
         name = str(game_name).strip()
