@@ -876,6 +876,14 @@ class Twitch:
             return viewers
         return -1
 
+    @staticmethod
+    def _channel_state_topics(channels: abc.Iterable[Channel]) -> list[str]:
+        topics: list[str] = []
+        for channel in channels:
+            topics.append(WebsocketTopic.as_str("Channel", "StreamState", channel.id))
+            topics.append(WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id))
+        return topics
+
     async def run(self):
         if self.settings.dump:
             with _open_dump("w"):
@@ -1074,14 +1082,7 @@ class Twitch:
             ]
         full_cleanup = False
         if to_remove_channels:
-            to_remove_topics: list[str] = []
-            for channel in to_remove_channels:
-                to_remove_topics.append(
-                    WebsocketTopic.as_str("Channel", "StreamState", channel.id)
-                )
-                to_remove_topics.append(
-                    WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id)
-                )
+            to_remove_topics = self._channel_state_topics(to_remove_channels)
             self.websocket.remove_topics(to_remove_topics)
             for channel in to_remove_channels:
                 del channels[channel.id]
@@ -1147,14 +1148,7 @@ class Twitch:
         if to_remove_channels:
             # tracked channels and gui were cleared earlier, so no need to do it here
             # just make sure to unsubscribe from their topics
-            to_remove_topics = []
-            for channel in to_remove_channels:
-                to_remove_topics.append(
-                    WebsocketTopic.as_str("Channel", "StreamState", channel.id)
-                )
-                to_remove_topics.append(
-                    WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id)
-                )
+            to_remove_topics = self._channel_state_topics(to_remove_channels)
             self.websocket.remove_topics(to_remove_topics)
             del to_remove_channels, to_remove_topics
         # set our new channel list
