@@ -28,7 +28,7 @@ from yarl import URL
 
 from constants import PriorityMode, State
 from translate import _
-from utils import webopen
+from utils import format_duration, webopen
 from .autostart import AutostartError, AutostartManager
 from .pages import (
     ActivityLog,
@@ -156,11 +156,6 @@ class QtCampaignProgress:
         self._seconds = 0
         self._timer_task: asyncio.Task[Any] | None = None
 
-    def _divmod(self, minutes: int) -> tuple[int, int]:
-        if self._seconds < 60 and minutes > 0:
-            minutes -= 1
-        return divmod(minutes, 60)
-
     def start_timer(self) -> None:
         if self._timer_task is None:
             if self._drop is None or self._drop.remaining_minutes <= 0:
@@ -213,12 +208,12 @@ class QtCampaignProgress:
         drop = self._drop
         drop_minutes = drop.remaining_minutes if drop is not None else 0
         campaign_minutes = drop.campaign.remaining_minutes if drop is not None else 0
-        seconds_part = self._seconds % 60
-        drop_hours, drop_minutes_part = self._divmod(drop_minutes)
-        campaign_hours, campaign_minutes_part = self._divmod(campaign_minutes)
+        countdown_offset = self._seconds - 60
         self._hero.set_remaining(
-            drop=f"{drop_hours:>2}:{drop_minutes_part:02}:{seconds_part:02}",
-            campaign=f"{campaign_hours:>2}:{campaign_minutes_part:02}:{seconds_part:02}",
+            drop=format_duration(drop_minutes * 60 + countdown_offset, pad_hours=False),
+            campaign=format_duration(
+                campaign_minutes * 60 + countdown_offset, pad_hours=False
+            ),
         )
 
 

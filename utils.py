@@ -207,6 +207,14 @@ def isonow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", 'Z')
 
 
+def format_duration(seconds: float, *, pad_hours: bool = True) -> str:
+    total = max(0, round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds_part = divmod(remainder, 60)
+    hours_text = f"{hours:02}" if pad_hours else f"{hours:>2}"
+    return f"{hours_text}:{minutes:02}:{seconds_part:02}"
+
+
 CHARS_ASCII = string.ascii_letters + string.digits
 CHARS_HEX_LOWER = string.digits + "abcdef"
 

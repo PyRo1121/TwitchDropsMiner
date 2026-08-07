@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from constants import LANG_PATH, WORKING_DIR
-from utils import json_load, json_save, timestamp
+from utils import format_duration, json_load, json_save, timestamp
 
 
 class JsonLoadTests(unittest.TestCase):
@@ -35,6 +35,11 @@ class JsonLoadTests(unittest.TestCase):
 
             self.assertEqual(json_load(path, {}, merge=False), {"value": 2})
             self.assertFalse(path.with_name("settings.json.new").exists())
+
+    def test_format_duration_preserves_hour_alignment_modes(self) -> None:
+        self.assertEqual(format_duration(3661.4), "01:01:01")
+        self.assertEqual(format_duration(299, pad_hours=False), " 0:04:59")
+        self.assertEqual(format_duration(-1), "00:00:00")
 
     def test_rfc3339_timestamps_normalize_to_utc(self) -> None:
         self.assertEqual(

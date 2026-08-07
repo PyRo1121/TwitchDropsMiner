@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from translate import _
 from constants import OUTPUT_FORMATTER, State, _resource_path as resource_path
 from game_metadata import SteamMetadata, SteamMetadataProvider
+from utils import format_duration
 from .image_cache import QtImageCache
 from .pages import ActivityPage, ChannelsPage, HeroCard, InventoryPage, LoginPanel
 from .subs import (
@@ -154,13 +155,6 @@ class QtGUIManager(QMainWindow):
             self.show()
         self._navigate("overview")
 
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        total = max(0, round(seconds))
-        hours, remainder = divmod(total, 3600)
-        minutes, seconds_part = divmod(remainder, 60)
-        return f"{hours:02}:{minutes:02}:{seconds_part:02}"
-
     def _on_channel_watching(self, channel: Any) -> None:
         channel_id = getattr(channel, "id", None)
         if channel_id != self._watching_id:
@@ -180,7 +174,7 @@ class QtGUIManager(QMainWindow):
         watched = self._watched_seconds
         if self._watching_since is not None:
             watched += time.monotonic() - self._watching_since
-        self.watch_metric.set_value(self._format_duration(watched))
+        self.watch_metric.set_value(format_duration(watched))
         monitored, live = self.channels.counts()
         self.live_metric.set_value(f"{live}/{monitored}")
         campaigns = getattr(self._twitch, "inventory", [])
