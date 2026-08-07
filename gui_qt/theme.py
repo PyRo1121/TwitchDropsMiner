@@ -76,9 +76,6 @@ class Theme:
     dark: bool
     p: Palette
     base_pt: int = 10
-    radius_sm: int = 0
-    radius_md: int = 0
-    radius_lg: int = 0
 
     def _sheet(self) -> str:
         p = self.p
