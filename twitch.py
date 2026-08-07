@@ -339,6 +339,20 @@ class _AuthState:
                 # the device_code has expired, request a new code
                 continue
 
+    async def _request_login(
+        self, headers: dict[str, str], payload: JsonType
+    ) -> JsonType:
+        async with self._twitch.request(
+            "POST", "https://passport.twitch.tv/login", headers=headers, json=payload
+        ) as response:
+            try:
+                login_response: Any = await response.json(loads=SAFE_LOADS)
+            except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
+                raise LoginException("Twitch login response was not valid JSON") from exc
+        if not isinstance(login_response, dict):
+            raise LoginException("Twitch login response was malformed")
+        return login_response
+
     async def _login(self) -> str:
         logger.info("Login flow started")
         gui_print = self._twitch.gui.print
@@ -389,15 +403,7 @@ class _AuthState:
                 "X-Device-Id": self.device_id,
                 # "X-Device-Id": ''.join(random.choices('0123456789abcdef', k=32)),
             }
-            async with self._twitch.request(
-                "POST", "https://passport.twitch.tv/login", headers=headers, json=payload
-            ) as response:
-                try:
-                    login_response: Any = await response.json(loads=SAFE_LOADS)
-                except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                    raise LoginException("Twitch login response was not valid JSON") from exc
-            if not isinstance(login_response, dict):
-                raise LoginException("Twitch login response was malformed")
+            login_response = await self._request_login(headers, payload)
 
             # Feed this back in to avoid running into CAPTCHA if possible
             if "captcha_proof" in login_response:
