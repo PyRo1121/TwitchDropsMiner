@@ -14,8 +14,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .theme import Theme
-
 
 class Card(QFrame):
     """Layered surface card (QS# #card)."""
