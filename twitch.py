@@ -895,45 +895,7 @@ class Twitch:
                 self.restart_watching()
                 self.change_state(State.CHANNELS_CLEANUP)
             elif self._state is State.CHANNELS_CLEANUP:
-                self.gui.status.update(_("gui", "status", "cleanup"))
-                if not self.wanted_games or full_cleanup:
-                    # no games selected or we're doing full cleanup: remove everything
-                    to_remove_channels: list[Channel] = list(channels.values())
-                else:
-                    # remove all channels that:
-                    to_remove_channels = [
-                        channel
-                        for channel in channels.values()
-                        if (
-                            not channel.acl_based  # aren't ACL-based
-                            and (
-                                channel.offline  # and are offline
-                                # or online but aren't streaming the game we want anymore
-                                or (channel.game is None or channel.game not in self.wanted_games)
-                            )
-                        )
-                    ]
-                full_cleanup = False
-                if to_remove_channels:
-                    to_remove_topics: list[str] = []
-                    for channel in to_remove_channels:
-                        to_remove_topics.append(
-                            WebsocketTopic.as_str("Channel", "StreamState", channel.id)
-                        )
-                        to_remove_topics.append(
-                            WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id)
-                        )
-                    self.websocket.remove_topics(to_remove_topics)
-                    for channel in to_remove_channels:
-                        del channels[channel.id]
-                        channel.remove()
-                    del to_remove_channels, to_remove_topics
-                if self.wanted_games:
-                    self.change_state(State.CHANNELS_FETCH)
-                else:
-                    # with no games available, we switch to IDLE after cleanup
-                    self.print(_("status", "no_campaign"))
-                    self.change_state(State.IDLE)
+                full_cleanup = self._cleanup_channels_state(channels, full_cleanup)
             elif self._state is State.CHANNELS_FETCH:
                 await self._fetch_channels(channels)
             elif self._state is State.CHANNEL_SWITCH:
@@ -1053,6 +1015,50 @@ class Twitch:
             self.change_state(State.IDLE)
         del new_watching, selected_channel, watching_channel
         return False
+
+    def _cleanup_channels_state(
+        self, channels: OrderedDict[int, Channel], full_cleanup: bool
+    ) -> bool:
+        self.gui.status.update(_("gui", "status", "cleanup"))
+        if not self.wanted_games or full_cleanup:
+            # no games selected or we're doing full cleanup: remove everything
+            to_remove_channels: list[Channel] = list(channels.values())
+        else:
+            # remove all channels that:
+            to_remove_channels = [
+                channel
+                for channel in channels.values()
+                if (
+                    not channel.acl_based  # aren't ACL-based
+                    and (
+                        channel.offline  # and are offline
+                        # or online but aren't streaming the game we want anymore
+                        or (channel.game is None or channel.game not in self.wanted_games)
+                    )
+                )
+            ]
+        full_cleanup = False
+        if to_remove_channels:
+            to_remove_topics: list[str] = []
+            for channel in to_remove_channels:
+                to_remove_topics.append(
+                    WebsocketTopic.as_str("Channel", "StreamState", channel.id)
+                )
+                to_remove_topics.append(
+                    WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id)
+                )
+            self.websocket.remove_topics(to_remove_topics)
+            for channel in to_remove_channels:
+                del channels[channel.id]
+                channel.remove()
+            del to_remove_channels, to_remove_topics
+        if self.wanted_games:
+            self.change_state(State.CHANNELS_FETCH)
+        else:
+            # with no games available, we switch to IDLE after cleanup
+            self.print(_("status", "no_campaign"))
+            self.change_state(State.IDLE)
+        return full_cleanup
 
     async def _fetch_channels(
         self, channels: OrderedDict[int, Channel]
