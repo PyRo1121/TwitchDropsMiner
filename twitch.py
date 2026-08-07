@@ -894,17 +894,7 @@ class Twitch:
                 # clear the flag and wait until it's set again
                 self._state_change.clear()
             elif self._state is State.INVENTORY_FETCH:
-                self.gui.tray.change_icon("maint")
-                # Inventory replacement invalidates every old drop object and
-                # assignment, so no watch task may run against the old indexes.
-                self.stop_watching()
-                # ensure the websocket is running
-                await self.websocket.start()
-                await self.fetch_inventory()
-                self.gui.set_games(set(campaign.game for campaign in self.inventory))
-                # Save state on every inventory fetch
-                self.save()
-                self.change_state(State.GAMES_UPDATE)
+                await self._fetch_inventory_state()
             elif self._state is State.GAMES_UPDATE:
                 # claim drops from expired and active campaigns
                 for campaign in self.inventory:
@@ -999,6 +989,19 @@ class Twitch:
                 # we've been requested to exit the application
                 break
             await self._state_change.wait()
+
+    async def _fetch_inventory_state(self) -> None:
+        self.gui.tray.change_icon("maint")
+        # Inventory replacement invalidates every old drop object and
+        # assignment, so no watch task may run against the old indexes.
+        self.stop_watching()
+        # ensure the websocket is running
+        await self.websocket.start()
+        await self.fetch_inventory()
+        self.gui.set_games(set(campaign.game for campaign in self.inventory))
+        # Save state on every inventory fetch
+        self.save()
+        self.change_state(State.GAMES_UPDATE)
 
     def _switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
         if self.settings.dump:
