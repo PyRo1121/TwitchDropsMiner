@@ -216,50 +216,6 @@ class SegmentedProgress(QWidget):
             painter.drawRoundedRect(x, 1, round(width), 7, 2, 2)
 
 
-class StatTile(Card):
-    """Bento-style metric surface with an icon-led header."""
-
-    def __init__(
-        self,
-        icon_name: str,
-        label: str,
-        value: str,
-        detail: str,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setObjectName("statTile")
-        head = QHBoxLayout()
-        icon = QLabel()
-        icon.setPixmap(qta.icon(icon_name, color="#b69cff").pixmap(QSize(18, 18)))
-        icon.setObjectName("statIcon")
-        head.addWidget(icon)
-        caption = QLabel(label.upper())
-        caption.setObjectName("eyebrow")
-        head.addWidget(caption)
-        head.addStretch(1)
-        self.body().addLayout(head)
-        self.value = QLabel(value)
-        self.value.setObjectName("statValue")
-        self.body().addWidget(self.value)
-        self.detail = QLabel(detail)
-        self.detail.setObjectName("subtle")
-        self.body().addWidget(self.detail)
-        self.body().addStretch(1)
-        self._meter = Progress()
-        self._meter.setFixedHeight(5)
-        self.body().addWidget(self._meter)
-
-    def set_value(self, value: str, detail: str | None = None) -> None:
-        self.value.setText(value)
-        try:
-            self._meter.setValue(max(0, min(1000, round(float(value.rstrip("%")) * 10))))
-        except ValueError:
-            self._meter.setValue(0)
-        if detail is not None:
-            self.detail.setText(detail)
-
-
 class Metric(QWidget):
     """Stat tile: muted micro label over a strong value."""
 
@@ -336,15 +292,3 @@ class EmptyState(QWidget):
         box.addStretch(1)
         lay.addLayout(box)
         lay.addStretch(1)
-
-
-def make_row(title: str, value: QWidget) -> QWidget:
-    w = QWidget()
-    lay = QHBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    left = QLabel(title)
-    left.setObjectName("muted")
-    lay.addWidget(left)
-    lay.addStretch(1)
-    lay.addWidget(value)
-    return w

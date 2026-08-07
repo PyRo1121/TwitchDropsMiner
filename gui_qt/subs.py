@@ -288,9 +288,6 @@ class QtConsole:
         for log in self._logs:
             log.append_message(message)
 
-    def configure_theme(self) -> None:
-        return None
-
 
 class QtInventory:
     def __init__(self, page: InventoryPage, cache: Any) -> None:
