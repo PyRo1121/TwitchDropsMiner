@@ -56,7 +56,9 @@ class LogRedactionTests(unittest.TestCase):
             messages.append({"data": {"unexpected": True}})
 
         cast(Any, socket)._gather_recv = gather_messages
-        asyncio.run(socket._handle_recv())
+        with self.assertLogs("TwitchDrops.websocket", level="WARNING") as logs:
+            asyncio.run(socket._handle_recv())
+        self.assertTrue(any("without a valid type" in message for message in logs.output))
 
 
 if __name__ == "__main__":
