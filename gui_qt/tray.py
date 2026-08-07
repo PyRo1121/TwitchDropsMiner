@@ -1,7 +1,6 @@
 """System tray for the Qt UI — QSystemTrayIcon with generated state icons."""
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
@@ -69,16 +68,6 @@ class QtTray:
     def stop(self) -> None:
         self._icon.hide()
         self._shown = False
-
-    def minimize(self) -> None:
-        if sys.platform == "darwin":
-            return
-        if not self.available:
-            self.restore()
-            return
-        if not self._shown:
-            self.start()
-        self._parent.hide()
 
     def restore(self) -> None:
         self._parent.show()
