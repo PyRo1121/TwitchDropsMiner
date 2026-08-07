@@ -356,7 +356,7 @@ def _deserialize(obj: JsonType) -> Any:
     return obj
 
 
-def _merge_json(obj: JsonType, template: Mapping[Any, Any]) -> None:
+def _apply_defaults(obj: JsonType, template: Mapping[Any, Any]) -> None:
     # NOTE: This modifies object in place
     for k, v in list(obj.items()):
         if k not in template:
@@ -368,7 +368,7 @@ def _merge_json(obj: JsonType, template: Mapping[Any, Any]) -> None:
         elif isinstance(v, dict):
             if not isinstance(template[k], dict):
                 raise TypeError(f"Template value for {k!r} must be a mapping")
-            _merge_json(v, template[k])
+            _apply_defaults(v, template[k])
     # ensure the object is not missing any keys
     for k in template.keys():
         if k not in obj:
@@ -418,7 +418,7 @@ def json_load(path: Path, defaults: _JSON_T, *, merge: bool = True) -> _JSON_T:
     elif merge:
         if not isinstance(combined, dict):
             raise ValueError(f"JSON root must be an object: {path}")
-        _merge_json(combined, defaults_copy)
+        _apply_defaults(combined, defaults_copy)
     return cast(_JSON_T, combined)
 
 
