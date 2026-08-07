@@ -94,6 +94,16 @@ def safe_loads(s: str) -> Any:
         raise ValueError("Invalid JSON response") from exc
 
 
+async def _read_json(
+    response: aiohttp.ClientResponse,
+    exception_type: type[Exception],
+    message: str,
+) -> Any:
+    try:
+        return await response.json(loads=safe_loads)
+    except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
+        raise exception_type(message) from exc
+
 
 def _open_dump(mode: Literal["w", "a"]) -> Any:
     try:
@@ -190,10 +200,9 @@ class _AuthState:
                 raise RuntimeError(
                     f"OAuth refresh failed (HTTP {response.status})"
                 )
-            try:
-                response_json: JsonType = await response.json(loads=safe_loads)
-            except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                raise RuntimeError("OAuth refresh returned invalid data") from exc
+            response_json: JsonType = await _read_json(
+                response, RuntimeError, "OAuth refresh returned invalid data"
+            )
             if not isinstance(response_json, dict):
                 raise RuntimeError("OAuth refresh returned invalid data")
             access_token = response_json.get("access_token")
@@ -233,10 +242,9 @@ class _AuthState:
                     #     "user_code": "8 chars [A-Z]",
                     #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
                     # }
-                    try:
-                        response_json: Any = await response.json(loads=safe_loads)
-                    except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                        raise LoginException("OAuth device response was not valid JSON") from exc
+                    response_json: Any = await _read_json(
+                        response, LoginException, "OAuth device response was not valid JSON"
+                    )
                     if not isinstance(response_json, dict):
                         raise LoginException("OAuth device response was malformed")
                     device_code = response_json.get("device_code")
@@ -278,10 +286,9 @@ class _AuthState:
                         invalidate_after=expires_at,
                     ) as response:
                         if response.status == 200:
-                            try:
-                                response_json = await response.json(loads=safe_loads)
-                            except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                                raise LoginException("OAuth token response was not valid JSON") from exc
+                            response_json = await _read_json(
+                                response, LoginException, "OAuth token response was not valid JSON"
+                            )
                             if not isinstance(response_json, dict):
                                 raise LoginException("OAuth token response was malformed")
                             # {
@@ -346,10 +353,9 @@ class _AuthState:
         async with self._twitch.request(
             "POST", "https://passport.twitch.tv/login", headers=headers, json=payload
         ) as response:
-            try:
-                login_response: Any = await response.json(loads=safe_loads)
-            except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                raise LoginException("Twitch login response was not valid JSON") from exc
+            login_response: Any = await _read_json(
+                response, LoginException, "Twitch login response was not valid JSON"
+            )
         if not isinstance(login_response, dict):
             raise LoginException("Twitch login response was malformed")
         return login_response
@@ -527,11 +533,13 @@ class _AuthState:
                 raise RuntimeError(
                     f"Token validation failed (HTTP {response.status})"
                 )
+            payload: JsonType = await _read_json(
+                response, RuntimeError, "Token validation returned invalid data"
+            )
             try:
-                payload: JsonType = await response.json(loads=safe_loads)
                 validated_user_id = int(payload["user_id"])
                 validated_client_id = str(payload["client_id"])
-            except (KeyError, TypeError, ValueError, aiohttp.ContentTypeError) as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 raise RuntimeError("Token validation returned invalid data") from exc
             return (
                 validated_client_id == client_info.CLIENT_ID
@@ -611,10 +619,9 @@ class _AuthState:
                         jar.clear_domain(client_info.CLIENT_URL.host)
                         continue
                     elif response.status == 200:
-                        try:
-                            validate_response = await response.json(loads=safe_loads)
-                        except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                            raise RuntimeError("Login validation returned invalid JSON") from exc
+                        validate_response = await _read_json(
+                            response, RuntimeError, "Login validation returned invalid JSON"
+                        )
                         if not isinstance(validate_response, dict):
                             raise RuntimeError("Login validation returned malformed data")
                         break
@@ -2145,10 +2152,9 @@ class Twitch:
                     if response.status == 401:
                         self._auth_state.invalidate()
                         raise LoginException("Twitch rejected the GraphQL access token")
-                    try:
-                        response_json: Any = await response.json(loads=safe_loads)
-                    except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                        raise RequestException("Twitch GraphQL returned invalid JSON") from exc
+                    response_json: Any = await _read_json(
+                        response, RequestException, "Twitch GraphQL returned invalid JSON"
+                    )
                     if response.status >= 400:
                         raise GQLException(
                             f"GraphQL HTTP {response.status}: "
