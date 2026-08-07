@@ -8,7 +8,7 @@ from pathlib import Path
 from copy import deepcopy
 from enum import Enum, auto
 from datetime import timedelta
-from typing import Any, Dict, Literal, NewType, TYPE_CHECKING
+from typing import Any, Dict, Iterator, Literal, NewType, TYPE_CHECKING
 
 from yarl import URL
 
@@ -82,15 +82,18 @@ def _merge_vars(base_vars: JsonType, vars: JsonType) -> None:
 
 
 # Base Paths
+_SOURCE_DIR = Path(__file__).resolve().parent
 if IS_APPIMAGE:
     SELF_PATH = Path(os.environ["APPIMAGE"]).resolve()
-else:
-    # NOTE: pyinstaller will set sys.argv[0] to its own executable when building
-    # NOTE: sys.argv[0] will point to gui.py when running the gui.py directly for GUI debug
-    # detect these and use __file__ and main.py redirection instead
+elif IS_PACKAGED:
+    # PyInstaller keeps the executable beside the user's writable data files.
     SELF_PATH = Path(sys.argv[0]).resolve()
-    if SELF_PATH.stem == "pyinstaller" or SELF_PATH.name == "gui.py":
-        SELF_PATH = Path(__file__).with_name("main.py").resolve()
+else:
+    # In a source checkout, only trust argv[0] when it points at the checkout.
+    # Test runners and console entry points otherwise resolve to site-packages,
+    # which would make settings, translations, and caches escape the project.
+    candidate = Path(sys.argv[0]).resolve()
+    SELF_PATH = candidate if (candidate.parent / "lang").is_dir() else _SOURCE_DIR / "main.py"
 WORKING_DIR = SELF_PATH.parent
 # Development paths
 VENV_PATH = Path(WORKING_DIR, "env")
@@ -106,6 +109,7 @@ LOCK_PATH = Path(WORKING_DIR, "lock.file")
 CACHE_PATH = Path(WORKING_DIR, "cache")
 CACHE_DB = Path(CACHE_PATH, "mapping.json")
 COOKIES_PATH = Path(WORKING_DIR, "cookies.jar")
+OAUTH_TOKEN_PATH = Path(WORKING_DIR, "oauth.json")
 SETTINGS_PATH = Path(WORKING_DIR, "settings.json")
 # Typing
 JsonType = Dict[str, Any]
@@ -114,13 +118,13 @@ GQLOperation: TypeAlias = "GQLQuery | GQLPersistedQuery"
 TopicProcess: TypeAlias = "abc.Callable[[int, JsonType], Any]"
 # Values
 MAX_INT = sys.maxsize
-MAX_EXTRA_MINUTES = 15
 BASE_TOPICS = 2
 MAX_WEBSOCKETS = 8
 WS_TOPICS_LIMIT = 50
 TOPICS_PER_CHANNEL = 2
 MAX_TOPICS = (MAX_WEBSOCKETS * WS_TOPICS_LIMIT) - BASE_TOPICS
 MAX_CHANNELS = MAX_TOPICS // TOPICS_PER_CHANNEL
+MAX_WATCH_CHANNELS = 2
 # Misc
 DEFAULT_LANG = "English"
 # Intervals and Delays
@@ -156,7 +160,7 @@ class ClientInfo:
         else:
             self.USER_AGENT = user_agents
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[URL | str]:
         return iter((self.CLIENT_URL, self.CLIENT_ID, self.USER_AGENT))
 
 

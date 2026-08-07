@@ -11,10 +11,9 @@ import asyncio
 import logging
 import traceback
 import webbrowser
-import tkinter as tk
+from copy import deepcopy
 from enum import Enum
 from pathlib import Path
-from functools import wraps
 from contextlib import suppress
 from functools import cached_property
 from datetime import datetime, timezone
@@ -22,8 +21,6 @@ from collections import abc, OrderedDict
 from typing import Any, Literal, Callable, Generic, Mapping, TypeVar, ParamSpec, cast
 
 from yarl import URL
-from PIL.ImageTk import PhotoImage
-from PIL import Image as Image_module
 
 from exceptions import ExitRequest, ReloadRequest
 from constants import IS_PACKAGED, JsonType, PriorityMode
@@ -37,12 +34,14 @@ _JSON_T = TypeVar("_JSON_T", bound=Mapping[Any, Any])
 logger = logging.getLogger("TwitchDrops")
 
 
-def set_root_icon(root: tk.Tk, image_path: Path | str) -> None:
-    with Image_module.open(image_path) as image:
-        icon_photo = PhotoImage(master=root, image=image)
-    root.iconphoto(True, icon_photo)  # type: ignore[arg-type]
-    # keep a reference to the PhotoImage to avoid the ResourceWarning
-    root._icon_image = icon_photo  # type: ignore[attr-defined]
+async def cancel_tasks(tasks: abc.Iterable[asyncio.Task[Any]]) -> None:
+    """Cancel tasks and consume their completion, including cancellation errors."""
+    task_list = list(tasks)
+    for task in task_list:
+        if not task.done():
+            task.cancel()
+    if task_list:
+        await asyncio.gather(*task_list, return_exceptions=True)
 
 
 async def first_to_complete(coros: abc.Iterable[abc.Coroutine[Any, Any, _T]]) -> _T:
@@ -51,8 +50,7 @@ async def first_to_complete(coros: abc.Iterable[abc.Coroutine[Any, Any, _T]]) ->
     done: set[asyncio.Task[Any]]
     pending: set[asyncio.Task[Any]]
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
+    await cancel_tasks(pending)
     return await next(iter(done))
 
 
@@ -79,14 +77,14 @@ def lock_file(path: Path) -> tuple[bool, io.TextIOWrapper]:
         try:
             # we need to lock at least one byte for this to work
             msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, max(path.stat().st_size, 1))
-        except Exception:
+        except OSError:
             return False, file
         return True, file
     if sys.platform in ("linux", "darwin"):
         import fcntl
         try:
             fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except Exception:
+        except OSError:
             return False, file
         return True, file
     # for unsupported systems, just always return True
@@ -100,11 +98,112 @@ def json_minify(data: JsonType | list[JsonType]) -> str:
     return json.dumps(data, separators=(',', ':'))
 
 
-def timestamp(string: str) -> datetime:
+_LOG_REDACTED = "<redacted>"
+_LOG_SENSITIVE_KEYS = frozenset({
+    "access_token",
+    "auth_token",
+    "authorization",
+    "authy_token",
+    "captcha",
+    "captcha_proof",
+    "client_secret",
+    "client_session_id",
+    "cookie",
+    "cookies",
+    "device_code",
+    "password",
+    "passwd",
+    "passphrase",
+    "proxy",
+    "refresh_token",
+    "secret",
+    "session_id",
+    "token",
+    "twitchguard_code",
+    "user_code",
+    "username",
+    "x_device_id",
+})
+_LOG_SENSITIVE_QUERY_KEYS = frozenset({"sig", "signature"})
+
+
+def _normalise_log_key(key: Any) -> str:
+    return str(key).casefold().replace("-", "_")
+
+
+def _is_sensitive_log_key(key: Any) -> bool:
+    normalised = _normalise_log_key(key)
+    return (
+        normalised in _LOG_SENSITIVE_KEYS
+        or normalised.endswith("_token")
+        or normalised.endswith("_password")
+        or normalised.endswith("_secret")
+        or normalised in _LOG_SENSITIVE_QUERY_KEYS
+    )
+
+
+def _redact_log_url(value: URL) -> str:
+    if value.user is not None:
+        value = value.with_user(None).with_password(None)
+    if value.query:
+        value = value.with_query(
+            [
+                (
+                    key,
+                    _LOG_REDACTED if _is_sensitive_log_key(key) else item,
+                )
+                for key, item in value.query.items()
+            ]
+        )
+    return str(value)
+
+
+def redact_log_value(value: Any, *, key: Any = None) -> Any:
+    """Return a log-safe copy of a value without changing the original."""
+    normalised_key = _normalise_log_key(key) if key is not None else None
+    if key is not None and _is_sensitive_log_key(key):
+        return _LOG_REDACTED
+    if normalised_key in {"data", "json"} and not isinstance(
+        value, (abc.Mapping, list, tuple, set)
+    ):
+        return _LOG_REDACTED
+    if isinstance(value, URL):
+        return _redact_log_url(value)
+    if isinstance(value, abc.Mapping):
+        return {
+            item_key: redact_log_value(item, key=item_key)
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_log_value(item) for item in value)
+    if isinstance(value, set):
+        return {redact_log_value(item) for item in value}
+    if normalised_key in {"url", "uri"} and isinstance(value, str):
+        try:
+            parsed = URL(value)
+        except ValueError:
+            return value
+        if parsed.scheme and parsed.host:
+            return _redact_log_url(parsed)
+    return value
+
+
+def timestamp(value: str) -> datetime:
+    """Parse Twitch's RFC3339 timestamps and normalize them to UTC."""
+    if not isinstance(value, str):
+        raise ValueError("Timestamp must be a string")
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
     try:
-        return datetime.strptime(string, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return datetime.strptime(string, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Invalid timestamp: {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def isonow() -> str:
@@ -124,33 +223,44 @@ def deduplicate(iterable: abc.Iterable[_T]) -> list[_T]:
     return list(OrderedDict.fromkeys(iterable).keys())
 
 
+def _handle_task_exception(
+    exc: BaseException,
+    task_name: str,
+    args: tuple[Any, ...],
+    critical: bool,
+) -> None:
+    if not isinstance(exc, Exception):
+        raise exc
+    logger.exception(f"Exception in {task_name} task")
+    if not critical:
+        return
+    # A critical task's death should trigger a termination. There isn't an
+    # easy and sure way to obtain the Twitch instance here, but we can
+    # improvise finding it from the first argument.
+    from twitch import Twitch  # cyclic import
+    probe = args[0] if args else None
+    if isinstance(probe, Twitch):
+        probe.close()
+    elif probe is not None:
+        owner = getattr(probe, "_twitch", None)
+        if isinstance(owner, Twitch):
+            owner.close()
+
+
 def task_wrapper(
-    afunc: abc.Callable[_P, abc.Coroutine[Any, Any, _T]] | None = None, *, critical: bool = False
-):
-    def decorator(
-        afunc: abc.Callable[_P, abc.Coroutine[Any, Any, _T]]
-    ) -> abc.Callable[_P, abc.Coroutine[Any, Any, _T]]:
-        @wraps(afunc)
-        async def wrapper(*args: _P.args, **kwargs: _P.kwargs):
+    afunc: abc.Callable[..., Any] | None = None, *, critical: bool = False
+) -> Any:
+    def decorator(afunc: abc.Callable[..., Any]) -> abc.Callable[..., Any]:
+        async def wrapper(*args: Any, **kwargs: Any) -> None:
             try:
                 await afunc(*args, **kwargs)
             except (ExitRequest, ReloadRequest):
                 pass
-            except Exception:
-                logger.exception(f"Exception in {afunc.__name__} task")
-                if critical:
-                    # critical task's death should trigger a termination.
-                    # there isn't an easy and sure way to obtain the Twitch instance here,
-                    # but we can improvise finding it
-                    from twitch import Twitch  # cyclic import
-                    probe = args and args[0] or None  # extract from 'self' arg
-                    if isinstance(probe, Twitch):
-                        probe.close()
-                    elif probe is not None:
-                        probe = getattr(probe, "_twitch", None)  # extract from '_twitch' attr
-                        if isinstance(probe, Twitch):
-                            probe.close()
-                raise  # raise up to the wrapping task
+            except BaseException as exc:
+                _handle_task_exception(exc, afunc.__name__, args, critical)
+                raise
+        wrapper.__name__ = afunc.__name__
+        wrapper.__qualname__ = afunc.__qualname__
         return wrapper
     if afunc is None:
         return decorator
@@ -233,7 +343,8 @@ def merge_json(obj: JsonType, template: Mapping[Any, Any]) -> None:
             # types don't match: overwrite from template
             obj[k] = template[k]
         elif isinstance(v, dict):
-            assert isinstance(template[k], dict)
+            if not isinstance(template[k], dict):
+                raise TypeError(f"Template value for {k!r} must be a mapping")
             merge_json(v, template[k])
     # ensure the object is not missing any keys
     for k in template.keys():
@@ -248,19 +359,31 @@ def json_load(path: Path, defaults: _JSON_T, *, merge: bool = True) -> _JSON_T:
     if new_path.exists():
         try:
             with new_path.open('r', encoding="utf8") as file:
-                combined = _remove_missing(json.load(file, object_hook=_deserialize))
-        except json.JSONDecodeError:
+                loaded = json.load(file, object_hook=_deserialize)
+            if not isinstance(loaded, dict):
+                raise ValueError("JSON root must be an object")
+            combined = _remove_missing(loaded)
+        except (OSError, UnicodeError, ValueError):
             # remove invalid file
-            new_path.unlink()
+            new_path.unlink(missing_ok=True)
     # try the old file
     if combined is None and path.exists():
-        with path.open('r', encoding="utf8") as file:
-            combined = _remove_missing(json.load(file, object_hook=_deserialize))
+        try:
+            with path.open('r', encoding="utf8") as file:
+                loaded = json.load(file, object_hook=_deserialize)
+            if not isinstance(loaded, dict):
+                raise ValueError("JSON root must be an object")
+            combined = _remove_missing(loaded)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError(f"Unable to load JSON from {path}") from exc
     # handle defaults and merging
+    defaults_copy: JsonType = deepcopy(dict(defaults))
     if combined is None:
-        combined = dict(defaults)  # always make a copy of defaults
+        combined = defaults_copy
     elif merge:
-        merge_json(combined, dict(defaults))
+        if not isinstance(combined, dict):
+            raise ValueError(f"JSON root must be an object: {path}")
+        merge_json(combined, defaults_copy)
     return cast(_JSON_T, combined)
 
 
@@ -306,12 +429,15 @@ class ExponentialBackoff:
         shift: float = 0,
         maximum: float = 300,
     ):
-        if base <= 1:
+        try:
+            self.base = float(base)
+            self.shift = float(shift)
+            self.maximum = float(maximum)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Backoff parameters must be numeric") from exc
+        if self.base <= 1:
             raise ValueError("Base has to be greater than 1")
         self.steps: int = 0
-        self.base: float = float(base)
-        self.shift: float = float(shift)
-        self.maximum: float = float(maximum)
         self.variance_min: float
         self.variance_max: float
         if isinstance(variance, tuple):
@@ -422,10 +548,17 @@ class Game:
     SPECIAL_GAME_IDS: set[int] = {509663, 509672}
 
     def __init__(self, data: JsonType):
-        self.id: int = int(data["id"])
-        self.name: str = data.get("displayName") or data["name"]
-        if "slug" in data:
-            self.slug = data["slug"]
+        try:
+            self.id = int(data["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Game data must contain an integer id") from exc
+        name = data.get("displayName") or data.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("Game data must contain a name")
+        self.name: str = name
+        slug = data.get("slug")
+        if isinstance(slug, str) and slug:
+            self.slug = slug
 
     def __str__(self) -> str:
         return self.name

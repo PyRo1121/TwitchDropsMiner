@@ -1,90 +1,118 @@
-# Twitch Drops Miner
+# Twitch Drops Farmer
 
-This application allows you to AFK mine timed Twitch drops, without having to worry about switching channels when the one you were watching goes offline, claiming the drops, or even receiving the stream data itself. This helps you save on bandwidth and hassle.
+**Twitch Drops Farmer** is a maintained fork of *Twitch Drops Miner* with a modern Qt dashboard. It lets you AFK mine timed Twitch drops without having to worry about switching channels when the one you were watching goes offline, claiming the drops, or even receiving the stream data itself. This helps you save on bandwidth and hassle.
 
-### How It Works:
+|  |  |
+|--|--|
+| **Maintainers** | [@PyRo1121](https://github.com/PyRo1121) (fork) · upstream by [@DevilXD](https://github.com/DevilXD) |
+| **Source (this fork)** | [github.com/PyRo1121/TwitchDropsMiner](https://github.com/PyRo1121/TwitchDropsMiner) |
 
-Every several seconds, the application pretends to watch a particular stream by fetching stream metadata - this is enough to advance the drops. Note that this completely bypasses the need to download any actual stream video and sound. To keep the status (ONLINE or OFFLINE) of the channels up-to-date, there's a websocket connection established that receives events about streams going up or down, or updates regarding the current amount of viewers.
+### Play
 
-### Features:
+Ready to start farming? The quickest path to playing is cloning this repo and running from source:
+
+```bash
+git clone https://github.com/PyRo1121/TwitchDropsMiner.git
+cd TwitchDropsMiner
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python main.py --tray
+```
+
+Then, inside the app:
+
+1. Log in / connect with the in-app login form.
+2. On the **Settings** tab, add the games you want to farm to the **Priority List**.
+3. Press **Reload** — the farmer finds eligible live channels and starts mining automatically.
+
+See **Usage** below for details. Prebuilt releases (when published) will live on the fork's [Releases](https://github.com/PyRo1121/TwitchDropsMiner/releases) page.
+
+### How It Works
+
+About once per minute, the application sends the same lightweight viewer-presence event that Twitch's player uses, without downloading stream video or sound. Up to two targets can be farmed concurrently when they are eligible for different games and different Drop IDs. A sharded websocket keeps channel state and viewer-drop progress synchronized.
+
+### Features
 
 - Stream-less drop mining - save on bandwidth.
 - Game priority and exclusion lists, allowing you to focus on mining what you want, in the order you want, and ignore what you don't want.
 - Sharded websocket connection, allowing for tracking up to `199` channels at the same time.
 - Automatic drop campaigns discovery based on linked accounts (requires you to do [account linking](https://www.twitch.tv/drops/campaigns) yourself though).
 - Stream tags and drop campaign validation, to ensure you won't end up mining a stream that can't earn you the drop.
-- Automatic channel stream switching, when the one you were currently watching goes offline, as well as when a channel streaming a higher priority game goes online.
+- Up to two concurrent watch targets, constrained to different eligible games and Drop IDs, with automatic replacement when a target becomes invalid.
+- Automatic channel stream switching, when a watched channel goes offline, as well as when a channel streaming a higher priority game goes online.
 - Login session is saved in a cookies file, so you don't need to login every time.
 - Mining is automatically started as new campaigns appear, and stopped when the last available drops have been mined.
+- The Qt dashboard surfaces the active game's artwork, campaign/drop progress, current channel, session metrics, and a plain-language explanation when the farmer is idle.
+- Optional Steam enrichment provides current player count, US store pricing when available, and direct Steam/SteamDB links; it is cached and never affects Twitch channel selection.
 
-### Usage:
+### Usage
 
-- Download and unzip [the latest release](https://github.com/DevilXD/TwitchDropsMiner/releases) - it's recommended to keep it in the folder it comes in.
-- Run it and login/connect the miner to your Twitch account by using the in-app login form.
+- Download and unzip [the latest release](https://github.com/PyRo1121/TwitchDropsMiner/releases) - it's recommended to keep it in the folder it comes in.
+- Run it and login/connect the farmer to your Twitch account by using the in-app login form.
 - After a successful login, the app should fetch a list of all available campaigns and games you can mine drops for - you can then select and add games of choice to the Priority List available on the Settings tab, and then press on the `Reload` button to start processing. It will fetch a list of all applicable streams it can watch, and start mining right away. You can also manually switch to a different channel as needed.
-- If you wish to keep the miner occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
+- If you wish to keep the farmer occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
 - Make sure to link your Twitch account to game accounts on the [campaigns page](https://www.twitch.tv/drops/campaigns), to enable more games to be mined.
 
-### Pictures:
+### Pictures
 
 ![Main](https://user-images.githubusercontent.com/4180725/164298155-c0880ad7-6423-4419-8d73-f3c053730a1b.png)
 ![Inventory](https://user-images.githubusercontent.com/4180725/164298315-81cae0d2-24a4-4822-a056-154fd763c284.png)
 ![Settings](https://user-images.githubusercontent.com/4180725/164298391-b13ad40d-3881-436c-8d4c-34e2bbe33a78.png)
 
-### Notes:
+### Notes
 
-> [!WARNING]  
-> Due to how Twitch handles the drop progression on their side, watching a stream in the browser (or by any other means) on the same account that is actively being used by the miner, will usually cause the miner to misbehave, reporting false progress and getting stuck mining the current drop.  
-> 
+> [!WARNING]
+> Due to how Twitch handles the drop progression on their side, watching a stream in the browser (or by any other means) on the same account that is actively being used by the farmer, will usually cause the farmer to misbehave, reporting false progress and getting stuck mining the current drop.
+>
 > Using the same account to watch other streams during mining is thus discouraged, in order to avoid any problems arising from it.
 
-> [!CAUTION]  
-> Persistent cookies will be stored in the `cookies.jar` file, from which the authorization (login) information will be restored on each subsequent run. Make sure to keep your cookies file safe, as the authorization information it stores can give another person access to your Twitch account, even without them knowing your password!
+> [!CAUTION]
+> Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens (when Twitch returns one) are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account, even without the password.
 
-> [!IMPORTANT]  
-> Successfully logging into your Twitch account in the application may cause Twitch to send you a "New Login" notification email. This is normal - you can verify that it comes from your own IP address. The detected browser during the login will be "Chrome", as that's what the miner currently presents itself to the Twitch server.
+> [!IMPORTANT]
+> Successfully logging into your Twitch account in the application may cause Twitch to send you a "New Login" notification email. This is normal - you can verify that it comes from your own IP address. The detected browser during the login will be "Chrome", as that's what the farmer currently presents itself to the Twitch server.
 
-> [!NOTE]  
-> The time remaining timer always countdowns a single minute and then stops - it is then restarted only after the application redetermines the remaining time. This "redetermination" can happen at any time Twitch decides to report on the drop's progress, but not later than 20 seconds after the timer reaches zero. The seconds timer is only an approximation and does not represent nor affect actual mining speed. The time variations are due to Twitch sometimes not reporting drop progress at all, or reporting progress for the wrong drop - these cases have all been accounted for in the application though.
+> [!NOTE]
+> The time remaining timer is a presentation estimate for the primary target. Authoritative progress comes from Twitch's PubSub drop events or the assigned target's `CurrentDrop` response; the farmer does not fabricate progress when Twitch does not acknowledge it. With two targets, the secondary target is reconciled independently and does not replace the primary hero display.
 
-> [!NOTE]  
+> [!NOTE]
 > The source code requires Python 3.10 or higher to run.
 
-### Notes about the Windows build:
+### Notes about the Windows build
 
 - To achieve a portable-executable format, the application is packaged with PyInstaller into an `EXE`. Some antivirus engines (including Windows Defender) might report the packaged executable as a trojan, because PyInstaller has been used by others to package malicious Python code in the past. These reports can be safely ignored. If you absolutely do not trust the executable, you'll have to install Python yourself and run everything from source.
 - The executable uses the `%TEMP%` directory for temporary runtime storage of files, that don't need to be exposed to the user (like compiled code and translation files). For persistent storage, the directory the executable resides in is used instead.
 - The autostart feature is implemented as a registry entry to the current user's (`HKCU`) autostart key. It is only altered when toggling the respective option. If you relocate the app to a different directory, the autostart feature will stop working, until you toggle the option off and back on again
 
-### Notes about the Linux build:
+### Notes about the Linux build
 
 - The Linux app is built and distributed using two distinct portable-executable formats: [AppImage](https://appimage.org/) and [PyInstaller](https://pyinstaller.org/).
 - There are no major differences between the two formats, but if you're looking for a recommendation, use the AppImage.
 - The Linux app should work out of the box on any modern distribution, as long as it has `glibc>=2.35`, plus a working display server.
-- Every feature of the app is expected to work on Linux just as well as it does on Windows. If you find something that's broken, please [open a new issue](https://github.com/DevilXD/TwitchDropsMiner/issues/new).
-- The size of the Linux app is significantly larger than the Windows app due to the inclusion of the `gtk3` library (and its dependencies), which is required for proper system tray/notifications support.
+- Every feature of the app is expected to work on Linux just as well as it does on Windows. If you find something that's broken, please [open a new issue](https://github.com/PyRo1121/TwitchDropsMiner/issues/new) on the fork.
+- The Qt build uses `QSystemTrayIcon` for native system tray and notification support; it no longer depends on GTK/AppIndicator tray packages.
 - As an alternative to the native Linux app, you can run the Windows app via [Wine](https://www.winehq.org/) instead. It works really well!
 
-### Notes about the macOS build:
+### Notes about the macOS build
 
 - The macOS version is packaged using PyInstaller into a standalone `.app` bundle, distributed as a ZIP archive.
 - Since this application is not signed with a paid Apple Developer Certificate, **macOS Gatekeeper will block it** on the first run (saying it "The application is damaged and can't be opened").
-  - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr Twitch Drops Miner (by DevilXD).app` or just type `xattr -cr ` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
-- Persistent files (like `cookies.jar`, `settings.json`, `lock.file` and the `cache` folder) are stored inside the application bundle in `Twitch Drops Miner (by DevilXD).app/Contents/MacOS` (to access them Right-click the application and select `Show Package Contents`)
+  - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr Twitch Drops Miner (by DevilXD).app` or just type `xattr -cr` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
+- Persistent files (like `cookies.jar`, `oauth.json`, `settings.json`, `lock.file` and the `cache` folder) are stored inside the application bundle in `Twitch Drops Miner (by DevilXD).app/Contents/MacOS` (to access them Right-click the application and select `Show Package Contents`)
 
-### Advanced Usage:
+### Advanced Usage
 
-If you'd be interested in running the latest master from source or building your own executable, see the wiki page explaining how to do so: https://github.com/DevilXD/TwitchDropsMiner/wiki/Setting-up-the-environment,-building-and-running
+If you'd be interested in running the latest master from source or building your own executable, see the wiki page explaining how to do so: <https://github.com/DevilXD/TwitchDropsMiner/wiki/Setting-up-the-environment,-building-and-running>
 
 ### Support
 
-If you'd encounter any issues with the miner:
+If you'd encounter any issues with the farmer:
 
-- Please see the [troubleshooting page](https://github.com/DevilXD/TwitchDropsMiner/wiki/Troubleshooting) for some common issues and their explanation.  
-- Please [search the issues page](https://github.com/DevilXD/TwitchDropsMiner/issues?q=sort%3Aupdated-desc%20is%3Aissue) to see if your issue hasn't been reported yet.  
-- If it's not been reported yet, feel free to open a new issue, describing your problem.
+- Please see the [troubleshooting page](https://github.com/DevilXD/TwitchDropsMiner/wiki/Troubleshooting) from the upstream project for some common issues and their explanation.
+- Please [search the issues page](https://github.com/PyRo1121/TwitchDropsMiner/issues?q=sort%3Aupdated-desc%20is%3Aissue) to see if your issue on the fork hasn't been reported yet.
+- Upstream-specific issues belong on [DevilXD's repository](https://github.com/DevilXD/TwitchDropsMiner/issues); issues with this fork belong on [PyRo1121/TwitchDropsMiner](https://github.com/PyRo1121/TwitchDropsMiner/issues).
 
-If you like the application and found it useful, please consider donating a small amount of money to support me. Thank you!
+If you find the application useful, a ⭐ on the fork is appreciated!
 
 <div align="center">
 
@@ -97,7 +125,7 @@ If you like the application and found it useful, please consider donating a smal
 
 </div>
 
-### Project goals:
+### Project goals
 
 Twitch Drops Miner (TDM for short) has been designed with a couple of simple goals in mind. These are, specifically:
 
@@ -131,7 +159,7 @@ This means that features such as:
 
 For more context about these goals, please check out these issues: [#161](https://github.com/DevilXD/TwitchDropsMiner/issues/161), [#105](https://github.com/DevilXD/TwitchDropsMiner/issues/105), [#84](https://github.com/DevilXD/TwitchDropsMiner/issues/84)
 
-### Credits:
+### Credits
 
 <!---
 Note: The translations credits are sorted alphabetically, based on their English language name.
@@ -148,34 +176,34 @@ placed past the period character at the end.
 • Please ensure to leave a single empty new line at the end of the file.
 -->
 
-@guihkx - For the CI script, CI maintenance, and everything related to Linux builds.  
-@kWAYTV - For the implementation of the dark mode theme.  
-@crocchetto - For the macOS port.  
+@guihkx - For the CI script, CI maintenance, and everything related to Linux builds.
+@kWAYTV - For the implementation of the dark mode theme.
+@crocchetto - For the macOS port.
 
-@Bamboozul - For the entirety of the Arabic (العربية) translation.  
-@Suz1e - For the entirety of the Chinese (简体中文) translation and revisions.  
-@wwj010, @zhangminghao1989, @Self4215 - For the Chinese (简体中文) translation corrections and revisions.  
-@Ricky103403 - For the entirety of the Traditional Chinese (繁體中文) translation.  
-@LusTerCsI - For the Traditional Chinese (繁體中文) translation corrections and revisions.  
-@nwvh - For the entirety of the Czech (Čeština) translation.  
-@Kjerne - For the entirety of the Danish (Dansk) translation.  
-@lmdpocus - For the entirety of the Dutch (Nederlandse) translation.  
-@Rensoraa - For the Traditional Dutch (Nederlandse) translation corrections and revisions.  
-@roobini-gamer - For the entirety of the French (Français) translation.  
-@Calvineries - For the French (Français) translation revisions.  
-@ThisIsCyreX - For the entirety of the German (Deutsch) translation.  
-@Nagyhoho1234 - For the entirety of the Hungarian (Magyar) translation.  
-@Eriza-Z - For the entirety of the Indonesian translation.  
-@casungo - For the entirety of the Italian (Italiano) translation.  
-@ShimadaNanaki - For the entirety of the Japanese (日本語) translation.  
-@biroman -  For the entirety of the Norwegian (Norsk) translation.  
-@Patriot99 - For the Polish (Polski) translation and revisions (co-authored with @DevilXD).  
-@zarigata - For the entirety of the Portuguese (Português) translation.  
-@Sergo1217 - For the entirety of the Russian (Русский) translation.  
-@kilroy98, @flamesv - For the Russian (Русский) translation corrections and revisions.  
-@Shofuu - For the entirety of the Spanish (Español) translation and revisions.  
-@Forero-0 - For the Spanish (Español) translation revisions.  
-@alikdb - For the entirety of the Turkish (Türkçe) translation.  
-@DogancanYr, @Elderly-Emre, @Hweord - For the Turkish (Türkçe) translation corrections and revisions.  
-@Nollasko - For the entirety of the Ukrainian (Українська) translation and revisions.  
-@kilroy98 - For the Ukrainian (Українська) translation corrections and revisions.  
+@Bamboozul - For the entirety of the Arabic (العربية) translation.
+@Suz1e - For the entirety of the Chinese (简体中文) translation and revisions.
+@wwj010, @zhangminghao1989, @Self4215 - For the Chinese (简体中文) translation corrections and revisions.
+@Ricky103403 - For the entirety of the Traditional Chinese (繁體中文) translation.
+@LusTerCsI - For the Traditional Chinese (繁體中文) translation corrections and revisions.
+@nwvh - For the entirety of the Czech (Čeština) translation.
+@Kjerne - For the entirety of the Danish (Dansk) translation.
+@lmdpocus - For the entirety of the Dutch (Nederlandse) translation.
+@Rensoraa - For the Traditional Dutch (Nederlandse) translation corrections and revisions.
+@roobini-gamer - For the entirety of the French (Français) translation.
+@Calvineries - For the French (Français) translation revisions.
+@ThisIsCyreX - For the entirety of the German (Deutsch) translation.
+@Nagyhoho1234 - For the entirety of the Hungarian (Magyar) translation.
+@Eriza-Z - For the entirety of the Indonesian translation.
+@casungo - For the entirety of the Italian (Italiano) translation.
+@ShimadaNanaki - For the entirety of the Japanese (日本語) translation.
+@biroman -  For the entirety of the Norwegian (Norsk) translation.
+@Patriot99 - For the Polish (Polski) translation and revisions (co-authored with @DevilXD).
+@zarigata - For the entirety of the Portuguese (Português) translation.
+@Sergo1217 - For the entirety of the Russian (Русский) translation.
+@kilroy98, @flamesv - For the Russian (Русский) translation corrections and revisions.
+@Shofuu - For the entirety of the Spanish (Español) translation and revisions.
+@Forero-0 - For the Spanish (Español) translation revisions.
+@alikdb - For the entirety of the Turkish (Türkçe) translation.
+@DogancanYr, @Elderly-Emre, @Hweord - For the Turkish (Türkçe) translation corrections and revisions.
+@Nollasko - For the entirety of the Ukrainian (Українська) translation and revisions.
+@kilroy98 - For the Ukrainian (Українська) translation corrections and revisions.

@@ -17,6 +17,8 @@ log.txt
 /dump.dat
 /lock.file
 settings.json
+cookies.jar
+oauth.json
 /lang/English.json
 # AppImage
 /AppDir
@@ -26,3 +28,6 @@ settings.json
 /*.AppImage.zsync
 .DS_Store
 *.app
+
+# local dev venv
+/.venv

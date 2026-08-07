@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import abc
-from typing import Any, TypedDict, TYPE_CHECKING
+from typing import Any, TypedDict, TYPE_CHECKING, cast
 
 from exceptions import MinerException
 from utils import json_load, json_save
@@ -411,34 +411,18 @@ default_translation: Translation = {
             },
             "how_it_works": "How It Works",
             "how_it_works_text": (
-                "Every several seconds, the application pretends to watch a particular stream "
-                "by fetching stream metadata - this is enough to advance the drops. "
-                "Note that this completely bypasses the need to download "
-                "any actual stream of video and sound. "
-                "To keep the status (ONLINE or OFFLINE) of the channels up-to-date, "
-                "there's a websocket connection established that receives events about streams "
-                "going up or down, or updates regarding the current number of viewers."
+                "TwitchDropsMiner advances Drops by checking stream metadata; "
+                "it does not download or play video or audio. "
+                "When a campaign is active, it keeps your selected channel and account "
+                "ready so progress can move."
             ),
             "getting_started": "Getting Started",
             "getting_started_text": (
-                "1. Login to the application.\n"
-                "2. Ensure your Twitch account is linked to all campaigns "
-                "you're interested in mining.\n"
-                "3. If you're interested in mining everything possible, "
-                "change the Priority Mode to anything other than \"Priority list only\" "
-                "and press on \"Reload\".\n"
-                "4. If you want to mine specific games first, use the \"Priority\" list "
-                "to set up an ordered list of games of your choice. "
-                "Games from the top of the list will be attempted to be mined first, "
-                "before the ones lower down the list.\n"
-                "5. Keep the \"Priority mode\" selected as \"Priority list only\", "
-                "to avoid mining games that are not on the priority list. "
-                "Or not - it's up to you.\n"
-                "6. Use the \"Exclude\" list to tell the application "
-                "which games should never be mined.\n"
-                "7. Changing the contents of either of the lists, or changing "
-                "the \"Priority mode\", requires you to press on \"Reload\" "
-                "for the changes to take an effect."
+                "1. Sign in to Twitch.\n"
+                "2. Link the campaigns you want from Twitch's Drops pages.\n"
+                "3. Choose a priority mode, then add games to Priority or Exclude if needed.\n"
+                "4. Press Reload after changing priorities or exclusions.\n"
+                "5. Return to the Overview and leave the miner running while it farms."
             ),
             "invalidate": {
                 "button": "Invalidate",
@@ -473,12 +457,12 @@ class Translator:
 
     @property
     def current(self) -> str:
-        return self._translation["language_name"]
+        return cast(dict[str, Any], self._translation).get("language_name", DEFAULT_LANG)
 
     def set_language(self, language: str):
         if language not in self._langs:
             raise ValueError("Unrecognized language")
-        elif self._translation["language_name"] == language:
+        elif cast(dict[str, Any], self._translation).get("language_name") == language:
             # same language as loaded selected
             return
         elif language == DEFAULT_LANG:

@@ -47,13 +47,5 @@
             "console": "integratedTerminal",
             "justMyCode": false
         },
-        {
-            "name": "Debug GUI",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "gui.py",
-            "console": "integratedTerminal",
-            "justMyCode": false
-        },
     ]
 }

@@ -1,159 +1,174 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller configuration for the Qt production launcher."""
 from __future__ import annotations
 
-import sys
-import platform
+import atexit
 import fnmatch
+import shutil
+import struct
+import sys
+import tempfile
 from pathlib import Path
-from collections import abc
-from traceback import format_exc
-from typing import Any, TypeAlias, TYPE_CHECKING
+from typing import Any
 
-SELF_PATH = str(Path(".").resolve())
-if SELF_PATH not in sys.path:
-    sys.path.insert(0, SELF_PATH)
+from PyInstaller.building.api import EXE, COLLECT, PYZ
+from PyInstaller.building.build_main import Analysis
+from PyInstaller.building.datastruct import TOC
+from PyInstaller.building.osx import BUNDLE
+from PyInstaller.depend import bindepend
+from PyInstaller.utils.hooks import collect_submodules
 
-from constants import WORKING_DIR, SITE_PACKAGES_PATH, DEFAULT_LANG
+SPEC_DIR = Path(SPECPATH).resolve()
+if str(SPEC_DIR) not in sys.path:
+    sys.path.insert(0, str(SPEC_DIR))
 
-if TYPE_CHECKING:
-    from PyInstaller.building.splash import Splash
-    from PyInstaller.building.build_main import Analysis
-    from PyInstaller.building.datastruct import _TOCTuple
-    from PyInstaller.building.api import PYZ, EXE, COLLECT, BUNDLE
-
-
-PYZTypeCOLLECT: TypeAlias = "abc.Iterable[_TOCTuple] | PYZ"
-PYZTypeEXE: TypeAlias = "abc.Iterable[_TOCTuple] | PYZ | Splash"
+from constants import WORKING_DIR, DEFAULT_LANG
 
 
-# Simple configuration
-upx: bool = False  # Use UPX compression (reduces file size, may increase AV detections)
-console: bool = False  # True if you'd want to add a console window (useful for debugging)
-one_dir: bool = False  # True for one-dir, False for one-file
-optimize: int | None = None  # -1/None/0=none, 1=remove asserts, 2=also remove docstrings
-app_name: str = "Twitch Drops Miner (by DevilXD)"
+upx = False
+console = False
+one_dir = False
+optimize = None
+app_name = "Twitch Drops Miner (by DevilXD)"
 
+# Qt and the runtime locale/icon assets are the only application data needed by
+# the production launcher. PyInstaller's Qt hooks collect platform plugins.
+datas: list[tuple[str, str]] = []
+for path in (
+    WORKING_DIR / "icons" / "pickaxe.ico",
+    WORKING_DIR / "icons" / "active.ico",
+    WORKING_DIR / "icons" / "idle.ico",
+    WORKING_DIR / "icons" / "error.ico",
+    WORKING_DIR / "icons" / "maint.ico",
+):
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    datas.append((str(path), "icons"))
+brand_symbol = WORKING_DIR / "gui_qt" / "assets" / "drop_deck_brand.png"
+if not brand_symbol.exists():
+    raise FileNotFoundError(str(brand_symbol))
+datas.append((str(brand_symbol), "gui_qt/assets"))
+for path in (WORKING_DIR / "lang").glob("*.json"):
+    if path.stem != DEFAULT_LANG:
+        datas.append((str(path), "lang"))
 
-# (source_path, dest_path, required)
-to_add: list[tuple[Path, str, bool]] = [
-    # icon files
-    (Path("icons/pickaxe.ico"), "./icons", True),
-    (Path("icons/active.ico"), "./icons", True),
-    (Path("icons/idle.ico"), "./icons", True),
-    (Path("icons/error.ico"), "./icons", True),
-    (Path("icons/maint.ico"), "./icons", True),
-    # SeleniumWire HTTPS/SSL cert file and key
-    (Path(SITE_PACKAGES_PATH, "seleniumwire/ca.crt"), "./seleniumwire", False),
-    (Path(SITE_PACKAGES_PATH, "seleniumwire/ca.key"), "./seleniumwire", False),
+hiddenimports = [
+    "qasync",
+    "qtawesome",
+    "qtpy",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
 ]
-for lang_filepath in WORKING_DIR.joinpath("lang").glob("*.json"):
-    if lang_filepath.stem != DEFAULT_LANG:
-        to_add.append((lang_filepath, "lang", True))
+# Keep qasync's optional loop integrations discoverable in frozen builds.
+hiddenimports.extend(collect_submodules("qasync"))
 
-# Ensure the required to-be-added data exists
-datas: list[tuple[Path, str]] = []
-for source_path, dest_path, required in to_add:
-    if source_path.exists():
-        datas.append((source_path, dest_path))
-    elif required:
-        raise FileNotFoundError(str(source_path))
+# Some standalone Python distributions mark libpython's GNU_STACK segment as
+# executable. That flag is unnecessary for the embedded interpreter and can be
+# rejected by hardened Linux kernels when the one-file app starts. Patch only a
+# temporary copy, never the active interpreter installation.
+_original_python_library = bindepend.get_python_library_path
+_patched_python_library: str | None = None
 
-hooksconfig: dict[str, Any] = {}
-binaries: list[tuple[Path, str]] = []
-hiddenimports: list[str] = [
-    "PIL._tkinter_finder",
-    "setuptools._distutils.log",
-    "setuptools._distutils.dir_util",
-    "setuptools._distutils.file_util",
-    "setuptools._distutils.archive_util",
-]
 
-if sys.platform == "linux":
-    # Needed files for better system tray support on Linux via pystray (AppIndicator backend).
-    arch: str = platform.machine()
-    candidate_library_paths: list[Path] = [
-        Path(f"/usr/lib/{arch}-linux-gnu"),  # Debian/Ubuntu multiarch
-        Path("/usr/lib64"),  # Fedora/RHEL
-        Path("/usr/lib"),  # Arch and other single-dir distros
-    ]
-    for libraries_path in candidate_library_paths:
-        if (libraries_path / "libayatana-appindicator3.so.1").exists():
-            break
-    datas.append(
-        (libraries_path / "girepository-1.0/AyatanaAppIndicator3-0.1.typelib", "gi_typelibs")
-    )
-    binaries.append((libraries_path / "libayatana-appindicator3.so.1", "."))
+def _patch_python_library_stack(source: str) -> str:
+    global _patched_python_library
+    if _patched_python_library is not None or sys.platform != "linux":
+        return _patched_python_library or source
+    raw = bytearray(Path(source).read_bytes())
+    if raw[:4] != b"\x7fELF" or raw[4] not in (1, 2) or raw[5] not in (1, 2):
+        return source
+    order = "<" if raw[5] == 1 else ">"
+    if raw[4] == 2:
+        phoff = struct.unpack_from(f"{order}Q", raw, 32)[0]
+        phentsize = struct.unpack_from(f"{order}H", raw, 54)[0]
+        phnum = struct.unpack_from(f"{order}H", raw, 56)[0]
+        flags_offset = 4
+    else:
+        phoff = struct.unpack_from(f"{order}I", raw, 28)[0]
+        phentsize = struct.unpack_from(f"{order}H", raw, 42)[0]
+        phnum = struct.unpack_from(f"{order}H", raw, 44)[0]
+        flags_offset = 24
+    changed = False
+    for index in range(phnum):
+        entry = phoff + index * phentsize
+        p_type = struct.unpack_from(f"{order}I", raw, entry)[0]
+        if p_type != 0x6474E551:  # PT_GNU_STACK
+            continue
+        current = struct.unpack_from(f"{order}I", raw, entry + flags_offset)[0]
+        if current & 1:  # PF_X
+            struct.pack_into(f"{order}I", raw, entry + flags_offset, current & ~1)
+            changed = True
+    if not changed:
+        return source
+    directory = Path(tempfile.mkdtemp(prefix="tdm-libpython-"))
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    patched = directory / Path(source).name
+    patched.write_bytes(raw)
+    _patched_python_library = str(patched)
+    return _patched_python_library
 
-    hiddenimports.extend([
-        "gi.repository.Gtk",
-        "gi.repository.GObject",
-    ])
-    hooksconfig = {
-        "gi": {
-            "icons": [],
-            "themes": [],
-            "languages": ["en_US"]
-        }
-    }
 
-a = Analysis(
-    ["main.py"],
+def _get_python_library_path() -> str:
+    return _patch_python_library_stack(_original_python_library())
+
+
+bindepend.get_python_library_path = _get_python_library_path
+
+analysis = Analysis(
+    [str(WORKING_DIR / "main.py")],
+    pathex=[str(WORKING_DIR)],
     datas=datas,
-    binaries=binaries,
-    hooksconfig=hooksconfig,
+    binaries=[],
     hiddenimports=hiddenimports,
+    excludes=["pystray", "tkinter", "PIL.ImageTk"],
+    hooksconfig={},
 )
 
-# Exclude unneeded Linux libraries (supports globbing)
-excluded_binaries = [
+# Qt/PyInstaller already supplies the required platform plugins. Keep the
+# historical size exclusions that are safe for this application.
+excluded = [
     "libicudata.so.*",
     "libicuuc.so.*",
-    "librsvg-*.so.*"
+    "librsvg-*.so.*",
 ]
-a.binaries = [
-    b for b in a.binaries
-    if not any(fnmatch.fnmatch(b[0], pattern) for pattern in excluded_binaries)
-]
+if sys.platform == "linux":
+    # Image downloads are decoded by Pillow and converted to PNG before Qt
+    # consumes them; the optional TIFF plugin is not used by the application.
+    excluded.append("*libqtiff.so*")
+analysis.binaries = TOC(
+    item for item in analysis.binaries if not any(fnmatch.fnmatch(item[0], pattern) for pattern in excluded)
+)
+
 if one_dir:
-    exe_args: PYZTypeEXE = tuple()
-    collect_args: PYZTypeCOLLECT = (a.datas, a.binaries)
+    exe_args: tuple[Any, ...] = ()
+    collect_args: tuple[Any, ...] = (analysis.datas, analysis.binaries)
 else:
-    exe_args = (a.datas, a.binaries)
-    collect_args = tuple()
+    exe_args = (analysis.datas, analysis.binaries)
+    collect_args = ()
 
-pyz = PYZ(a.pure)
-try:
-    exe = EXE(
-        pyz,
-        a.scripts,
-        *exe_args,
-        upx=upx,
-        debug=False,
-        name=app_name,
-        console=console,
-        optimize=optimize,
-        exclude_binaries=one_dir,
-        icon="icons/pickaxe.ico",
-    )
-except PermissionError as exc:
-    exc_text: str = format_exc()
-    if any(t in exc_text for t in ("os.remove", "os.unlink")):
-        raise PermissionError("Ensure the executable isn't running when rebuilding.") from exc
-    raise
+pyz = PYZ(analysis.pure)
+exe = EXE(
+    pyz,
+    analysis.scripts,
+    *exe_args,
+    upx=upx,
+    debug=False,
+    name=app_name,
+    console=console,
+    optimize=optimize,
+    exclude_binaries=one_dir,
+    icon=str(WORKING_DIR / "icons" / "pickaxe.ico"),
+)
+
 if one_dir:
-    coll = COLLECT(
-        exe,
-        *collect_args,
-        upx=upx,
-        name=app_name,
-    )
+    coll = COLLECT(exe, *collect_args, upx=upx, name=app_name)
 
-# macOS bundle support
 if sys.platform == "darwin":
     source = coll if one_dir else exe
     app = BUNDLE(
         source,
-        name=f'{app_name}.app',
-        icon="icons/pickaxe.ico",
-        bundle_identifier='com.twitchdrops.miner',
+        name=f"{app_name}.app",
+        icon=str(WORKING_DIR / "icons" / "pickaxe.ico"),
+        bundle_identifier="com.twitchdrops.miner",
     )

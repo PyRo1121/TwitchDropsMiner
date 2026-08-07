@@ -1,14 +1,32 @@
 from __future__ import annotations
 
-from typing import Any, TypedDict, TYPE_CHECKING
+from typing import Any, TypedDict, Protocol
 
 from yarl import URL
 
 from utils import json_load, json_save
 from constants import SETTINGS_PATH, DEFAULT_LANG, PriorityMode
 
-if TYPE_CHECKING:
-    from main import ParsedArgs
+
+class CliArgs(Protocol):
+    """Structural shape of the parsed CLI args that Settings reads.
+
+    Satisfied by both the Tkinter ``main.ParsedArgs`` and the Qt
+    ``qt_main.ParsedArgs`` launchers.
+    """
+
+    log: bool
+    tray: bool
+    dump: bool
+
+    @property
+    def debug_ws(self) -> int: ...
+
+    @property
+    def debug_gql(self) -> int: ...
+
+    @property
+    def logging_level(self) -> int: ...
 
 
 class SettingsFile(TypedDict):
@@ -29,7 +47,7 @@ default_settings: SettingsFile = {
     "proxy": URL(),
     "priority": [],
     "exclude": set(),
-    "dark_mode": False,
+    "dark_mode": True,
     "autostart_tray": False,
     "connection_quality": 1,
     "language": DEFAULT_LANG,
@@ -64,9 +82,9 @@ class Settings:
 
     PASSTHROUGH = ("_settings", "_args", "_altered")
 
-    def __init__(self, args: ParsedArgs):
+    def __init__(self, args: CliArgs):
         self._settings: SettingsFile = json_load(SETTINGS_PATH, default_settings)
-        self._args: ParsedArgs = args
+        self._args: CliArgs = args
         self._altered: bool = False
 
     # default logic of reading settings is to check args first, then the settings file

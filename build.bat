@@ -13,21 +13,13 @@ if not exist "%dirpath%\env" (
     exit /b 1
 )
 
-REM Check if PyInstaller and pywin32 is installed in the virtual environment
+REM Check if PyInstaller is installed in the virtual environment
 if not exist "%dirpath%\env\scripts\pyinstaller.exe" (
     echo Installing PyInstaller...
     "%dirpath%\env\scripts\pip" install pyinstaller
     if errorlevel 1 (
         echo:
         echo Failed to install PyInstaller.
-        echo:
-        if not "%~1"=="--nopause" pause
-        exit /b 1
-    )
-    "%dirpath%\env\scripts\python" "%dirpath%\env\scripts\pywin32_postinstall.py" -install -silent
-    if errorlevel 1 (
-        echo:
-        echo Failed to run pywin32_postinstall.py.
         echo:
         if not "%~1"=="--nopause" pause
         exit /b 1
