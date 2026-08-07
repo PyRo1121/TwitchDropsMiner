@@ -5,7 +5,6 @@ import asyncio
 import logging
 from time import time
 from copy import deepcopy
-from itertools import chain
 from functools import partial
 from collections import abc, deque, OrderedDict
 from collections.abc import Callable
@@ -48,6 +47,7 @@ from utils import (
     remove_stale_new,
     safe_int,
     extract_available_drops,
+    merge_primary_json,
 )
 from constants import (
     CALL,
@@ -2229,49 +2229,12 @@ class Twitch:
             return orig_response
         raise RuntimeError("GraphQL retry loop was broken")
 
-    def _merge_lists(self, primary: list[Any], secondary: list[Any]) -> list[Any]:
-        """Merge detail lists by ID without losing viewer progress from inventory."""
-        if not primary:
-            return secondary
-        if not secondary:
-            return primary
-        if not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in primary):
-            return primary
-        if not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in secondary):
-            return primary
-        secondary_by_id = {item["id"]: item for item in secondary}
-        merged: list[Any] = []
-        for item in primary:
-            detail = secondary_by_id.pop(item["id"], None)
-            merged.append(self._merge_data(item, detail) if detail is not None else item)
-        merged.extend(secondary_by_id.values())
-        return merged
-
-    def _merge_data(self, primary_data: JsonType, secondary_data: JsonType) -> JsonType:
-        merged: JsonType = {}
-        for key in set(chain(primary_data.keys(), secondary_data.keys())):
-            in_primary = key in primary_data
-            if in_primary and key in secondary_data:
-                vp = primary_data[key]
-                vs = secondary_data[key]
-                if vp is None:
-                    merged[key] = vs
-                elif vs is None:
-                    merged[key] = vp
-                elif type(vp) is not type(vs):
-                    raise MinerException("Inconsistent merge data")
-                elif isinstance(vp, dict):
-                    merged[key] = self._merge_data(vp, vs)
-                elif isinstance(vp, list):
-                    merged[key] = self._merge_lists(vp, vs)
-                else:
-                    # Inventory is primary so its viewer-specific values win.
-                    merged[key] = vp
-            elif in_primary:
-                merged[key] = primary_data[key]
-            else:
-                merged[key] = secondary_data[key]
-        return merged
+    @staticmethod
+    def _merge_data(primary_data: JsonType, secondary_data: JsonType) -> JsonType:
+        try:
+            return merge_primary_json(primary_data, secondary_data)
+        except TypeError as exc:
+            raise MinerException(str(exc)) from exc
 
     async def fetch_campaigns(
         self, campaigns_chunk: list[tuple[str, JsonType]]
