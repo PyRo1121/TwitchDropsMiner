@@ -15,7 +15,6 @@ from PySide6.QtGui import QColor
 @dataclass(frozen=True)
 class Palette:
     bg: str
-    surface: str
     surface2: str
     surface3: str
     border: str
@@ -29,7 +28,6 @@ class Palette:
     error: str
     info: str
     idle: str
-    offline: str
 
     def rgb(self, name: str) -> tuple[int, int, int]:
         color = QColor(getattr(self, name))
@@ -40,7 +38,6 @@ class Palette:
 # without borrowing Twitch's purple as the primary brand color.
 DARK = Palette(
     bg="#0b0d14",
-    surface="#11141e",
     surface2="#171b2a",
     surface3="#20263a",
     border="rgba(232,236,255,0.13)",
@@ -54,12 +51,10 @@ DARK = Palette(
     error="#ff6f91",
     info="#8fc6ff",
     idle="#a1a9bd",
-    offline="#69728a",
 )
 
 LIGHT = Palette(
     bg="#f4f5f9",
-    surface="#ffffff",
     surface2="#eef0f7",
     surface3="#e1e5f0",
     border="rgba(22,27,44,0.16)",
@@ -73,7 +68,6 @@ LIGHT = Palette(
     error="#c14468",
     info="#2d6f9d",
     idle="#596178",
-    offline="#737d95",
 )
 
 
