@@ -13,7 +13,7 @@ class InventoryProgressTests(unittest.TestCase):
         drop = cast(Any, TimedDrop.__new__(TimedDrop))
         drop.real_current_minutes = 5
         drop.required_minutes = 10
-        drop.campaign = SimpleNamespace(_update_real_minutes=updates.append)
+        drop.campaign = SimpleNamespace(_bump_all_minutes=updates.append)
 
         drop.update_minutes(3)
         self.assertEqual(updates, [])

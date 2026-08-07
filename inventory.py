@@ -355,7 +355,7 @@ class TimedDrop(BaseDrop):
             return
         delta = min(new_minutes - self.real_current_minutes, self.required_minutes - self.real_current_minutes)
         if delta > 0:
-            self.campaign._update_real_minutes(delta)
+            self.campaign._bump_all_minutes(delta)
 
 
 class DropsCampaign:
@@ -505,7 +505,7 @@ class DropsCampaign:
         )
         return drops[0] if drops else None
 
-    def _update_real_minutes(self, delta: int) -> None:
+    def _bump_all_minutes(self, delta: int) -> None:
         for drop in self.drops:
             drop._update_real_minutes(delta)
 
