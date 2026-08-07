@@ -147,7 +147,7 @@ class Badge(QLabel):
             f"background:{bg}; color:{fg}; border-radius:0;"
             " font-size:9px; font-weight:700; letter-spacing:1px; padding:2px 8px;"
         )
-        self.setAlignment(getattr(Qt, "AlignCenter"))
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
 
 class Progress(QProgressBar):
@@ -225,8 +225,6 @@ class Metric(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         cap = QLabel(label.upper())
-        cap.setObjectName("eyebrow")
-        cap.setStyleSheet("color: transparent;")  # eyebrow style via objectName
         cap.setObjectName("subtle")
         cap.setStyleSheet("font-size:8pt; letter-spacing:1px;")
         self._value = QLabel(value)
@@ -274,18 +272,18 @@ class EmptyState(QWidget):
         lay.addStretch(1)
         t = QLabel(title)
         t.setObjectName("h2")
-        t.setAlignment(getattr(Qt, "AlignCenter"))
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         d = QLabel(desc)
         d.setObjectName("muted")
-        d.setAlignment(getattr(Qt, "AlignCenter"))
+        d.setAlignment(Qt.AlignmentFlag.AlignCenter)
         d.setWordWrap(True)
         d.setMaximumWidth(420)
         but = QPushButton(cta)
         but.setObjectName("primary")
-        but.setCursor(getattr(Qt, "PointingHandCursor"))
+        but.setCursor(Qt.CursorShape.PointingHandCursor)
         but.clicked.connect(self.action.emit)
-        lay.addWidget(t, 1, getattr(Qt, "AlignHCenter"))
-        lay.addWidget(d, 1, getattr(Qt, "AlignHCenter"))
+        lay.addWidget(t, 1, Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(d, 1, Qt.AlignmentFlag.AlignHCenter)
         box = QHBoxLayout()
         box.addStretch(1)
         box.addWidget(but)
