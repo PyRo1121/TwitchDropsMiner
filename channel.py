@@ -108,11 +108,6 @@ class Stream:
         self.drops_enabled = drops_enabled
         return self
 
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, self.__class__):
-            return self.broadcast_id == other.broadcast_id
-        return NotImplemented
-
 
 class Channel:
     __slots__ = (
