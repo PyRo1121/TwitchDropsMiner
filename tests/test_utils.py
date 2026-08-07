@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,37 @@ class JsonLoadTests(unittest.TestCase):
 
         self.assertEqual(second, defaults)
         self.assertEqual(defaults, {"priority": [], "exclude": set()})
+
+    def test_defaults_prune_unknown_keys_and_replace_wrong_types(self) -> None:
+        defaults = {
+            "nested": {"value": 1, "missing": True},
+            "items": ["default"],
+            "enabled": False,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "nested": {"value": 2, "obsolete": "remove"},
+                        "items": {"wrong": "type"},
+                        "unknown": "remove",
+                    }
+                ),
+                encoding="utf8",
+            )
+
+            loaded = json_load(path, defaults)
+
+        self.assertEqual(
+            loaded,
+            {
+                "nested": {"value": 2, "missing": True},
+                "items": ["default"],
+                "enabled": False,
+            },
+        )
 
     def test_json_save_replaces_without_leaving_temporary_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
