@@ -47,6 +47,7 @@ from utils import (
     atomic_write,
     remove_stale_new,
     safe_int,
+    extract_available_drops,
 )
 from constants import (
     CALL,
@@ -2606,11 +2607,9 @@ class Twitch:
                         except (KeyError, TypeError, ValueError):
                             logger.warning("Ignoring malformed available-drops response")
                             continue
-                        if isinstance(available_info, dict):
-                            campaigns = available_info.get("viewerDropCampaigns") or []
-                            acl_available_drops_map[channel_id] = (
-                                campaigns if isinstance(campaigns, list) else []
-                            )
+                        acl_available_drops_map[channel_id] = extract_available_drops(
+                            response_json
+                        )
             finally:
                 await cancel_tasks(available_gql_tasks)
         for channel in channels:

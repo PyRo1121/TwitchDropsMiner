@@ -343,6 +343,18 @@ def merge_json(obj: JsonType, template: Mapping[Any, Any]) -> None:
             obj[k] = template[k]
 
 
+def extract_available_drops(response: JsonType) -> list[JsonType]:
+    """Return viewer drop campaigns from an AvailableDrops response."""
+    try:
+        channel_data = response["data"]["channel"]
+    except (KeyError, TypeError):
+        return []
+    if not isinstance(channel_data, dict):
+        return []
+    campaigns = channel_data.get("viewerDropCampaigns") or []
+    return campaigns if isinstance(campaigns, list) else []
+
+
 def json_load(path: Path, defaults: _JSON_T, *, merge: bool = True) -> _JSON_T:
     new_path: Path = path.with_name(f"{path.name}.new")
     combined: JsonType | None = None

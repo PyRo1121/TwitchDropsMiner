@@ -12,7 +12,7 @@ import aiohttp
 from yarl import URL
 
 from game import Game
-from utils import json_minify, isonow
+from utils import extract_available_drops, json_minify, isonow
 from exceptions import ExitRequest, MinerException, ReloadRequest
 from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType
 
@@ -353,15 +353,7 @@ class Channel:
             except MinerException:
                 logger.log(CALL, f"AvailableDrops GQL call failed for channel: {self._login}")
             else:
-                try:
-                    channel_data = available_drops_campaigns["data"]["channel"]
-                    available_drops = (
-                        channel_data.get("viewerDropCampaigns") or []
-                        if isinstance(channel_data, dict)
-                        else []
-                    )
-                except (KeyError, TypeError):
-                    available_drops = []
+                available_drops = extract_available_drops(available_drops_campaigns)
                 stream.drops_enabled = self._check_drops_enabled(available_drops)
         return stream
 
