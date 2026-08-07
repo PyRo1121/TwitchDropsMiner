@@ -62,9 +62,6 @@ class _Channel:
         self.acl_based = False
         self.name = f"channel-{channel_id}"
 
-    async def send_watch(self) -> bool:
-        return False
-
 
 class DualWatchSelectionTests(unittest.TestCase):
     def test_current_drop_reconciliation_adopts_twitch_assignment(self) -> None:
