@@ -159,6 +159,9 @@ class Progress(QProgressBar):
         self.setTextVisible(False)
         self.setFixedHeight(6)
 
+    def set_fraction(self, value: float) -> None:
+        self.setValue(max(0, min(1000, round(value * 1000))))
+
 
 class SignalPulse(QWidget):
     """Compact telemetry glyph used in the status readout."""

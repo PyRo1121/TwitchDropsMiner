@@ -599,7 +599,7 @@ class DropRow(Card):
 
     def refresh(self) -> None:
         drop = self.drop
-        self._progress.setValue(max(0, min(1000, round(drop.progress * 1000))))
+        self._progress.set_fraction(drop.progress)
         if drop.is_claimed:
             self._status.setText(_("gui", "inventory", "status", "claimed"))
             self._status.setStyleSheet("color:#5fe1d3;")
@@ -719,7 +719,7 @@ class CampaignCard(Card):
             self.allowed.setText(
                 f'{_("gui", "inventory", "allowed_channels")} {_("gui", "inventory", "all_channels")}'
             )
-        self.progress.setValue(max(0, min(1000, round(c.progress * 1000))))
+        self.progress.set_fraction(c.progress)
         self.summary.setText(f"{c.progress:.1%} · {c.claimed_drops}/{c.total_drops} claimed")
         for row in self._drop_rows.values():
             row.refresh()
