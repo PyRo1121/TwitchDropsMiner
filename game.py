@@ -6,7 +6,6 @@ domain state and callers can import ``Game`` eagerly without pulling in utils.
 from __future__ import annotations
 
 import re
-from functools import cached_property
 
 from constants import JsonType
 
@@ -24,8 +23,7 @@ class Game:
             raise ValueError("Game data must contain a name")
         self.name: str = name
         slug = data.get("slug")
-        if isinstance(slug, str) and slug:
-            self.slug = slug
+        self.slug: str = slug if isinstance(slug, str) and slug else self._make_slug(name)
 
     def __str__(self) -> str:
         return self.name
@@ -41,13 +39,13 @@ class Game:
     def __hash__(self) -> int:
         return self.id
 
-    @cached_property
-    def slug(self) -> str:
+    @staticmethod
+    def _make_slug(name: str) -> str:
         """
         Converts the game name into a slug, useable for the GQL API.
         """
         # remove specific characters
-        slug_text = re.sub(r'\'', '', self.name.lower())
+        slug_text = re.sub(r'\'', '', name.lower())
         # remove non alpha-numeric characters
         slug_text = re.sub(r'\W+', '-', slug_text)
         # strip and collapse dashes
