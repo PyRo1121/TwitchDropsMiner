@@ -1560,9 +1560,6 @@ class Twitch:
         candidates.sort(key=lambda drop: (drop.remaining_minutes, drop.ends_at))
         return candidates
 
-    def _drop_for_channel(self, channel: Channel) -> TimedDrop | None:
-        return next(iter(self._eligible_drops_for_channel(channel)), None)
-
     def _select_watch_assignments(
         self, preferred: Channel | None = None
     ) -> list[tuple[Channel, TimedDrop]]:

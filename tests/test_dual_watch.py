@@ -522,16 +522,14 @@ class DualWatchSelectionTests(unittest.TestCase):
         miner.inventory = [campaign_a, campaign_b, campaign_a_same_game]
         miner.wanted_games = [game_a, game_b]
 
+        assignments = miner._select_watch_assignments(preferred=first)
         selected = miner._select_watch_channels(preferred=first)
 
         self.assertEqual([channel.id for channel in selected], [1, 2])
         self.assertEqual({channel.game for channel in selected}, {game_a, game_b})
-        selected_drop_ids = {
-            drop.id
-            for channel in selected
-            if (drop := miner._drop_for_channel(channel)) is not None
-        }
-        self.assertEqual(selected_drop_ids, {"drop-a", "drop-b"})
+        self.assertEqual(
+            {drop.id for _channel, drop in assignments}, {"drop-a", "drop-b"}
+        )
 
 
 if __name__ == "__main__":
