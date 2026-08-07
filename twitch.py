@@ -543,6 +543,79 @@ class _AuthState:
         cookie = jar.filter_cookies(client_info.CLIENT_URL)
         self.device_id = cookie["unique_id"].value
 
+    async def _authenticate_session(
+        self, client_info: ClientInfo, jar: aiohttp.CookieJar
+    ) -> None:
+        # looks like we're missing something
+        login_form: LoginForm = self._twitch.gui.login
+        logger.info("Checking login")
+        login_form.update(_("gui", "login", "logging_in"), None)
+        for client_mismatch_attempt in range(2):
+            for invalid_token_attempt in range(2):
+                cookie = jar.filter_cookies(client_info.CLIENT_URL)
+                if "auth-token" not in cookie:
+                    refresh_token = self._oauth_tokens.load(client_info.CLIENT_ID)
+                    if refresh_token is not None:
+                        logger.info("Refreshing Twitch OAuth session")
+                        refreshed_token = await self._refresh_access_token(
+                            client_info, refresh_token
+                        )
+                    else:
+                        refreshed_token = None
+                    if refreshed_token is None:
+                        if refresh_token is not None:
+                            logger.info("Stored Twitch refresh token is invalid")
+                            self._clear_refresh_token()
+                        self.access_token = await self._oauth_login()
+                    else:
+                        self.access_token = refreshed_token
+                    cookie["auth-token"] = self.access_token
+                elif not hasattr(self, "access_token"):
+                    logger.info("Restoring session from cookie")
+                    self.access_token = cookie["auth-token"].value
+                # validate the auth token, by obtaining user_id
+                async with self._twitch.request(
+                    "GET",
+                    "https://id.twitch.tv/oauth2/validate",
+                    headers={"Authorization": f"OAuth {self.access_token}"}
+                ) as response:
+                    if response.status == 401:
+                        # the access token we have is invalid - clear the cookie and reauth
+                        logger.info("Restored session is invalid")
+                        assert client_info.CLIENT_URL.host is not None
+                        jar.clear_domain(client_info.CLIENT_URL.host)
+                        continue
+                    elif response.status == 200:
+                        try:
+                            validate_response = await response.json(loads=SAFE_LOADS)
+                        except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
+                            raise RuntimeError("Login validation returned invalid JSON") from exc
+                        if not isinstance(validate_response, dict):
+                            raise RuntimeError("Login validation returned malformed data")
+                        break
+            else:
+                raise RuntimeError("Login verification failure (step #2)")
+            # ensure the cookie's client ID matches the currently selected client
+            if validate_response.get("client_id") == client_info.CLIENT_ID:
+                break
+            # otherwise, we need to delete the entire cookie file and clear the jar
+            logger.info("Cookie client ID mismatch")
+            jar.clear()
+            remove_stale_new(COOKIES_PATH)
+            self._clear_refresh_token()
+        else:
+            raise RuntimeError("Login verification failure (step #1)")
+        try:
+            self.user_id = int(validate_response["user_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Login verification returned an invalid user ID") from exc
+        cookie["persistent"] = str(self.user_id)
+        logger.info(f"Login successful, user ID: {self.user_id}")
+        login_form.update(_("gui", "login", "logged_in"), self.user_id)
+        # update our cookie and save it atomically
+        jar.update_cookies(cookie, client_info.CLIENT_URL)
+        self._twitch._save_cookie_jar(jar, COOKIES_PATH)
+
     async def _validate(self):
         if not hasattr(self, "session_id"):
             self.session_id = create_nonce(CHARS_HEX_LOWER, 16)
@@ -574,75 +647,7 @@ class _AuthState:
         if not self._hasattrs("access_token", "user_id"):
             if jar is None:
                 raise RuntimeError("Authentication cookie jar is unavailable")
-            # looks like we're missing something
-            login_form: LoginForm = self._twitch.gui.login
-            logger.info("Checking login")
-            login_form.update(_("gui", "login", "logging_in"), None)
-            for client_mismatch_attempt in range(2):
-                for invalid_token_attempt in range(2):
-                    cookie = jar.filter_cookies(client_info.CLIENT_URL)
-                    if "auth-token" not in cookie:
-                        refresh_token = self._oauth_tokens.load(client_info.CLIENT_ID)
-                        if refresh_token is not None:
-                            logger.info("Refreshing Twitch OAuth session")
-                            refreshed_token = await self._refresh_access_token(
-                                client_info, refresh_token
-                            )
-                        else:
-                            refreshed_token = None
-                        if refreshed_token is None:
-                            if refresh_token is not None:
-                                logger.info("Stored Twitch refresh token is invalid")
-                                self._clear_refresh_token()
-                            self.access_token = await self._oauth_login()
-                        else:
-                            self.access_token = refreshed_token
-                        cookie["auth-token"] = self.access_token
-                    elif not hasattr(self, "access_token"):
-                        logger.info("Restoring session from cookie")
-                        self.access_token = cookie["auth-token"].value
-                    # validate the auth token, by obtaining user_id
-                    async with self._twitch.request(
-                        "GET",
-                        "https://id.twitch.tv/oauth2/validate",
-                        headers={"Authorization": f"OAuth {self.access_token}"}
-                    ) as response:
-                        if response.status == 401:
-                            # the access token we have is invalid - clear the cookie and reauth
-                            logger.info("Restored session is invalid")
-                            assert client_info.CLIENT_URL.host is not None
-                            jar.clear_domain(client_info.CLIENT_URL.host)
-                            continue
-                        elif response.status == 200:
-                            try:
-                                validate_response = await response.json(loads=SAFE_LOADS)
-                            except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-                                raise RuntimeError("Login validation returned invalid JSON") from exc
-                            if not isinstance(validate_response, dict):
-                                raise RuntimeError("Login validation returned malformed data")
-                            break
-                else:
-                    raise RuntimeError("Login verification failure (step #2)")
-                # ensure the cookie's client ID matches the currently selected client
-                if validate_response.get("client_id") == client_info.CLIENT_ID:
-                    break
-                # otherwise, we need to delete the entire cookie file and clear the jar
-                logger.info("Cookie client ID mismatch")
-                jar.clear()
-                remove_stale_new(COOKIES_PATH)
-                self._clear_refresh_token()
-            else:
-                raise RuntimeError("Login verification failure (step #1)")
-            try:
-                self.user_id = int(validate_response["user_id"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise RuntimeError("Login verification returned an invalid user ID") from exc
-            cookie["persistent"] = str(self.user_id)
-            logger.info(f"Login successful, user ID: {self.user_id}")
-            login_form.update(_("gui", "login", "logged_in"), self.user_id)
-            # update our cookie and save it atomically
-            jar.update_cookies(cookie, client_info.CLIENT_URL)
-            self._twitch._save_cookie_jar(jar, COOKIES_PATH)
+            await self._authenticate_session(client_info, jar)
         self._twitch.gui.help._invalidate_button.config(state="normal")
         self._last_validated = datetime.now(timezone.utc)
         self._logged_in.set()
