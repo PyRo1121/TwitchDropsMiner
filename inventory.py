@@ -129,23 +129,26 @@ class BaseDrop:
             if isinstance(precondition_id, str):
                 self.precondition_drops.append(precondition_id)
 
-    def __repr__(self) -> str:
+    def _state_suffix(self) -> str:
         if self.is_claimed:
-            additional = ", claimed=True"
-        elif self.can_earn():
-            additional = ", can_earn=True"
-        else:
-            additional = ''
-        return f"Drop({self.rewards_text()}{additional})"
+            return ", claimed=True"
+        if self.can_earn():
+            return ", can_earn=True"
+        return ""
+
+    def __repr__(self) -> str:
+        return f"Drop({self.rewards_text()}{self._state_suffix()})"
+
+    def _preconditions(self) -> list[TimedDrop]:
+        return [
+            precondition
+            for pid in self.precondition_drops
+            if (precondition := self.campaign.timed_drops.get(pid)) is not None
+        ]
 
     @property
     def preconditions_met(self) -> bool:
-        campaign = self.campaign
-        return all(
-            (precondition := campaign.timed_drops.get(pid)) is not None
-            and precondition.is_claimed
-            for pid in self.precondition_drops
-        )
+        return all(precondition.is_claimed for precondition in self._preconditions())
 
     def _on_state_changed(self) -> None:
         raise NotImplementedError
@@ -278,17 +281,11 @@ class TimedDrop(BaseDrop):
             self.real_current_minutes = self.required_minutes
 
     def __repr__(self) -> str:
-        if self.is_claimed:
-            additional = ", claimed=True"
-        elif self.can_earn():
-            additional = ", can_earn=True"
-        else:
-            additional = ''
         if 0 < self.current_minutes < self.required_minutes:
             minutes = f", {self.current_minutes}/{self.required_minutes}"
         else:
-            minutes = ''
-        return f"Drop({self.rewards_text()}{minutes}{additional})"
+            minutes = ""
+        return f"Drop({self.rewards_text()}{minutes}{self._state_suffix()})"
 
     @property
     def current_minutes(self) -> int:
@@ -301,22 +298,14 @@ class TimedDrop(BaseDrop):
     @property
     def total_required_minutes(self) -> int:
         return self.required_minutes + max(
-            (
-                precondition.total_required_minutes
-                for pid in self.precondition_drops
-                if (precondition := self.campaign.timed_drops.get(pid)) is not None
-            ),
+            (precondition.total_required_minutes for precondition in self._preconditions()),
             default=0,
         )
 
     @property
     def total_remaining_minutes(self) -> int:
         return self.remaining_minutes + max(
-            (
-                precondition.total_remaining_minutes
-                for pid in self.precondition_drops
-                if (precondition := self.campaign.timed_drops.get(pid)) is not None
-            ),
+            (precondition.total_remaining_minutes for precondition in self._preconditions()),
             default=0,
         )
 
