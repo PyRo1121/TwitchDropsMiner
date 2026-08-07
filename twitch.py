@@ -885,14 +885,8 @@ class Twitch:
         self.change_state(State.INVENTORY_FETCH)
         while True:
             if self._state is State.IDLE:
-                if self.settings.dump:
-                    self.gui.close()
+                if self._handle_idle_state():
                     continue
-                self.gui.tray.change_icon("idle")
-                self.gui.status.update(_("gui", "status", "idle"))
-                self.stop_watching()
-                # clear the flag and wait until it's set again
-                self._state_change.clear()
             elif self._state is State.INVENTORY_FETCH:
                 await self._fetch_inventory_state()
             elif self._state is State.GAMES_UPDATE:
@@ -989,6 +983,17 @@ class Twitch:
                 # we've been requested to exit the application
                 break
             await self._state_change.wait()
+
+    def _handle_idle_state(self) -> bool:
+        if self.settings.dump:
+            self.gui.close()
+            return True
+        self.gui.tray.change_icon("idle")
+        self.gui.status.update(_("gui", "status", "idle"))
+        self.stop_watching()
+        # clear the flag and wait until it's set again
+        self._state_change.clear()
+        return False
 
     async def _fetch_inventory_state(self) -> None:
         self.gui.tray.change_icon("maint")
