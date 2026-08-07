@@ -1,6 +1,6 @@
-##############################
-# Twitch Drops Farmer (fork) #
-##############################
+##################################
+# Twitch Drops Miner V2 (fork) #
+##################################
 
 Available command line arguments:
 

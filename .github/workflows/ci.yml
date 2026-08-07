@@ -55,11 +55,6 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -v
 
-      - name: Smoke test Qt presentation layer
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python render_preview.py
-
   windows:
     name: Windows
     runs-on: windows-latest

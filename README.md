@@ -1,6 +1,6 @@
-# Twitch Drops Farmer
+# Twitch Drops Miner
 
-**Twitch Drops Farmer** is a maintained fork of *Twitch Drops Miner* with a modern Qt dashboard. It lets you AFK mine timed Twitch drops without having to worry about switching channels when the one you were watching goes offline, claiming the drops, or even receiving the stream data itself. This helps you save on bandwidth and hassle.
+**Twitch Drops Miner V2** is a maintained fork of *Twitch Drops Miner* (upstream by [@DevilXD](https://github.com/DevilXD)) rewritten around a modern Qt dashboard. It lets you AFK mine timed Twitch drops without having to worry about switching channels when the one you were watching goes offline, claiming the drops, or even receiving the stream data itself. This helps you save on bandwidth and hassle.
 
 |  |  |
 |--|--|
@@ -9,7 +9,7 @@
 
 ### Play
 
-Ready to start farming? The quickest path to playing is cloning this repo and running from source:
+Ready to start mining? The quickest path to playing is cloning this repo and running from source:
 
 ```bash
 git clone https://github.com/PyRo1121/TwitchDropsMiner.git
@@ -23,7 +23,7 @@ Then, inside the app:
 
 1. Log in / connect with the in-app login form.
 2. On the **Settings** tab, add the games you want to farm to the **Priority List**.
-3. Press **Reload** — the farmer finds eligible live channels and starts mining automatically.
+3. Press **Reload** — the miner finds eligible live channels and starts mining automatically.
 
 See **Usage** below for details. Prebuilt releases (when published) will live on the fork's [Releases](https://github.com/PyRo1121/TwitchDropsMiner/releases) page.
 
@@ -42,15 +42,15 @@ About once per minute, the application sends the same lightweight viewer-presenc
 - Automatic channel stream switching, when a watched channel goes offline, as well as when a channel streaming a higher priority game goes online.
 - Login session is saved in a cookies file, so you don't need to login every time.
 - Mining is automatically started as new campaigns appear, and stopped when the last available drops have been mined.
-- The Qt dashboard surfaces the active game's artwork, campaign/drop progress, current channel, session metrics, and a plain-language explanation when the farmer is idle.
+- The Qt dashboard surfaces the active game's artwork, campaign/drop progress, current channel, session metrics, and a plain-language explanation when the miner is idle.
 - Optional Steam enrichment provides current player count, US store pricing when available, and direct Steam/SteamDB links; it is cached and never affects Twitch channel selection.
 
 ### Usage
 
 - Download and unzip [the latest release](https://github.com/PyRo1121/TwitchDropsMiner/releases) - it's recommended to keep it in the folder it comes in.
-- Run it and login/connect the farmer to your Twitch account by using the in-app login form.
+- Run it and login/connect the miner to your Twitch account by using the in-app login form.
 - After a successful login, the app should fetch a list of all available campaigns and games you can mine drops for - you can then select and add games of choice to the Priority List available on the Settings tab, and then press on the `Reload` button to start processing. It will fetch a list of all applicable streams it can watch, and start mining right away. You can also manually switch to a different channel as needed.
-- If you wish to keep the farmer occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
+- If you wish to keep the miner occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
 - Make sure to link your Twitch account to game accounts on the [campaigns page](https://www.twitch.tv/drops/campaigns), to enable more games to be mined.
 
 ### Pictures
@@ -62,7 +62,7 @@ About once per minute, the application sends the same lightweight viewer-presenc
 ### Notes
 
 > [!WARNING]
-> Due to how Twitch handles the drop progression on their side, watching a stream in the browser (or by any other means) on the same account that is actively being used by the farmer, will usually cause the farmer to misbehave, reporting false progress and getting stuck mining the current drop.
+> Due to how Twitch handles the drop progression on their side, watching a stream in the browser (or by any other means) on the same account that is actively being used by the miner, will usually cause the miner to misbehave, reporting false progress and getting stuck mining the current drop.
 >
 > Using the same account to watch other streams during mining is thus discouraged, in order to avoid any problems arising from it.
 
@@ -70,10 +70,10 @@ About once per minute, the application sends the same lightweight viewer-presenc
 > Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens (when Twitch returns one) are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account, even without the password.
 
 > [!IMPORTANT]
-> Successfully logging into your Twitch account in the application may cause Twitch to send you a "New Login" notification email. This is normal - you can verify that it comes from your own IP address. The detected browser during the login will be "Chrome", as that's what the farmer currently presents itself to the Twitch server.
+> Successfully logging into your Twitch account in the application may cause Twitch to send you a "New Login" notification email. This is normal - you can verify that it comes from your own IP address. The detected browser during the login will be "Chrome", as that's what the miner currently presents itself to the Twitch server.
 
 > [!NOTE]
-> The time remaining timer is a presentation estimate for the primary target. Authoritative progress comes from Twitch's PubSub drop events or the assigned target's `CurrentDrop` response; the farmer does not fabricate progress when Twitch does not acknowledge it. With two targets, the secondary target is reconciled independently and does not replace the primary hero display.
+> The time remaining timer is a presentation estimate for the primary target. Authoritative progress comes from Twitch's PubSub drop events or the assigned target's `CurrentDrop` response; the miner does not fabricate progress when Twitch does not acknowledge it. With two targets, the secondary target is reconciled independently and does not replace the primary hero display.
 
 > [!NOTE]
 > The source code requires Python 3.10 or higher to run.
@@ -106,7 +106,7 @@ If you'd be interested in running the latest master from source or building your
 
 ### Support
 
-If you'd encounter any issues with the farmer:
+If you'd encounter any issues with the miner:
 
 - Please see the [troubleshooting page](https://github.com/DevilXD/TwitchDropsMiner/wiki/Troubleshooting) from the upstream project for some common issues and their explanation.
 - Please [search the issues page](https://github.com/PyRo1121/TwitchDropsMiner/issues?q=sort%3Aupdated-desc%20is%3Aissue) to see if your issue on the fork hasn't been reported yet.
