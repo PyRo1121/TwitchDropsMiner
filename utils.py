@@ -223,6 +223,14 @@ def safe_int(value: Any) -> int | None:
         return None
 
 
+def require_int(value: Any, message: str) -> int:
+    """Parse an int or raise ``ValueError`` with the caller's context."""
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(message) from exc
+
+
 def _handle_task_exception(
     exc: BaseException,
     task_name: str,

@@ -12,7 +12,7 @@ import aiohttp
 from yarl import URL
 
 from game import Game
-from utils import extract_available_drops, json_minify, isonow
+from utils import extract_available_drops, json_minify, isonow, require_int
 from exceptions import ExitRequest, MinerException, ReloadRequest
 from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType
 
@@ -35,14 +35,10 @@ class Stream:
         title: str,
     ):
         self.channel: Channel = channel
-        try:
-            self.broadcast_id = int(id)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid broadcast id: {id!r}") from exc
-        try:
-            self.viewers = int(viewers)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Stream data must contain an integer viewer count") from exc
+        self.broadcast_id = require_int(id, f"Invalid broadcast id: {id!r}")
+        self.viewers = require_int(
+            viewers, "Stream data must contain an integer viewer count"
+        )
         self.drops_enabled: bool = not channel._twitch.settings.available_drops_check
         if game is not None and not isinstance(game, dict):
             raise ValueError("Stream game data is invalid")
@@ -135,10 +131,7 @@ class Channel:
     ):
         self._twitch: Twitch = twitch
         self._gui_channels: Any = twitch.gui.channels
-        try:
-            self.id = int(id)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid channel id: {id!r}") from exc
+        self.id = require_int(id, f"Invalid channel id: {id!r}")
         if not isinstance(login, str) or not login:
             raise ValueError("Channel data must contain a login")
         self._login = login
