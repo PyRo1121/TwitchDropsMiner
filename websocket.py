@@ -73,10 +73,6 @@ class Websocket:
         # notify GUI
         self.set_status(_("gui", "websocket", "disconnected"))
 
-    @property
-    def connected(self) -> bool:
-        return self._ws.has_value()
-
     def wait_until_connected(self):
         return self._ws.wait()
 
