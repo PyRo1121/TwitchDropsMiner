@@ -18,7 +18,7 @@ from urllib.parse import quote_plus
 from yarl import URL
 
 from constants import CACHE_PATH
-from utils import json_load, json_save
+from utils import json_load, json_save, safe_int
 
 logger = logging.getLogger("TwitchDrops.ui")
 
@@ -124,20 +124,14 @@ class SteamMetadataProvider:
 
     @staticmethod
     def _from_cache(raw: dict[str, Any], name: str) -> SteamMetadata:
-        def optional_int(value: Any) -> int | None:
-            try:
-                return int(value) if value is not None else None
-            except (TypeError, ValueError):
-                return None
-
         return SteamMetadata(
             game_name=name,
-            app_id=optional_int(raw.get("app_id")),
+            app_id=safe_int(raw.get("app_id")),
             matched_name=raw.get("matched_name"),
-            players=optional_int(raw.get("players")),
+            players=safe_int(raw.get("players")),
             price=raw.get("price"),
             free_to_play=raw.get("free_to_play"),
-            discount_percent=optional_int(raw.get("discount_percent")),
+            discount_percent=safe_int(raw.get("discount_percent")),
             error=raw.get("error"),
             updated_at=float(raw["updated_at"]),
         )
@@ -218,10 +212,7 @@ class SteamMetadataProvider:
 
     @staticmethod
     def _int(value: Any) -> int | None:
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
+        return safe_int(value)
 
     @classmethod
     def _price(cls, value: Any) -> tuple[str | None, int | None]:

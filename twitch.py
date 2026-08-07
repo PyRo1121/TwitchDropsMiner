@@ -110,7 +110,6 @@ class _AuthState:
         self.device_id: str
         self.session_id: str
         self.access_token: str
-        self.client_version: str
 
     def _hasattrs(self, *attrs: str) -> bool:
         return all(hasattr(self, attr) for attr in attrs)
@@ -145,7 +144,6 @@ class _AuthState:
             "device_id",
             "session_id",
             "access_token",
-            "client_version",
         )
         self._last_validated = None
         self._logged_in.clear()
@@ -349,7 +347,6 @@ class _AuthState:
         client_info: ClientInfo = self._twitch._client_type
 
         token_kind: str = ''
-        use_chrome: bool = False
         payload: JsonType = {
             # username and password are added later
             # "username": str,
@@ -416,8 +413,7 @@ class _AuthState:
                 logger.info(f"Login error code: {error_code}")
                 if error_code == 1000:
                     logger.info("1000: CAPTCHA is required")
-                    use_chrome = True
-                    break
+                    raise CaptchaRequired()
                 elif error_code in (2004, 3001):
                     logger.info("3001: Login failed due to incorrect username or password")
                     gui_print(_("login", "incorrect_login_pass"))
@@ -468,8 +464,7 @@ class _AuthState:
                     # }
                     gui_print(_("login", "error_code").format(error_code=error_code))
                     logger.info("Login response: %s", redact_log_value(login_response))
-                    use_chrome = True
-                    break
+                    raise CaptchaRequired()
                 else:
                     ext_msg = str(redact_log_value(login_response))
                     logger.info("Login response: %s", ext_msg)
@@ -483,10 +478,6 @@ class _AuthState:
                 logger.info("Access token granted")
                 login_form.clear()
                 break
-
-        if use_chrome:
-            # await self._chrome_login()
-            raise CaptchaRequired()
 
         if hasattr(self, "access_token"):
             return self.access_token
@@ -506,8 +497,6 @@ class _AuthState:
             headers["User-Agent"] = user_agent
         if hasattr(self, "session_id"):
             headers["Client-Session-Id"] = self.session_id
-        # if hasattr(self, "client_version"):
-            # headers["Client-Version"] = self.client_version
         if hasattr(self, "device_id"):
             headers["X-Device-Id"] = self.device_id
         if gql:
@@ -575,10 +564,6 @@ class _AuthState:
             ) as response:
                 page_html = await response.text("utf8")
                 assert page_html is not None
-            #     match = re.search(r'twilightBuildID="([-a-z0-9]+)"', page_html)
-            # if match is None:
-            #     raise MinerException("Unable to extract client_version")
-            # self.client_version = match.group(1)
             # doing the request ends up setting the "unique_id" value in the cookie
             cookie = jar.filter_cookies(client_info.CLIENT_URL)
             self.device_id = cookie["unique_id"].value

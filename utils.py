@@ -17,7 +17,7 @@ from pathlib import Path
 from contextlib import suppress
 from functools import cached_property
 from datetime import datetime, timezone
-from collections import abc, OrderedDict
+from collections import abc
 from typing import Any, Literal, Callable, Generic, Mapping, TypeVar, ParamSpec, cast
 
 from yarl import URL
@@ -46,16 +46,6 @@ async def cancel_tasks(tasks: abc.Iterable[asyncio.Task[Any]]) -> None:
             task.cancel()
     if task_list:
         await asyncio.gather(*task_list, return_exceptions=True)
-
-
-async def first_to_complete(coros: abc.Iterable[abc.Coroutine[Any, Any, _T]]) -> _T:
-    # In Python 3.11, we need to explicitly wrap awaitables
-    tasks = [asyncio.ensure_future(coro) for coro in coros]
-    done: set[asyncio.Task[Any]]
-    pending: set[asyncio.Task[Any]]
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    await cancel_tasks(pending)
-    return await next(iter(done))
 
 
 def chunk(to_chunk: abc.Iterable[_T], chunk_length: int) -> abc.Generator[list[_T], None, None]:
@@ -221,15 +211,18 @@ def isonow() -> str:
 
 CHARS_ASCII = string.ascii_letters + string.digits
 CHARS_HEX_LOWER = string.digits + "abcdef"
-CHARS_HEX_UPPER = string.digits + "ABCDEF"
 
 
 def create_nonce(chars: str, length: int) -> str:
     return ''.join(random.choices(chars, k=length))
 
 
-def deduplicate(iterable: abc.Iterable[_T]) -> list[_T]:
-    return list(OrderedDict.fromkeys(iterable).keys())
+def safe_int(value: Any) -> int | None:
+    """Parse an int, returning None on missing or non-integer input."""
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _handle_task_exception(
@@ -274,15 +267,6 @@ def task_wrapper(
     if afunc is None:
         return decorator
     return decorator(afunc)
-
-
-def invalidate_cache(instance, *attrnames):
-    """
-    To be used to invalidate `functools.cached_property`.
-    """
-    for name in attrnames:
-        with suppress(AttributeError):
-            delattr(instance, name)
 
 
 def _serialize(obj: Any) -> Any:
