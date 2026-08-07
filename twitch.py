@@ -91,8 +91,6 @@ def safe_loads(s: str) -> Any:
         raise ValueError("Invalid JSON response") from exc
 
 
-SAFE_LOADS = safe_loads
-
 
 def _open_dump(mode: Literal["w", "a"]) -> Any:
     try:
@@ -190,7 +188,7 @@ class _AuthState:
                     f"OAuth refresh failed (HTTP {response.status})"
                 )
             try:
-                response_json: JsonType = await response.json(loads=SAFE_LOADS)
+                response_json: JsonType = await response.json(loads=safe_loads)
             except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
                 raise RuntimeError("OAuth refresh returned invalid data") from exc
             if not isinstance(response_json, dict):
@@ -233,7 +231,7 @@ class _AuthState:
                     #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
                     # }
                     try:
-                        response_json: Any = await response.json(loads=SAFE_LOADS)
+                        response_json: Any = await response.json(loads=safe_loads)
                     except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
                         raise LoginException("OAuth device response was not valid JSON") from exc
                     if not isinstance(response_json, dict):
@@ -278,7 +276,7 @@ class _AuthState:
                     ) as response:
                         if response.status == 200:
                             try:
-                                response_json = await response.json(loads=SAFE_LOADS)
+                                response_json = await response.json(loads=safe_loads)
                             except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
                                 raise LoginException("OAuth token response was not valid JSON") from exc
                             if not isinstance(response_json, dict):
@@ -308,7 +306,7 @@ class _AuthState:
                             self.access_token = access_token
                             return self.access_token
                         try:
-                            response_json = await response.json(loads=SAFE_LOADS)
+                            response_json = await response.json(loads=safe_loads)
                         except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError):
                             response_json = {}
                         if not isinstance(response_json, dict):
@@ -346,7 +344,7 @@ class _AuthState:
             "POST", "https://passport.twitch.tv/login", headers=headers, json=payload
         ) as response:
             try:
-                login_response: Any = await response.json(loads=SAFE_LOADS)
+                login_response: Any = await response.json(loads=safe_loads)
             except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
                 raise LoginException("Twitch login response was not valid JSON") from exc
         if not isinstance(login_response, dict):
@@ -527,7 +525,7 @@ class _AuthState:
                     f"Token validation failed (HTTP {response.status})"
                 )
             try:
-                payload: JsonType = await response.json(loads=SAFE_LOADS)
+                payload: JsonType = await response.json(loads=safe_loads)
                 validated_user_id = int(payload["user_id"])
                 validated_client_id = str(payload["client_id"])
             except (KeyError, TypeError, ValueError, aiohttp.ContentTypeError) as exc:
@@ -611,7 +609,7 @@ class _AuthState:
                         continue
                     elif response.status == 200:
                         try:
-                            validate_response = await response.json(loads=SAFE_LOADS)
+                            validate_response = await response.json(loads=safe_loads)
                         except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
                             raise RuntimeError("Login validation returned invalid JSON") from exc
                         if not isinstance(validate_response, dict):
@@ -2151,7 +2149,7 @@ class Twitch:
                         self._auth_state.invalidate()
                         raise LoginException("Twitch rejected the GraphQL access token")
                     try:
-                        response_json: Any = await response.json(loads=SAFE_LOADS)
+                        response_json: Any = await response.json(loads=safe_loads)
                     except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
                         raise RequestException("Twitch GraphQL returned invalid JSON") from exc
                     if response.status >= 400:
