@@ -543,6 +543,24 @@ class _AuthState:
         cookie = jar.filter_cookies(client_info.CLIENT_URL)
         self.device_id = cookie["unique_id"].value
 
+    async def _reuse_valid_session(
+        self, client_info: ClientInfo, now: datetime
+    ) -> bool:
+        if not self._hasattrs("access_token", "user_id"):
+            return False
+        if (
+            self._last_validated is not None
+            and now - self._last_validated < AUTH_VALIDATION_INTERVAL
+        ):
+            self._logged_in.set()
+            return True
+        if await self._validate_access_token(client_info):
+            self._last_validated = now
+            self._logged_in.set()
+            return True
+        self.invalidate(delete_cookies=True)
+        return False
+
     async def _authenticate_session(
         self, client_info: ClientInfo, jar: aiohttp.CookieJar
     ) -> None:
@@ -621,18 +639,8 @@ class _AuthState:
             self.session_id = create_nonce(CHARS_HEX_LOWER, 16)
         client_info: ClientInfo = self._twitch._client_type
         now = datetime.now(timezone.utc)
-        if self._hasattrs("access_token", "user_id"):
-            if (
-                self._last_validated is not None
-                and now - self._last_validated < AUTH_VALIDATION_INTERVAL
-            ):
-                self._logged_in.set()
-                return
-            if await self._validate_access_token(client_info):
-                self._last_validated = now
-                self._logged_in.set()
-                return
-            self.invalidate(delete_cookies=True)
+        if await self._reuse_valid_session(client_info, now):
+            return
         jar: aiohttp.CookieJar | None = None
         if (
             not self._hasattrs("device_id")
