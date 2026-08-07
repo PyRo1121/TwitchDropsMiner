@@ -129,7 +129,7 @@ class _AuthState:
 
     def _delattrs(self, *attrs: str) -> None:
         for attr in attrs:
-            if hasattr(self, attr):
+            with suppress(AttributeError):
                 delattr(self, attr)
 
     def invalidate(
