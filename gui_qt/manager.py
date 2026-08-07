@@ -763,10 +763,6 @@ class QtGUIManager(QMainWindow):
         finally:
             self._closing = False
 
-    def unfocus(self, *_: Any) -> None:
-        self.channels.clear_selection()
-        self.settings.clear_selection()
-
     def save(self, *, force: bool = False) -> None:
         self._steam_metadata.save(force=force)
         self._image_cache.save(force=force)
