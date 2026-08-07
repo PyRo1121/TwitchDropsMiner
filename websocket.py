@@ -363,7 +363,7 @@ class Websocket:
         # listen over 0.5s for incoming messages
         messages: list[JsonType] = []
         with suppress(asyncio.TimeoutError):
-            await self._gather_recv(messages, timeout=WS_RECV_WINDOW)
+            await self._gather_recv(messages)
         # process them
         for message in messages:
             msg_type = message.get("type")
