@@ -46,6 +46,7 @@ from utils import (
     redact_log_value,
     atomic_write,
     remove_stale_new,
+    safe_int,
 )
 from constants import (
     CALL,
@@ -2001,14 +2002,8 @@ class Twitch:
     def _record_rate_limit(self, response: aiohttp.ClientResponse) -> None:
         remaining = response.headers.get("Ratelimit-Remaining")
         reset = response.headers.get("Ratelimit-Reset")
-        try:
-            self._rate_limit_remaining = int(remaining) if remaining is not None else None
-        except ValueError:
-            self._rate_limit_remaining = None
-        try:
-            reset_timestamp = int(reset) if reset is not None else None
-        except ValueError:
-            reset_timestamp = None
+        self._rate_limit_remaining = safe_int(remaining)
+        reset_timestamp = safe_int(reset)
         self._rate_limit_reset = (
             datetime.fromtimestamp(reset_timestamp, timezone.utc)
             if reset_timestamp is not None
