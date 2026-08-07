@@ -3,8 +3,8 @@ aiohttp>=3.9,<4.0
 yarl>=1.9
 truststore
 
-# Qt presentation layer
-PySide6>=6.6
-qasync>=0.27
+# Qt presentation layer; CI validates the latest release within these major bounds.
+PySide6>=6.6,<7.0
+qasync>=0.27,<1.0
 QtAwesome>=1.4,<2.0
-Pillow>=10
+Pillow>=10,<13
