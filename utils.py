@@ -375,6 +375,50 @@ def _apply_defaults(obj: JsonType, template: Mapping[Any, Any]) -> None:
             obj[k] = template[k]
 
 
+def merge_primary_json(primary: JsonType, secondary: JsonType) -> JsonType:
+    """Merge API payloads while preserving primary values and progress."""
+    merged: JsonType = {}
+    for key in set(primary.keys()) | set(secondary.keys()):
+        in_primary = key in primary
+        if in_primary and key in secondary:
+            primary_value = primary[key]
+            secondary_value = secondary[key]
+            if primary_value is None:
+                merged[key] = secondary_value
+            elif secondary_value is None:
+                merged[key] = primary_value
+            elif type(primary_value) is not type(secondary_value):
+                raise TypeError("Inconsistent merge data")
+            elif isinstance(primary_value, dict):
+                merged[key] = merge_primary_json(primary_value, secondary_value)
+            elif isinstance(primary_value, list):
+                merged[key] = _merge_primary_lists(primary_value, secondary_value)
+            else:
+                merged[key] = primary_value
+        elif in_primary:
+            merged[key] = primary[key]
+        else:
+            merged[key] = secondary[key]
+    return merged
+
+
+def _merge_primary_lists(primary: list[Any], secondary: list[Any]) -> list[Any]:
+    """Merge ID-keyed API lists without losing primary progress fields."""
+    if not primary or not secondary:
+        return secondary if not primary else primary
+    if not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in primary):
+        return primary
+    if not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in secondary):
+        return primary
+    secondary_by_id = {item["id"]: item for item in secondary}
+    merged: list[Any] = []
+    for item in primary:
+        detail = secondary_by_id.pop(item["id"], None)
+        merged.append(merge_primary_json(item, detail) if detail is not None else item)
+    merged.extend(secondary_by_id.values())
+    return merged
+
+
 def extract_available_drops(response: JsonType) -> list[JsonType]:
     """Return viewer drop campaigns from an AvailableDrops response."""
     try:

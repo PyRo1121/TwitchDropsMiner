@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 
 from constants import LANG_PATH, WORKING_DIR
-from utils import format_duration, json_load, json_save, timestamp
+from utils import (
+    format_duration,
+    json_load,
+    json_save,
+    merge_primary_json,
+    timestamp,
+)
 
 
 class JsonLoadTests(unittest.TestCase):
@@ -35,6 +41,35 @@ class JsonLoadTests(unittest.TestCase):
 
             self.assertEqual(json_load(path, {}, merge=False), {"value": 2})
             self.assertFalse(path.with_name("settings.json.new").exists())
+
+    def test_merge_primary_json_preserves_progress_and_reconciles_lists(self) -> None:
+        merged = merge_primary_json(
+            {
+                "id": "campaign",
+                "timeBasedDrops": [
+                    {"id": "drop", "self": {"currentMinutesWatched": 4}}
+                ],
+            },
+            {
+                "id": "campaign",
+                "timeBasedDrops": [
+                    {
+                        "id": "drop",
+                        "requiredMinutesWatched": 10,
+                        "benefitEdges": [{"id": "benefit"}],
+                    },
+                    {"id": "second-drop"},
+                ],
+            },
+        )
+
+        self.assertEqual(merged["timeBasedDrops"][0]["self"]["currentMinutesWatched"], 4)
+        self.assertEqual(merged["timeBasedDrops"][0]["requiredMinutesWatched"], 10)
+        self.assertEqual(merged["timeBasedDrops"][1]["id"], "second-drop")
+
+    def test_merge_primary_json_rejects_conflicting_types(self) -> None:
+        with self.assertRaises(TypeError):
+            merge_primary_json({"value": 1}, {"value": "one"})
 
     def test_format_duration_preserves_hour_alignment_modes(self) -> None:
         self.assertEqual(format_duration(3661.4), "01:01:01")
