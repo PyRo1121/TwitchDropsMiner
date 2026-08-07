@@ -165,6 +165,17 @@ class _AuthState:
         except OSError as exc:
             logger.warning("Unable to clear OAuth refresh token: %s", type(exc).__name__)
 
+    def _save_refresh_token(
+        self, client_id: str, refresh_token: str, *, rotated: bool = False
+    ) -> None:
+        try:
+            self._oauth_tokens.save(client_id, refresh_token)
+        except (OSError, TypeError, ValueError) as exc:
+            description = "rotated OAuth refresh token" if rotated else "OAuth refresh token"
+            logger.warning(
+                "Unable to persist %s: %s", description, type(exc).__name__
+            )
+
     def _oauth_headers(self, client_info: ClientInfo) -> dict[str, str]:
         return {
             "Accept": "application/json",
@@ -210,13 +221,9 @@ class _AuthState:
                 raise LoginException("OAuth refresh response omitted access_token")
             rotated_token = response_json.get("refresh_token")
             if isinstance(rotated_token, str) and rotated_token:
-                try:
-                    self._oauth_tokens.save(client_info.CLIENT_ID, rotated_token)
-                except (OSError, TypeError, ValueError) as exc:
-                    logger.warning(
-                        "Unable to persist rotated OAuth refresh token: %s",
-                        type(exc).__name__,
-                    )
+                self._save_refresh_token(
+                    client_info.CLIENT_ID, rotated_token, rotated=True
+                )
             else:
                 logger.debug("Twitch refresh response did not rotate the refresh token")
             return access_token
@@ -302,13 +309,9 @@ class _AuthState:
                                 raise LoginException("OAuth token response omitted access_token")
                             refresh_token = response_json.get("refresh_token")
                             if isinstance(refresh_token, str) and refresh_token:
-                                try:
-                                    self._oauth_tokens.save(client_info.CLIENT_ID, refresh_token)
-                                except (OSError, TypeError, ValueError) as exc:
-                                    logger.warning(
-                                        "Unable to persist OAuth refresh token: %s",
-                                        type(exc).__name__,
-                                    )
+                                self._save_refresh_token(
+                                    client_info.CLIENT_ID, refresh_token
+                                )
                             else:
                                 logger.debug(
                                     "Twitch device login response did not include a refresh token"
