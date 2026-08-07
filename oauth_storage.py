@@ -7,10 +7,11 @@ are kept in a separate atomically-written file with restrictive permissions.
 from __future__ import annotations
 
 import json
-import os
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+
+from utils import atomic_write, remove_stale_new
 
 
 class OAuthTokenStore:
@@ -34,32 +35,17 @@ class OAuthTokenStore:
     def save(self, client_id: str, refresh_token: str) -> None:
         if not client_id or not refresh_token:
             raise ValueError("OAuth token records require non-empty values")
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self._path.with_name(f"{self._path.name}.new")
-        try:
-            if temporary_path.is_symlink():
-                raise OSError("OAuth token temporary path is a symlink")
-            flags = (
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_TRUNC
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            descriptor = os.open(temporary_path, flags, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf8") as file:
+
+        def writer(temporary_path: Path) -> None:
+            with temporary_path.open("w", encoding="utf8") as file:
                 json.dump(
                     {"client_id": client_id, "refresh_token": refresh_token},
                     file,
                     sort_keys=True,
                 )
                 file.write("\n")
-            temporary_path.chmod(0o600)
-            temporary_path.replace(self._path)
-            self._path.chmod(0o600)
-        finally:
-            with suppress(OSError):
-                temporary_path.unlink()
+
+        atomic_write(self._path, writer)
 
     def clear(self) -> None:
-        self._path.unlink(missing_ok=True)
-        self._path.with_name(f"{self._path.name}.new").unlink(missing_ok=True)
+        remove_stale_new(self._path)

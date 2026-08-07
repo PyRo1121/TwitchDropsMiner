@@ -44,6 +44,8 @@ from utils import (
     AwaitableValue,
     ExponentialBackoff,
     redact_log_value,
+    atomic_write,
+    remove_stale_new,
 )
 from constants import (
     CALL,
@@ -131,10 +133,7 @@ class _AuthState:
             if session is not None:
                 jar = cast(aiohttp.CookieJar, session.cookie_jar)
                 jar.clear()
-                COOKIES_PATH.unlink(missing_ok=True)
-                COOKIES_PATH.with_name(
-                    f"{COOKIES_PATH.name}.new"
-                ).unlink(missing_ok=True)
+                remove_stale_new(COOKIES_PATH)
         if delete_refresh_token:
             self._clear_refresh_token()
 
@@ -625,10 +624,7 @@ class _AuthState:
                 # otherwise, we need to delete the entire cookie file and clear the jar
                 logger.info("Cookie client ID mismatch")
                 jar.clear()
-                COOKIES_PATH.unlink(missing_ok=True)
-                COOKIES_PATH.with_name(
-                    f"{COOKIES_PATH.name}.new"
-                ).unlink(missing_ok=True)
+                remove_stale_new(COOKIES_PATH)
                 self._clear_refresh_token()
             else:
                 raise RuntimeError("Login verification failure (step #1)")
@@ -739,18 +735,10 @@ class Twitch:
     @staticmethod
     def _save_cookie_jar(cookie_jar: aiohttp.CookieJar, path: Path) -> None:
         """Persist cookies atomically without destroying the last good file."""
-        temporary_path = path.with_name(f"{path.name}.new")
         try:
-            if temporary_path.is_symlink():
-                raise OSError("Cookie temporary path is a symlink")
-            cookie_jar.save(temporary_path)
-            temporary_path.chmod(0o600)
-            temporary_path.replace(path)
+            atomic_write(path, cookie_jar.save)
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("Unable to persist cookies: %s", type(exc).__name__)
-        finally:
-            with suppress(OSError):
-                temporary_path.unlink()
 
     async def shutdown(self) -> None:
         start_time = time()

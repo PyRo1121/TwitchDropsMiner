@@ -387,6 +387,32 @@ def json_save(path: Path, contents: Mapping[Any, Any], *, sort: bool = False) ->
     new_path.replace(path)
 
 
+def atomic_write(path: Path, writer: Callable[[Path], None], *, mode: int = 0o600) -> None:
+    """Write `path` atomically via a `<path>.new` sibling, then `replace()` over it.
+
+    Guards against symlink substitution on the temp path, applies ``mode`` to both the
+    temp and final file, and removes the temp even on failure so the last good file survives.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f"{path.name}.new")
+    try:
+        if temporary_path.is_symlink():
+            raise OSError(f"Temporary path is a symlink: {temporary_path}")
+        writer(temporary_path)
+        temporary_path.chmod(mode)
+        temporary_path.replace(path)
+        path.chmod(mode)
+    finally:
+        with suppress(OSError):
+            temporary_path.unlink()
+
+
+def remove_stale_new(path: Path) -> None:
+    """Remove both ``path`` and any stale ``<path>.new`` sibling."""
+    path.unlink(missing_ok=True)
+    path.with_name(f"{path.name}.new").unlink(missing_ok=True)
+
+
 def webopen(url: URL | str):
     url_str = str(url)
     if IS_PACKAGED and sys.platform == "linux":
