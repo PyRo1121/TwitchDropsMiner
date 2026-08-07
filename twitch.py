@@ -1853,8 +1853,8 @@ class Twitch:
                     else:
                         logger.info(
                             f"{channel.name} status has been updated, switching... "
-                            f"(🎁: {stream_before.drops_enabled and '✔' or '❌'} -> "
-                            f"{stream_after.drops_enabled and '✔' or '❌'})"
+                            f"(🎁: {self._drops_marker(stream_before)} -> "
+                            f"{self._drops_marker(stream_after)})"
                         )
                     self.change_state(State.CHANNEL_SWITCH)
             elif stream_after is None:
@@ -1862,12 +1862,16 @@ class Twitch:
             else:
                 logger.info(
                     f"{channel.name} status has been updated "
-                    f"(🎁: {stream_before.drops_enabled and '✔' or '❌'} -> "
-                    f"{stream_after.drops_enabled and '✔' or '❌'})"
+                    f"(🎁: {self._drops_marker(stream_before)} -> "
+                    f"{self._drops_marker(stream_after)})"
                 )
                 if self.should_switch(channel):
                     self.watch(channel)
         channel.display()
+
+    @staticmethod
+    def _drops_marker(stream: Stream | None) -> str:
+        return "✔" if stream is not None and stream.drops_enabled else "❌"
 
     @task_wrapper
     async def process_drops(self, user_id: int, message: JsonType):
