@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import qtawesome as qta
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,7 +31,6 @@ from translate import _
 from utils import format_duration, webopen
 from .autostart import AutostartError, AutostartManager
 from .contracts import ImageCache, LoginManager
-from .tasks import QtTaskRegistry
 from .pages import (
     ActivityLog,
     ChannelsPage,
@@ -152,35 +151,31 @@ class QtLoginForm:
 class QtCampaignProgress:
     ALMOST_DONE_SECONDS = 10
 
-    def __init__(self, hero: HeroCard, *, tasks: QtTaskRegistry | None = None) -> None:
+    def __init__(self, hero: HeroCard) -> None:
         self._hero = hero
-        self._tasks = tasks or QtTaskRegistry()
         self._drop: TimedDrop | None = None
         self._seconds = 0
-        self._timer_task: asyncio.Task[Any] | None = None
+        self._timer = QTimer(hero)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick)
 
     def start_timer(self) -> None:
-        if self._timer_task is None:
-            if self._drop is None or self._drop.remaining_minutes <= 0:
-                self._update_time(60)
-            else:
-                self._timer_task = self._tasks.create(self._timer_loop())
+        if not self._timer.isActive():
+            self._update_time(60)
+            if self._drop is not None and self._drop.remaining_minutes > 0:
+                self._timer.start()
 
     def stop_timer(self) -> None:
-        if self._timer_task is not None:
-            self._timer_task.cancel()
-            self._timer_task = None
+        self._timer.stop()
 
     def minute_almost_done(self) -> bool:
-        return self._timer_task is None or self._seconds <= self.ALMOST_DONE_SECONDS
+        return not self._timer.isActive() or self._seconds <= self.ALMOST_DONE_SECONDS
 
-    async def _timer_loop(self) -> None:
-        self._update_time(60)
-        while self._seconds > 0:
-            await asyncio.sleep(1)
-            self._seconds -= 1
-            self._update_time()
-        self._timer_task = None
+    def _tick(self) -> None:
+        self._seconds -= 1
+        self._update_time()
+        if self._seconds <= 0:
+            self._timer.stop()
 
     def display(self, drop: TimedDrop | None, *, countdown: bool = True, subone: bool = False) -> None:
         self._drop = drop

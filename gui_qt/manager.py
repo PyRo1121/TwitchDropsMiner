@@ -482,7 +482,7 @@ class QtGUIManager(QMainWindow):
         self.status = QtStatusBar(self.status_label, self._status_changed)
         self.websockets = QtWebsocketStatus(self.websocket_label)
         self.login = QtLoginForm(self.login_panel, self)
-        self.progress = QtCampaignProgress(self.hero, tasks=self._tasks)
+        self.progress = QtCampaignProgress(self.hero)
         self._apply_ring_theme()
         self._status_widgets = (self._health, self._sidebar_status, self._topbar_status)
         self.hero.campaign_changed.connect(self._hero_changed)
