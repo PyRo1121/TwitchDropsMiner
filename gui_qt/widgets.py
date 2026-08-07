@@ -43,18 +43,12 @@ class IconButton(QPushButton):
         color: str = "#b69cff",
     ) -> None:
         super().__init__(parent)
-        self._icon_name = icon_name
-        self._icon_color = color
         self.setIcon(qta.icon(icon_name, color=color))
         self.setIconSize(QSize(20, 20))
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("iconButton")
-
-    def set_icon_color(self, color: str) -> None:
-        self._icon_color = color
-        self.setIcon(qta.icon(self._icon_name, color=color))
 
 
 class ProgressRing(QWidget):
