@@ -132,6 +132,9 @@ DEFAULT_LANG = "English"
 # Intervals and Delays
 PING_INTERVAL = timedelta(minutes=3)
 PING_TIMEOUT = timedelta(seconds=10)
+WS_STOP_TIMEOUT = 2
+WS_BACKOFF_MAX = 3 * 60
+WS_RECV_WINDOW = 0.5
 ONLINE_DELAY = timedelta(seconds=120)
 WATCH_INTERVAL = timedelta(seconds=59)
 # Strings

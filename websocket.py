@@ -17,6 +17,9 @@ from constants import (
     MAX_WEBSOCKETS,
     WS_TOPICS_LIMIT,
     WS_TOPIC_BATCH_SIZE,
+    WS_STOP_TIMEOUT,
+    WS_BACKOFF_MAX,
+    WS_RECV_WINDOW,
 )
 from utils import (
     CHARS_ASCII,
@@ -109,7 +112,7 @@ class Websocket:
             if self._handle_task is not None:
                 handle_task = self._handle_task
                 try:
-                    await asyncio.wait_for(handle_task, timeout=2)
+                    await asyncio.wait_for(handle_task, timeout=WS_STOP_TIMEOUT)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
                 except Exception as exc:
@@ -179,7 +182,7 @@ class Websocket:
         ws_logger.info(f"Websocket[{self._idx}] connecting...")
         # Connect/Reconnect loop
         async for websocket in self._backoff_connect(
-            "wss://pubsub-edge.twitch.tv/v1", maximum=3*60  # 3 minutes maximum backoff time
+            "wss://pubsub-edge.twitch.tv/v1", maximum=WS_BACKOFF_MAX
         ):
             self._ws.set(websocket)
             self._reconnect_requested.clear()
@@ -267,7 +270,9 @@ class Websocket:
                 )
             self._submitted.update(added)
 
-    async def _gather_recv(self, messages: list[JsonType], timeout: float = 0.5):
+    async def _gather_recv(
+        self, messages: list[JsonType], timeout: float = WS_RECV_WINDOW
+    ):
         """
         Gather incoming messages over the timeout specified.
         Note that there's no return value - this modifies `messages` in-place.
@@ -358,7 +363,7 @@ class Websocket:
         # listen over 0.5s for incoming messages
         messages: list[JsonType] = []
         with suppress(asyncio.TimeoutError):
-            await self._gather_recv(messages, timeout=0.5)
+            await self._gather_recv(messages, timeout=WS_RECV_WINDOW)
         # process them
         for message in messages:
             msg_type = message.get("type")
