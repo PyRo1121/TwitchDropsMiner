@@ -33,6 +33,10 @@ _P = ParamSpec("_P")  # params
 _JSON_T = TypeVar("_JSON_T", bound=Mapping[Any, Any])
 logger = logging.getLogger("TwitchDrops")
 
+# Matches an RFC3339 fractional-seconds group (e.g. ".123456789") so the
+# microseconds portion can be capped for Python 3.10's fromisoformat.
+_FRACTION_RE = re.compile(r"\.(\d+)")
+
 
 async def cancel_tasks(tasks: abc.Iterable[asyncio.Task[Any]]) -> None:
     """Cancel tasks and consume their completion, including cancellation errors."""
@@ -197,6 +201,11 @@ def timestamp(value: str) -> datetime:
     normalized = value.strip()
     if normalized.endswith("Z"):
         normalized = f"{normalized[:-1]}+00:00"
+    # Python 3.10's fromisoformat rejects more than 6 fractional digits, while
+    # Twitch often sends nanosecond precision. Cap the fraction to microseconds.
+    normalized = _FRACTION_RE.sub(
+        lambda match: (match.group(0)[:1] + match.group(1)[:6]), normalized
+    )
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
