@@ -81,6 +81,7 @@ class QtGUIManager(QMainWindow):
         self._closing = False
         self._started = False
         self._theme_dark = bool(twitch.settings.dark_mode)
+        self._theme = make_theme(self._theme_dark)
         self._image_cache = QtImageCache(twitch)
         self._steam_metadata = SteamMetadataProvider(twitch)
         self._metadata_task: asyncio.Task[Any] | None = None
@@ -94,7 +95,7 @@ class QtGUIManager(QMainWindow):
         self.campaigns_metric: Metric
         self.claimed_metric: Metric
         self.diagnostic_label: QLabel
-        apply_theme(self._app, make_theme(self._theme_dark))
+        apply_theme(self._app, self._theme)
         self._app.setLayoutDirection(
             Qt.LayoutDirection.RightToLeft
             if _.current == "العربية"
@@ -638,7 +639,7 @@ class QtGUIManager(QMainWindow):
             "connected",
             translated_prefix("watching"),
         )
-        palette = make_theme(self._theme_dark).p
+        palette = self._theme.p
         if any(value and value in lowered for value in error_terms):
             color = palette.error
         elif any(value and value in lowered for value in warning_terms):
@@ -673,7 +674,7 @@ class QtGUIManager(QMainWindow):
             "settings": "Preferences",
             "help": "Help & about",
         }
-        palette = make_theme(self._theme_dark).p
+        palette = self._theme.p
         for name, button in self._nav_buttons.items():
             active = name == key
             button.setChecked(active)
@@ -797,7 +798,7 @@ class QtGUIManager(QMainWindow):
         self.output.print(message)
 
     def _apply_ring_theme(self) -> None:
-        palette = make_theme(self._theme_dark).p
+        palette = self._theme.p
         self.hero.ring.set_colors(
             track=palette.surface3,
             progress=palette.accent,
@@ -808,9 +809,9 @@ class QtGUIManager(QMainWindow):
 
     def apply_theme(self, dark: bool) -> None:
         self._theme_dark = dark
-        theme = make_theme(dark)
-        apply_theme(self._app, theme)
-        palette = theme.p
+        self._theme = make_theme(dark)
+        apply_theme(self._app, self._theme)
+        palette = self._theme.p
         if hasattr(self, "hero"):
             self._apply_ring_theme()
         active = getattr(self, "_active_page", "overview")
