@@ -348,7 +348,7 @@ class _AuthState:
                 await login_form.ask_enter_code(verification_uri, user_code)
 
                 payload = {
-                    "client_id": self._twitch._client_type.CLIENT_ID,
+                    "client_id": client_info.CLIENT_ID,
                     "scopes": "",
                     "device_code": device_code,
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
