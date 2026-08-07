@@ -2289,6 +2289,27 @@ class Twitch:
                 fetched_data[campaign_id] = campaign_data
         return self._merge_data(campaign_ids, fetched_data)
 
+    async def _fetch_campaign_details(
+        self,
+        inventory_data: dict[str, JsonType],
+        available_campaigns: dict[str, JsonType],
+        status_update: Callable[[str], Any],
+    ) -> dict[str, JsonType]:
+        # fetch detailed data for each campaign, in chunks
+        status_update(_("gui", "status", "fetching_campaigns"))
+        fetch_campaigns_tasks: list[asyncio.Task[Any]] = [
+            asyncio.create_task(self.fetch_campaigns(campaigns_chunk))
+            for campaigns_chunk in chunk(available_campaigns.items(), 20)
+        ]
+        try:
+            for coro in asyncio.as_completed(fetch_campaigns_tasks):
+                chunk_campaigns_data = await coro
+                # merge the inventory and campaigns datas together
+                inventory_data = self._merge_data(inventory_data, chunk_campaigns_data)
+        finally:
+            await cancel_tasks(fetch_campaigns_tasks)
+        return inventory_data
+
     @staticmethod
     def _parse_available_campaigns(response: JsonType) -> dict[str, JsonType]:
         try:
@@ -2350,19 +2371,9 @@ class Twitch:
         # fetch general available campaigns data (campaigns)
         response = await self.gql_request(GQL_QUERIES["Campaigns"])
         available_campaigns = self._parse_available_campaigns(response)
-        # fetch detailed data for each campaign, in chunks
-        status_update(_("gui", "status", "fetching_campaigns"))
-        fetch_campaigns_tasks: list[asyncio.Task[Any]] = [
-            asyncio.create_task(self.fetch_campaigns(campaigns_chunk))
-            for campaigns_chunk in chunk(available_campaigns.items(), 20)
-        ]
-        try:
-            for coro in asyncio.as_completed(fetch_campaigns_tasks):
-                chunk_campaigns_data = await coro
-                # merge the inventory and campaigns datas together
-                inventory_data = self._merge_data(inventory_data, chunk_campaigns_data)
-        finally:
-            await cancel_tasks(fetch_campaigns_tasks)
+        inventory_data = await self._fetch_campaign_details(
+            inventory_data, available_campaigns, status_update
+        )
         # filter out invalid campaigns
         for campaign_id in list(inventory_data.keys()):
             campaign_data = inventory_data[campaign_id]
