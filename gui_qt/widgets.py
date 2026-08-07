@@ -123,17 +123,18 @@ class StatusDot(QWidget):
         lay.setSpacing(6)
         self._dot = QLabel()
         self._dot.setFixedSize(8, 8)
-        self._dot.setStyleSheet(
-            f"background:{color}; border-radius:4px;"
-        )
+        self._set_dot_color(color)
         self._label = QLabel(text)
         self._label.setObjectName("muted")
         lay.addWidget(self._dot)
         lay.addWidget(self._label)
         lay.addStretch(1)
 
-    def set_state(self, color: str, text: str) -> None:
+    def _set_dot_color(self, color: str) -> None:
         self._dot.setStyleSheet(f"background:{color}; border-radius:4px;")
+
+    def set_state(self, color: str, text: str) -> None:
+        self._set_dot_color(color)
         self._label.setText(text)
         self._label.setToolTip(text)
 
