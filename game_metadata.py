@@ -137,7 +137,6 @@ class SteamMetadataProvider:
         )
 
     async def _fetch(self, name: str, key: str) -> SteamMetadata:
-        result = SteamMetadata(game_name=name, updated_at=time.time())
         try:
             search_url = URL("https://store.steampowered.com/api/storesearch/").with_query(
                 term=name,
