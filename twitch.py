@@ -2290,6 +2290,24 @@ class Twitch:
         return self._merge_data(campaign_ids, fetched_data)
 
     @staticmethod
+    def _parse_available_campaigns(response: JsonType) -> dict[str, JsonType]:
+        try:
+            raw_available = response["data"]["currentUser"]["dropCampaigns"]
+        except (KeyError, TypeError) as exc:
+            raise RequestException("Twitch campaign response was malformed") from exc
+        available_list = raw_available if isinstance(raw_available, list) else []
+        applicable_statuses = {"ACTIVE", "UPCOMING"}
+        available_campaigns: dict[str, JsonType] = {}
+        for campaign_data in available_list:
+            if not isinstance(campaign_data, dict):
+                continue
+            campaign_id = campaign_data.get("id")
+            status = campaign_data.get("status")
+            if isinstance(campaign_id, str) and status in applicable_statuses:
+                available_campaigns[campaign_id] = campaign_data
+        return available_campaigns
+
+    @staticmethod
     def _parse_inventory_snapshot(
         inventory: JsonType,
     ) -> tuple[dict[str, JsonType], dict[str, datetime]]:
@@ -2331,20 +2349,7 @@ class Twitch:
         inventory_data, claimed_benefits = self._parse_inventory_snapshot(inventory)
         # fetch general available campaigns data (campaigns)
         response = await self.gql_request(GQL_QUERIES["Campaigns"])
-        try:
-            raw_available = response["data"]["currentUser"]["dropCampaigns"]
-        except (KeyError, TypeError) as exc:
-            raise RequestException("Twitch campaign response was malformed") from exc
-        available_list = raw_available if isinstance(raw_available, list) else []
-        applicable_statuses = {"ACTIVE", "UPCOMING"}
-        available_campaigns: dict[str, JsonType] = {}
-        for campaign_data in available_list:
-            if not isinstance(campaign_data, dict):
-                continue
-            campaign_id = campaign_data.get("id")
-            status = campaign_data.get("status")
-            if isinstance(campaign_id, str) and status in applicable_statuses:
-                available_campaigns[campaign_id] = campaign_data
+        available_campaigns = self._parse_available_campaigns(response)
         # fetch detailed data for each campaign, in chunks
         status_update(_("gui", "status", "fetching_campaigns"))
         fetch_campaigns_tasks: list[asyncio.Task[Any]] = [
