@@ -306,6 +306,7 @@ class Channel:
         self._stream = stream
 
     async def get_stream(self) -> Stream | None:
+        malformed_message = f"Channel: {self._login} returned malformed stream data"
         try:
             response: JsonType = await self._twitch.gql_request(self.stream_gql)
         except MinerException as exc:
@@ -314,11 +315,11 @@ class Channel:
             data = response["data"]
             channel_data = data["user"]
         except (KeyError, TypeError) as exc:
-            raise MinerException(f"Channel: {self._login} returned malformed stream data") from exc
+            raise MinerException(malformed_message) from exc
         if channel_data is None:
             return None
         if not isinstance(channel_data, dict):
-            raise MinerException(f"Channel: {self._login} returned malformed stream data")
+            raise MinerException(malformed_message)
         # fill in display name
         if self._display_name is None:
             display_name = channel_data.get("displayName")
@@ -328,11 +329,11 @@ class Channel:
         if stream_data is None:
             return None
         if not isinstance(stream_data, dict):
-            raise MinerException(f"Channel: {self._login} returned malformed stream data")
+            raise MinerException(malformed_message)
         try:
             stream = Stream.from_get_stream(self, channel_data)
         except (KeyError, TypeError, ValueError) as exc:
-            raise MinerException(f"Channel: {self._login} returned malformed stream data") from exc
+            raise MinerException(malformed_message) from exc
         if not stream.drops_enabled:
             try:
                 available_drops_campaigns: JsonType = await self._twitch.gql_request(
