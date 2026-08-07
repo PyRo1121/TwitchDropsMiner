@@ -49,6 +49,7 @@ from .subs import (
     QtWebsocketStatus,
 )
 from .theme import apply_theme, make_theme
+from .tasks import QtTaskRegistry
 from .tray import QtTray
 from .widgets import Card, IconButton, Metric, SignalPulse, StatusDot
 
@@ -83,7 +84,8 @@ class QtGUIManager(QMainWindow):
         self._started = False
         self._theme_dark = bool(twitch.settings.dark_mode)
         self._theme = make_theme(self._theme_dark)
-        self._image_cache = QtImageCache(twitch)
+        self._tasks = QtTaskRegistry()
+        self._image_cache = QtImageCache(twitch, tasks=self._tasks)
         self._steam_metadata = SteamMetadataProvider(twitch)
         self._metadata_task: asyncio.Task[Any] | None = None
         self._metadata_generation = 0
@@ -480,7 +482,7 @@ class QtGUIManager(QMainWindow):
         self.status = QtStatusBar(self.status_label, self._status_changed)
         self.websockets = QtWebsocketStatus(self.websocket_label)
         self.login = QtLoginForm(self.login_panel, self)
-        self.progress = QtCampaignProgress(self.hero)
+        self.progress = QtCampaignProgress(self.hero, tasks=self._tasks)
         self._apply_ring_theme()
         self._status_widgets = (self._health, self._sidebar_status, self._topbar_status)
         self.hero.campaign_changed.connect(self._hero_changed)
@@ -548,7 +550,7 @@ class QtGUIManager(QMainWindow):
         )
         self.hero.set_intel("GAME INTEL  ·  looking up Steam signal…")
         generation = self._metadata_generation
-        self._metadata_task = asyncio.create_task(
+        self._metadata_task = self._tasks.create(
             self._load_game_context(game_name, image_url, twitch_url, generation)
         )
 
@@ -725,6 +727,7 @@ class QtGUIManager(QMainWindow):
         self._started = False
         self.progress.stop_timer()
         self._cancel_metadata_task()
+        self._tasks.cancel_all()
         self._steam_metadata.save()
         self._image_cache.save()
 
@@ -743,6 +746,7 @@ class QtGUIManager(QMainWindow):
         try:
             self._metrics_timer.stop()
             self._cancel_metadata_task()
+            self._tasks.cancel_all()
             logger.removeHandler(self._log_handler)
             self.tray.stop()
             try:

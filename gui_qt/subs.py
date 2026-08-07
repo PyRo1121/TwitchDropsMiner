@@ -31,6 +31,7 @@ from translate import _
 from utils import format_duration, webopen
 from .autostart import AutostartError, AutostartManager
 from .contracts import ImageCache, LoginManager
+from .tasks import QtTaskRegistry
 from .pages import (
     ActivityLog,
     ChannelsPage,
@@ -151,8 +152,9 @@ class QtLoginForm:
 class QtCampaignProgress:
     ALMOST_DONE_SECONDS = 10
 
-    def __init__(self, hero: HeroCard) -> None:
+    def __init__(self, hero: HeroCard, *, tasks: QtTaskRegistry | None = None) -> None:
         self._hero = hero
+        self._tasks = tasks or QtTaskRegistry()
         self._drop: TimedDrop | None = None
         self._seconds = 0
         self._timer_task: asyncio.Task[Any] | None = None
@@ -162,7 +164,7 @@ class QtCampaignProgress:
             if self._drop is None or self._drop.remaining_minutes <= 0:
                 self._update_time(60)
             else:
-                self._timer_task = asyncio.create_task(self._timer_loop())
+                self._timer_task = self._tasks.create(self._timer_loop())
 
     def stop_timer(self) -> None:
         if self._timer_task is not None:
@@ -390,7 +392,7 @@ class QtHelp:
         self._invalidate_button.config(state="disabled")
 
     def invalidate_token(self) -> None:
-        asyncio.create_task(self._invalidate_token())
+        self._manager._tasks.create(self._invalidate_token())
 
     async def _invalidate_token(self) -> None:
         try:

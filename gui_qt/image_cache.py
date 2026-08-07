@@ -21,6 +21,7 @@ from PySide6.QtGui import QPixmap
 
 from constants import CACHE_DB, CACHE_PATH
 from utils import json_load, json_save
+from .tasks import QtTaskRegistry
 
 logger = logging.getLogger("TwitchDrops.ui")
 
@@ -37,8 +38,9 @@ class QtImageCache:
             return value
         return None
 
-    def __init__(self, twitch: Any) -> None:
+    def __init__(self, twitch: Any, *, tasks: QtTaskRegistry | None = None) -> None:
         self._twitch = twitch
+        self._tasks = tasks or QtTaskRegistry()
         CACHE_PATH.mkdir(parents=True, exist_ok=True)
         try:
             self._hashes: dict[str, dict[str, Any]] = json_load(
@@ -176,7 +178,7 @@ class QtImageCache:
         key = str(url)
         task = self._inflight.get(key)
         if task is None:
-            task = asyncio.create_task(self._load_image(key))
+            task = self._tasks.create(self._load_image(key))
             self._inflight[key] = task
             task.add_done_callback(lambda completed: self._clear_inflight(key, completed))
 
