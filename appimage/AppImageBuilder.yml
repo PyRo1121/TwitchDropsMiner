@@ -37,6 +37,13 @@ AppDir:
       - sourceline: deb [arch=arm64] https://ports.ubuntu.com/ubuntu-ports/ jammy-security main
         key_url: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C
     include:
+      # Python 3.10 runtime (interpreter + stdlib) so ${APPDIR}/usr/bin/python3
+      # exists and PYTHONHOME=${APPDIR}/usr resolves the standard library.
+      - python3
+      - python3.10
+      - python3.10-minimal
+      - libpython3.10-minimal
+      - libpython3.10-stdlib
       - libdbus-1-3
       - libegl1
       - libgl1
