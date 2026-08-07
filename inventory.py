@@ -476,10 +476,6 @@ class DropsCampaign:
         return sum(d.is_claimed for d in self.drops)
 
     @property
-    def remaining_drops(self) -> int:
-        return sum(not d.is_claimed for d in self.drops)
-
-    @property
     def required_minutes(self) -> int:
         return max((d.total_required_minutes for d in self.drops), default=0)
 
@@ -529,9 +525,6 @@ class DropsCampaign:
                 )
             )
         )
-
-    def get_drop(self, drop_id: str) -> TimedDrop | None:
-        return self.timed_drops.get(drop_id)
 
     def preconditions_chain(self) -> set[str]:
         return set(
