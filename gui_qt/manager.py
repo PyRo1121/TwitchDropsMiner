@@ -488,6 +488,7 @@ class QtGUIManager(QMainWindow):
         self.login = QtLoginForm(self.login_panel, self)
         self.progress = QtCampaignProgress(self.hero)
         self._apply_ring_theme()
+        self._status_widgets = (self._health, self._sidebar_status, self._topbar_status)
         self.hero.campaign_changed.connect(self._hero_changed)
         self.output = QtConsole([self.overview_activity.log, self.full_activity.log])
         channels_page = cast(ChannelsPage, self.pages["channels"])
@@ -650,12 +651,9 @@ class QtGUIManager(QMainWindow):
             color = palette.idle
         display = text or _("gui", "status", "idle")
         compact = "Live" if color == palette.green else "Error" if color == palette.error else "Attention" if color == palette.amber else "Idle"
-        self._health.set_state(color, compact)
-        self._health.setToolTip(display)
-        self._sidebar_status.set_state(color, compact)
-        self._sidebar_status.setToolTip(display)
-        self._topbar_status.set_state(color, compact)
-        self._topbar_status.setToolTip(display)
+        for widget in self._status_widgets:
+            widget.set_state(color, compact)
+            widget.setToolTip(display)
         self._signal_pulse.set_state(color, color != palette.idle)
         self.diagnostic_label.setText(self._status_explanation(display))
 
