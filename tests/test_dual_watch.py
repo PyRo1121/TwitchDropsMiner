@@ -390,6 +390,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner._watch_drop_ids = {}
             miner._watch_tasks = {}
             miner._watch_restart_events = {}
+            miner._watch_generation = 0
 
             assignments = miner._select_watch_assignments()
             miner._apply_watch_assignments(assignments, update_status=False)

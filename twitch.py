@@ -1457,7 +1457,7 @@ class Twitch:
         interval = WATCH_INTERVAL.total_seconds()
         try:
             while (
-                generation == getattr(self, "_watch_generation", 0)
+                generation == self._watch_generation
                 and self._watching_channels.get(channel.id) is channel
                 and channel.id in self._watch_drop_ids
             ):
@@ -1601,8 +1601,7 @@ class Twitch:
         channels = [channel for channel, _drop in assignments]
         targets = OrderedDict((channel.id, channel) for channel in channels)
         target_drop_ids = {channel.id: drop.id for channel, drop in assignments}
-        self._watch_generation = getattr(self, "_watch_generation", 0) + 1
-        generation = self._watch_generation
+        generation = self._bump_watch_generation()
         for event in self._watch_restart_events.values():
             event.set()
         for task in self._watch_tasks.values():
@@ -1733,9 +1732,13 @@ class Twitch:
         assignments = self._select_watch_assignments(preferred=channel)
         self._apply_watch_assignments(assignments, update_status=update_status)
 
+    def _bump_watch_generation(self) -> int:
+        self._watch_generation += 1
+        return self._watch_generation
+
     def stop_watching(self):
         self.gui.clear_drop()
-        self._watch_generation = getattr(self, "_watch_generation", 0) + 1
+        self._bump_watch_generation()
         for event in self._watch_restart_events.values():
             event.set()
         for task in self._watch_tasks.values():
