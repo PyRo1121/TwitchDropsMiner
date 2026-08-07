@@ -1793,10 +1793,7 @@ class Twitch:
             channel.set_offline()
         elif msg_type == "stream-up":
             channel.check_online()
-        elif msg_type == "commercial":
-            # skip these
-            pass
-        else:
+        elif msg_type != "commercial":
             logger.warning(f"Unknown stream state: {msg_type}")
 
     @task_wrapper
