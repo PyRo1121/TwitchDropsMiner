@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from translate import _
-from constants import OUTPUT_FORMATTER, _resource_path as resource_path
+from constants import OUTPUT_FORMATTER, State, _resource_path as resource_path
 from game_metadata import SteamMetadata, SteamMetadataProvider
 from .image_cache import QtImageCache
 from .pages import ActivityPage, ChannelsPage, HeroCard, InventoryPage, LoginPanel
@@ -496,8 +496,6 @@ class QtGUIManager(QMainWindow):
             on_cleared=self._on_channel_cleared,
             on_changed=self._refresh_dashboard_metrics,
         )
-        from constants import State
-
         channels_page.set_switch_callback(self._twitch.state_change(State.CHANNEL_SWITCH))
         self.inventory = QtInventory(self.inventory_page, self._image_cache)
         # Preserve the backend's established attribute name: twitch.py and
@@ -657,8 +655,6 @@ class QtGUIManager(QMainWindow):
         self.diagnostic_label.setText(self._status_explanation(display))
 
     def _reload_inventory(self) -> None:
-        from constants import State
-
         self._twitch.change_state(State.INVENTORY_FETCH)
         self.print("Campaign reload requested.")
 
