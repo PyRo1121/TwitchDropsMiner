@@ -32,8 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from translate import _
-from utils import resource_path
-from constants import OUTPUT_FORMATTER
+from constants import OUTPUT_FORMATTER, _resource_path as resource_path
 from game_metadata import SteamMetadata, SteamMetadataProvider
 from .image_cache import QtImageCache
 from .pages import ActivityPage, ChannelsPage, HeroCard, InventoryPage, LoginPanel

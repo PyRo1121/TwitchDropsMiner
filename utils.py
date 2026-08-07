@@ -23,7 +23,6 @@ from yarl import URL
 
 from exceptions import ExitRequest, ReloadRequest
 from constants import IS_PACKAGED, JsonType, PriorityMode
-from constants import _resource_path as resource_path  # noqa
 
 
 _T = TypeVar("_T")  # type
