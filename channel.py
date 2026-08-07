@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import re
 import html
-import json
 import asyncio
 import logging
 from base64 import b64encode
 
-from typing import Any, SupportsInt, cast, TYPE_CHECKING
+from typing import Any, SupportsInt, TYPE_CHECKING
 
 import aiohttp
 from yarl import URL
@@ -51,7 +50,6 @@ class Stream:
         if not isinstance(title, str):
             raise ValueError("Stream data must contain a title")
         self.title: str = title
-        self._stream_url: URLType | None = None
 
     def _watch_payload(self) -> list[JsonType]:
         """Build a fresh viewer-presence event for this broadcast.
@@ -118,48 +116,6 @@ class Stream:
         if isinstance(other, self.__class__):
             return self.broadcast_id == other.broadcast_id
         return NotImplemented
-
-    async def get_stream_url(self) -> URLType | None:
-        if self._stream_url is not None:
-            return self._stream_url
-        # get the stream playback access token from GQL
-        playback_token_response: JsonType = await self.channel._twitch.gql_request(
-            GQL_QUERIES["PlaybackAccessToken"].with_variables({"login": self.channel._login})
-        )
-        token_data: JsonType = playback_token_response["data"]["streamPlaybackAccessToken"]
-        token_value = token_data["value"]
-        token_signature = token_data["signature"]
-        # using the token, query Twitch for a list of all available stream qualities
-        available_qualities: str = ''
-        try:
-            async with self.channel._twitch.request(
-                "GET",
-                URL(
-                    "https://usher.ttvnw.net/api/channel/hls/"
-                    f"{self.channel._login}.m3u8?sig={token_signature}&token={token_value}"
-                ),
-            ) as qualities_response:
-                available_qualities = await qualities_response.text()
-            # try to decode the suspected JSON
-            try:
-                available_json: Any = json.loads(available_qualities)
-            except ValueError:
-                # No JSON: this is the expected path. Do nothing and continue with the below.
-                pass
-            else:
-                # JSON was decoded - if there's an error, log it and report failure
-                if isinstance(available_json, list):
-                    available_json = available_json[0] if available_json else {}
-                if isinstance(available_json, dict) and "error" in available_json:
-                    logger.error(f"Stream URL get error: \"{available_json['error']}\"")
-                    self.channel.set_offline()
-                return None
-            # pick the last URL from the list, usually with the lowest quality stream
-            self._stream_url = cast(URLType, URL(available_qualities.strip().split("\n")[-1]))
-        except (aiohttp.InvalidURL, ValueError):
-            self.channel._twitch.print(available_qualities)
-            raise
-        return self._stream_url
 
 
 class Channel:
