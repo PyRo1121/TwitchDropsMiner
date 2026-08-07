@@ -55,7 +55,7 @@ from .widgets import Card, IconButton, Metric, SignalPulse, StatusDot
 if TYPE_CHECKING:
     from inventory import TimedDrop
     from twitch import Twitch
-    from utils import Game
+    from game import Game
 
 logger = logging.getLogger("TwitchDrops")
 

@@ -64,7 +64,7 @@ from constants import (
 )
 
 if TYPE_CHECKING:
-    from utils import Game
+    from game import Game
     from gui_qt.subs import QtLoginForm as LoginForm
     from channel import Stream
     from settings import Settings

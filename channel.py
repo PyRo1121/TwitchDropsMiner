@@ -12,7 +12,8 @@ from typing import Any, SupportsInt, cast, TYPE_CHECKING
 import aiohttp
 from yarl import URL
 
-from utils import Game, json_minify, isonow
+from game import Game
+from utils import json_minify, isonow
 from exceptions import ExitRequest, MinerException, ReloadRequest
 from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType
 

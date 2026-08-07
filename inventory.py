@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 
 from translate import _
 from channel import Channel
-from utils import timestamp, Game
+from game import Game
+from utils import timestamp
 from exceptions import GQLException, RequestException
 from constants import GQL_QUERIES, URLType
 

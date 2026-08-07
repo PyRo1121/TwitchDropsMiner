@@ -42,7 +42,7 @@ from .widgets import Card, PageIntro, SectionTitle
 if TYPE_CHECKING:
     from channel import Channel
     from inventory import DropsCampaign, TimedDrop
-    from utils import Game
+    from game import Game
 
 
 class QtStatusBar:

@@ -15,7 +15,6 @@ from copy import deepcopy
 from enum import Enum
 from pathlib import Path
 from contextlib import suppress
-from functools import cached_property
 from datetime import datetime, timezone
 from collections import abc
 from typing import Any, Literal, Callable, Generic, Mapping, TypeVar, ParamSpec, cast
@@ -561,50 +560,3 @@ class AwaitableValue(Generic[_T]):
 
     def clear(self) -> None:
         self._event.clear()
-
-
-class Game:
-    SPECIAL_GAME_IDS: set[int] = {509663, 509672}
-
-    def __init__(self, data: JsonType):
-        try:
-            self.id = int(data["id"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("Game data must contain an integer id") from exc
-        name = data.get("displayName") or data.get("name")
-        if not isinstance(name, str) or not name:
-            raise ValueError("Game data must contain a name")
-        self.name: str = name
-        slug = data.get("slug")
-        if isinstance(slug, str) and slug:
-            self.slug = slug
-
-    def __str__(self) -> str:
-        return self.name
-
-    def __repr__(self) -> str:
-        return f"Game({self.id}, {self.name})"
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, self.__class__):
-            return self.id == other.id
-        return NotImplemented
-
-    def __hash__(self) -> int:
-        return self.id
-
-    @cached_property
-    def slug(self) -> str:
-        """
-        Converts the game name into a slug, useable for the GQL API.
-        """
-        # remove specific characters
-        slug_text = re.sub(r'\'', '', self.name.lower())
-        # remove non alpha-numeric characters
-        slug_text = re.sub(r'\W+', '-', slug_text)
-        # strip and collapse dashes
-        slug_text = re.sub(r'-{2,}', '-', slug_text.strip('-'))
-        return slug_text
-
-    def is_special(self) -> bool:
-        return self.id in self.SPECIAL_GAME_IDS
