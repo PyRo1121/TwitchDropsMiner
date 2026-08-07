@@ -373,6 +373,67 @@ class _AuthState:
             raise LoginException("Twitch login response was malformed")
         return login_response
 
+    def _handle_login_error(
+        self,
+        error_code: int,
+        login_response: JsonType,
+        login_form: LoginForm,
+        gui_print: Callable[[str], Any],
+        token_kind: str,
+    ) -> str:
+        logger.info(f"Login error code: {error_code}")
+        if error_code == 1000:
+            logger.info("1000: CAPTCHA is required")
+            raise CaptchaRequired()
+        if error_code in (2004, 3001):
+            logger.info("3001: Login failed due to incorrect username or password")
+            gui_print(_("login", "incorrect_login_pass"))
+            if error_code == 2004:
+                # invalid username
+                login_form.clear(login=True)
+            login_form.clear(password=True)
+            return token_kind
+        if error_code in (3012, 3023):
+            logger.info("3012/23: Login failed due to incorrect 2FA code")
+            if error_code == 3023:
+                token_kind = "email"
+                gui_print(_("login", "incorrect_email_code"))
+            else:
+                token_kind = "authy"
+                gui_print(_("login", "incorrect_twofa_code"))
+            login_form.clear(token=True)
+            return token_kind
+        if error_code in (3011, 3022):
+            # 2FA handling
+            logger.info("3011/22: 2FA token required")
+            # user didn't provide a token, so ask them for it
+            if error_code == 3022:
+                token_kind = "email"
+                gui_print(_("login", "email_code_required"))
+            else:
+                token_kind = "authy"
+                gui_print(_("login", "twofa_code_required"))
+            return token_kind
+        if error_code >= 5000:
+            # Special errors, usually from Twitch telling the user to "go away"
+            # We print the code out to inform the user, and just use chrome flow instead
+            # {
+            #     "error_code":5023,
+            #     "error":"Please update your app to continue",
+            #     "error_description":"client is not supported for this feature"
+            # }
+            # {
+            #     "error_code":5027,
+            #     "error":"Please update your app to continue",
+            #     "error_description":"client blocked from this operation"
+            # }
+            gui_print(_("login", "error_code").format(error_code=error_code))
+            logger.info("Login response: %s", redact_log_value(login_response))
+            raise CaptchaRequired()
+        ext_msg = str(redact_log_value(login_response))
+        logger.info("Login response: %s", ext_msg)
+        raise LoginException(ext_msg)
+
     async def _login(self) -> str:
         logger.info("Login flow started")
         gui_print = self._twitch.gui.print
@@ -429,71 +490,14 @@ class _AuthState:
             if "captcha_proof" in login_response:
                 payload["captcha"] = {"proof": login_response["captcha_proof"]}
 
-            # Error handling
             if "error_code" in login_response:
                 error_code_value = login_response["error_code"]
                 if not isinstance(error_code_value, int):
                     raise LoginException("Twitch login response had an invalid error code")
-                error_code = error_code_value
-                logger.info(f"Login error code: {error_code}")
-                if error_code == 1000:
-                    logger.info("1000: CAPTCHA is required")
-                    raise CaptchaRequired()
-                elif error_code in (2004, 3001):
-                    logger.info("3001: Login failed due to incorrect username or password")
-                    gui_print(_("login", "incorrect_login_pass"))
-                    if error_code == 2004:
-                        # invalid username
-                        login_form.clear(login=True)
-                    login_form.clear(password=True)
-                    continue
-                elif error_code in (
-                    3012,  # Invalid authy token
-                    3023,  # Invalid email code
-                ):
-                    logger.info("3012/23: Login failed due to incorrect 2FA code")
-                    if error_code == 3023:
-                        token_kind = "email"
-                        gui_print(_("login", "incorrect_email_code"))
-                    else:
-                        token_kind = "authy"
-                        gui_print(_("login", "incorrect_twofa_code"))
-                    login_form.clear(token=True)
-                    continue
-                elif error_code in (
-                    3011,  # Authy token needed
-                    3022,  # Email code needed
-                ):
-                    # 2FA handling
-                    logger.info("3011/22: 2FA token required")
-                    # user didn't provide a token, so ask them for it
-                    if error_code == 3022:
-                        token_kind = "email"
-                        gui_print(_("login", "email_code_required"))
-                    else:
-                        token_kind = "authy"
-                        gui_print(_("login", "twofa_code_required"))
-                    continue
-                elif error_code >= 5000:
-                    # Special errors, usually from Twitch telling the user to "go away"
-                    # We print the code out to inform the user, and just use chrome flow instead
-                    # {
-                    #     "error_code":5023,
-                    #     "error":"Please update your app to continue",
-                    #     "error_description":"client is not supported for this feature"
-                    # }
-                    # {
-                    #     "error_code":5027,
-                    #     "error":"Please update your app to continue",
-                    #     "error_description":"client blocked from this operation"
-                    # }
-                    gui_print(_("login", "error_code").format(error_code=error_code))
-                    logger.info("Login response: %s", redact_log_value(login_response))
-                    raise CaptchaRequired()
-                else:
-                    ext_msg = str(redact_log_value(login_response))
-                    logger.info("Login response: %s", ext_msg)
-                    raise LoginException(ext_msg)
+                token_kind = self._handle_login_error(
+                    error_code_value, login_response, login_form, gui_print, token_kind
+                )
+                continue
             # Success handling
             if "access_token" in login_response:
                 access_token = login_response["access_token"]
