@@ -989,46 +989,8 @@ class Twitch:
             elif self._state is State.CHANNELS_FETCH:
                 await self._fetch_channels(channels)
             elif self._state is State.CHANNEL_SWITCH:
-                if self.settings.dump:
-                    self.gui.close()
+                if self._switch_channel(channels):
                     continue
-                self.gui.status.update(_("gui", "status", "switching"))
-                # Change into the selected channel, stay in the watching channel,
-                # or select a new channel that meets the required conditions
-                new_watching = None
-                selected_channel = self.gui.channels.get_selection()
-                if selected_channel is not None and self.can_watch(selected_channel):
-                    # selected channel is checked first, and set as long as we can watch it
-                    new_watching = selected_channel
-                else:
-                    # other channels additionally need to have a good reason
-                    # for a switch (including the watching one)
-                    # NOTE: we need to sort the channels every time because one channel
-                    # can end up streaming any game - channels aren't game-tied
-                    for channel in sorted(channels.values(), key=self.get_priority):
-                        if self.should_switch(channel):
-                            new_watching = channel
-                            break
-                watching_channel = self.watching_channel.get_with_default(None)
-                if new_watching is not None:
-                    # if we have a better switch target - do so
-                    self.watch(new_watching)
-                    # break the state change chain by clearing the flag
-                    self._state_change.clear()
-                elif watching_channel is not None and self.can_watch(watching_channel):
-                    # otherwise, continue watching what we had before and refill
-                    # the second distinct target if one is available.
-                    self.watch(watching_channel, update_status=False)
-                    self.gui.status.update(
-                        _("status", "watching").format(channel=watching_channel.name)
-                    )
-                    # break the state change chain by clearing the flag
-                    self._state_change.clear()
-                else:
-                    # not watching anything and there isn't anything to watch either
-                    self.print(_("status", "no_channel"))
-                    self.change_state(State.IDLE)
-                del new_watching, selected_channel, watching_channel
             elif self._state is State.RESTART:
                 raise ReloadRequest()
             elif self._state is State.EXIT:
@@ -1037,6 +999,49 @@ class Twitch:
                 # we've been requested to exit the application
                 break
             await self._state_change.wait()
+
+    def _switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
+        if self.settings.dump:
+            self.gui.close()
+            return True
+        self.gui.status.update(_("gui", "status", "switching"))
+        # Change into the selected channel, stay in the watching channel,
+        # or select a new channel that meets the required conditions
+        new_watching = None
+        selected_channel = self.gui.channels.get_selection()
+        if selected_channel is not None and self.can_watch(selected_channel):
+            # selected channel is checked first, and set as long as we can watch it
+            new_watching = selected_channel
+        else:
+            # other channels additionally need to have a good reason
+            # for a switch (including the watching one)
+            # NOTE: we need to sort the channels every time because one channel
+            # can end up streaming any game - channels aren't game-tied
+            for channel in sorted(channels.values(), key=self.get_priority):
+                if self.should_switch(channel):
+                    new_watching = channel
+                    break
+        watching_channel = self.watching_channel.get_with_default(None)
+        if new_watching is not None:
+            # if we have a better switch target - do so
+            self.watch(new_watching)
+            # break the state change chain by clearing the flag
+            self._state_change.clear()
+        elif watching_channel is not None and self.can_watch(watching_channel):
+            # otherwise, continue watching what we had before and refill
+            # the second distinct target if one is available.
+            self.watch(watching_channel, update_status=False)
+            self.gui.status.update(
+                _("status", "watching").format(channel=watching_channel.name)
+            )
+            # break the state change chain by clearing the flag
+            self._state_change.clear()
+        else:
+            # not watching anything and there isn't anything to watch either
+            self.print(_("status", "no_channel"))
+            self.change_state(State.IDLE)
+        del new_watching, selected_channel, watching_channel
+        return False
 
     async def _fetch_channels(
         self, channels: OrderedDict[int, Channel]
