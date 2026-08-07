@@ -2289,6 +2289,40 @@ class Twitch:
                 fetched_data[campaign_id] = campaign_data
         return self._merge_data(campaign_ids, fetched_data)
 
+    def _dump_inventory(
+        self, inventory_data: dict[str, JsonType], inventory: JsonType
+    ) -> None:
+        # dump the campaigns data to the dump file
+        with _open_dump("a") as file:
+            # we need to pre-process the inventory dump a little
+            dump_data: JsonType = deepcopy(inventory_data)
+            for campaign_data in dump_data.values():
+                if not isinstance(campaign_data, dict):
+                    continue
+                # replace ACL lists with a simple text description
+                allow = campaign_data.get("allow")
+                if (
+                    isinstance(allow, dict)
+                    and allow.get("isEnabled", True)
+                    and isinstance(allow.get("channels"), list)
+                    and allow["channels"]
+                ):
+                    # simply count the channels included in the ACL
+                    allow["channels"] = f"{len(allow['channels'])} channels"
+                # replace drop instance IDs, so they don't include user IDs
+                drops = campaign_data.get("timeBasedDrops")
+                if not isinstance(drops, list):
+                    continue
+                for drop_data in drops:
+                    if not isinstance(drop_data, dict):
+                        continue
+                    self_data = drop_data.get("self")
+                    if isinstance(self_data, dict) and self_data.get("dropInstanceID"):
+                        self_data["dropInstanceID"] = "..."
+            json.dump(dump_data, file, indent=4, sort_keys=True)
+            file.write("\n\n")  # add 2x new line spacer
+            json.dump(inventory["gameEventDrops"], file, indent=4, sort_keys=True, default=str)
+
     async def _fetch_campaign_details(
         self,
         inventory_data: dict[str, JsonType],
@@ -2381,36 +2415,7 @@ class Twitch:
                 del inventory_data[campaign_id]
 
         if self.settings.dump:
-            # dump the campaigns data to the dump file
-            with _open_dump("a") as file:
-                # we need to pre-process the inventory dump a little
-                dump_data: JsonType = deepcopy(inventory_data)
-                for campaign_data in dump_data.values():
-                    if not isinstance(campaign_data, dict):
-                        continue
-                    # replace ACL lists with a simple text description
-                    allow = campaign_data.get("allow")
-                    if (
-                        isinstance(allow, dict)
-                        and allow.get("isEnabled", True)
-                        and isinstance(allow.get("channels"), list)
-                        and allow["channels"]
-                    ):
-                        # simply count the channels included in the ACL
-                        allow["channels"] = f"{len(allow['channels'])} channels"
-                    # replace drop instance IDs, so they don't include user IDs
-                    drops = campaign_data.get("timeBasedDrops")
-                    if not isinstance(drops, list):
-                        continue
-                    for drop_data in drops:
-                        if not isinstance(drop_data, dict):
-                            continue
-                        self_data = drop_data.get("self")
-                        if isinstance(self_data, dict) and self_data.get("dropInstanceID"):
-                            self_data["dropInstanceID"] = "..."
-                json.dump(dump_data, file, indent=4, sort_keys=True)
-                file.write("\n\n")  # add 2x new line spacer
-                json.dump(inventory["gameEventDrops"], file, indent=4, sort_keys=True, default=str)
+            self._dump_inventory(inventory_data, inventory)
 
         # Use the merged data to create campaign objects. A single malformed
         # campaign should not discard the rest of the viewer inventory.
