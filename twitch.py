@@ -2289,6 +2289,65 @@ class Twitch:
                 fetched_data[campaign_id] = campaign_data
         return self._merge_data(campaign_ids, fetched_data)
 
+    async def _install_inventory(
+        self,
+        campaigns: list[DropsCampaign],
+        status_update: Callable[[str], Any],
+    ) -> None:
+        self._drops.clear()
+        self.gui.inv.clear()
+        self.inventory.clear()
+        self._campaigns.clear()
+        self._mnt_triggers.clear()
+        switch_triggers: set[datetime] = set()
+        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+        # add the campaigns to the internal inventory
+        for campaign in campaigns:
+            self._drops.update({drop.id: drop for drop in campaign.drops})
+            self._campaigns[campaign.id] = campaign
+            if campaign.can_earn_within(next_hour):
+                switch_triggers.update(campaign.time_triggers)
+            self.inventory.append(campaign)
+        now_timestamp = time()
+        self._watch_claim_cooldowns = {
+            drop_id: blocked_until
+            for drop_id, blocked_until in getattr(self, "_watch_claim_cooldowns", {}).items()
+            if blocked_until > now_timestamp
+            and drop_id in self._drops
+            and not self._drops[drop_id].is_claimed
+        }
+        # concurrently add the campaigns into the GUI
+        # NOTE: this fetches pictures from the CDN, so might be slow without a cache
+        status_update(
+            _("gui", "status", "adding_campaigns").format(counter=f"(0/{len(campaigns)})")
+        )
+        add_campaign_tasks: list[asyncio.Task[None]] = [
+            asyncio.create_task(self.gui.inv.add_campaign(campaign))
+            for campaign in campaigns
+        ]
+        try:
+            for i, coro in enumerate(asyncio.as_completed(add_campaign_tasks), start=1):
+                await coro
+                status_update(
+                    _("gui", "status", "adding_campaigns").format(
+                        counter=f"({i}/{len(campaigns)})"
+                    )
+                )
+                # this is needed here explicitly, because cache reads from disk don't raise this
+                if self.gui.close_requested:
+                    raise ExitRequest()
+        finally:
+            await cancel_tasks(add_campaign_tasks)
+        self._mnt_triggers.extend(sorted(switch_triggers))
+        # trim out all triggers that we're already past
+        now = datetime.now(timezone.utc)
+        while self._mnt_triggers and self._mnt_triggers[0] <= now:
+            self._mnt_triggers.popleft()
+        # NOTE: maintenance task is restarted at the end of each inventory fetch
+        if self._mnt_task is not None and not self._mnt_task.done():
+            await cancel_tasks([self._mnt_task])
+        self._mnt_task = asyncio.create_task(self._maintenance_task())
+
     def _build_campaigns(
         self,
         inventory_data: dict[str, JsonType],
@@ -2439,60 +2498,7 @@ class Twitch:
             self._dump_inventory(inventory_data, inventory)
 
         campaigns = self._build_campaigns(inventory_data, claimed_benefits)
-
-        self._drops.clear()
-        self.gui.inv.clear()
-        self.inventory.clear()
-        self._campaigns.clear()
-        self._mnt_triggers.clear()
-        switch_triggers: set[datetime] = set()
-        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
-        # add the campaigns to the internal inventory
-        for campaign in campaigns:
-            self._drops.update({drop.id: drop for drop in campaign.drops})
-            self._campaigns[campaign.id] = campaign
-            if campaign.can_earn_within(next_hour):
-                switch_triggers.update(campaign.time_triggers)
-            self.inventory.append(campaign)
-        now_timestamp = time()
-        self._watch_claim_cooldowns = {
-            drop_id: blocked_until
-            for drop_id, blocked_until in getattr(self, "_watch_claim_cooldowns", {}).items()
-            if blocked_until > now_timestamp
-            and drop_id in self._drops
-            and not self._drops[drop_id].is_claimed
-        }
-        # concurrently add the campaigns into the GUI
-        # NOTE: this fetches pictures from the CDN, so might be slow without a cache
-        status_update(
-            _("gui", "status", "adding_campaigns").format(counter=f"(0/{len(campaigns)})")
-        )
-        add_campaign_tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(self.gui.inv.add_campaign(campaign))
-            for campaign in campaigns
-        ]
-        try:
-            for i, coro in enumerate(asyncio.as_completed(add_campaign_tasks), start=1):
-                await coro
-                status_update(
-                    _("gui", "status", "adding_campaigns").format(
-                        counter=f"({i}/{len(campaigns)})"
-                    )
-                )
-                # this is needed here explicitly, because cache reads from disk don't raise this
-                if self.gui.close_requested:
-                    raise ExitRequest()
-        finally:
-            await cancel_tasks(add_campaign_tasks)
-        self._mnt_triggers.extend(sorted(switch_triggers))
-        # trim out all triggers that we're already past
-        now = datetime.now(timezone.utc)
-        while self._mnt_triggers and self._mnt_triggers[0] <= now:
-            self._mnt_triggers.popleft()
-        # NOTE: maintenance task is restarted at the end of each inventory fetch
-        if self._mnt_task is not None and not self._mnt_task.done():
-            await cancel_tasks([self._mnt_task])
-        self._mnt_task = asyncio.create_task(self._maintenance_task())
+        await self._install_inventory(campaigns, status_update)
 
     def get_active_campaign(self, channel: Channel | None = None) -> DropsCampaign | None:
         if not self.wanted_games:
