@@ -24,7 +24,7 @@ class AsyncLifecycleTests(unittest.TestCase):
             task = asyncio.create_task(fail())
             await asyncio.sleep(0)
             await cancel_tasks([task])
-            self.assertTrue(task.done())
+            self.assertIsInstance(task.exception(), RuntimeError)
 
         asyncio.run(exercise())
 
