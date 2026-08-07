@@ -301,17 +301,6 @@ GQL_QUERIES: dict[str, GQLPersistedQuery] = {
             "channel": ...,  # channel login
         },
     ),
-    # can be used to claim channel points
-    "ClaimCommunityPoints": GQLPersistedQuery(
-        "ClaimCommunityPoints",
-        "46aaeebe02c99afdf4fc97c7c0cba964124bf6b0af229395f1f6d1feed05b3d0",
-        variables={
-            "input": {
-                "claimID": ...,  # points claim_id
-                "channelID": ...,  # channel ID as a str
-            },
-        },
-    ),
     # can be used to claim a drop
     "ClaimDrop": GQLPersistedQuery(
         "DropsPage_ClaimDropRewards",
@@ -320,14 +309,6 @@ GQL_QUERIES: dict[str, GQLPersistedQuery] = {
             "input": {
                 "dropInstanceID": ...,  # drop claim_id
             },
-        },
-    ),
-    # returns current state of points (balance, claim available) for a particular channel
-    "ChannelPointsContext": GQLPersistedQuery(
-        "ChannelPointsContext",
-        "374314de591e69925fce3ddc2bcf085796f56ebb8cad67a0daa3165c03adc345",
-        variables={
-            "channelLogin": ...,  # channel login
         },
     ),
     # returns all in-progress campaigns
@@ -372,19 +353,6 @@ GQL_QUERIES: dict[str, GQLPersistedQuery] = {
             "channelID": ...,  # channel ID as a str
         },
     ),
-    # retuns stream playback access token
-    "PlaybackAccessToken": GQLPersistedQuery(
-        "PlaybackAccessToken",
-        "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
-        variables={
-            "isLive": True,
-            "isVod": False,
-            "login": ...,  # channel login
-            "platform": "web",
-            "playerType": "site",
-            "vodID": "",
-        },
-    ),
     # returns live channels for a particular game
     "GameDirectory": GQLPersistedQuery(
         "DirectoryPage_Game",
@@ -405,31 +373,6 @@ GQL_QUERIES: dict[str, GQLPersistedQuery] = {
                 "requestID": "JIRA-VXP-2397",
             },
             "sortTypeIsRecency": False,
-        },
-    ),
-    "SlugRedirect": GQLPersistedQuery(  # can be used to turn game name -> game slug
-        "DirectoryGameRedirect",
-        "1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc",
-        variables={
-            "name": ...,  # game name
-        },
-    ),
-    "NotificationsView": GQLPersistedQuery(  # unused, triggers notifications "update-summary"
-        "OnsiteNotifications_View",
-        "e8e06193f8df73d04a1260df318585d1bd7a7bb447afa058e52095513f2bfa4f",
-        variables={
-            "input": {},
-        },
-    ),
-    "NotificationsList": GQLPersistedQuery(  # unused
-        "OnsiteNotifications_ListNotifications",
-        "11cdb54a2706c2c0b2969769907675680f02a6e77d8afe79a749180ad16bfea6",
-        variables={
-            "cursor": "",
-            "displayType": "VIEWER",
-            "language": "en",
-            "limit": 10,
-            "shouldLoadLastBroadcast": False,
         },
     ),
     "NotificationsDelete": GQLPersistedQuery(
@@ -485,15 +428,11 @@ class WebsocketTopic:
 
 WEBSOCKET_TOPICS: dict[str, dict[str, str]] = {
     "User": {  # Using user_id
-        "Presence": "presence",  # unused
         "Drops": "user-drop-events",
         "Notifications": "onsite-notifications",
-        "CommunityPoints": "community-points-user-v1",
     },
     "Channel": {  # Using channel_id
-        "Drops": "channel-drop-events",  # unused
         "StreamState": "video-playback-by-id",
         "StreamUpdate": "broadcast-settings-update",
-        "CommunityPoints": "community-points-channel-v1",  # unused
     },
 }
