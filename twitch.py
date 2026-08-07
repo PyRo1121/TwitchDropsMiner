@@ -2289,6 +2289,27 @@ class Twitch:
                 fetched_data[campaign_id] = campaign_data
         return self._merge_data(campaign_ids, fetched_data)
 
+    def _build_campaigns(
+        self,
+        inventory_data: dict[str, JsonType],
+        claimed_benefits: dict[str, datetime],
+    ) -> list[DropsCampaign]:
+        # Use the merged data to create campaign objects. A single malformed
+        # campaign should not discard the rest of the viewer inventory.
+        campaigns: list[DropsCampaign] = []
+        for campaign_data in inventory_data.values():
+            try:
+                campaigns.append(DropsCampaign(self, campaign_data, claimed_benefits))
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "Skipping malformed Twitch campaign: %s",
+                    type(exc).__name__,
+                )
+        campaigns.sort(key=lambda c: c.active, reverse=True)
+        campaigns.sort(key=lambda c: c.upcoming and c.starts_at or c.ends_at)
+        campaigns.sort(key=lambda c: c.eligible, reverse=True)
+        return campaigns
+
     def _dump_inventory(
         self, inventory_data: dict[str, JsonType], inventory: JsonType
     ) -> None:
@@ -2417,20 +2438,7 @@ class Twitch:
         if self.settings.dump:
             self._dump_inventory(inventory_data, inventory)
 
-        # Use the merged data to create campaign objects. A single malformed
-        # campaign should not discard the rest of the viewer inventory.
-        campaigns: list[DropsCampaign] = []
-        for campaign_data in inventory_data.values():
-            try:
-                campaigns.append(DropsCampaign(self, campaign_data, claimed_benefits))
-            except (KeyError, TypeError, ValueError) as exc:
-                logger.warning(
-                    "Skipping malformed Twitch campaign: %s",
-                    type(exc).__name__,
-                )
-        campaigns.sort(key=lambda c: c.active, reverse=True)
-        campaigns.sort(key=lambda c: c.upcoming and c.starts_at or c.ends_at)
-        campaigns.sort(key=lambda c: c.eligible, reverse=True)
+        campaigns = self._build_campaigns(inventory_data, claimed_benefits)
 
         self._drops.clear()
         self.gui.inv.clear()
