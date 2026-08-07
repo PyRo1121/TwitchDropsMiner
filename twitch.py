@@ -228,6 +228,77 @@ class _AuthState:
                 logger.debug("Twitch refresh response did not rotate the refresh token")
             return access_token
 
+    async def _poll_device_token(
+        self,
+        headers: dict[str, str],
+        payload: JsonType,
+        interval: int,
+        expires_at: datetime,
+        client_info: ClientInfo,
+    ) -> str:
+        while True:
+            # sleep first, not like the user is gonna enter the code *that* fast
+            await asyncio.sleep(interval)
+            async with self._twitch.request(
+                "POST",
+                "https://id.twitch.tv/oauth2/token",
+                headers=headers,
+                data=payload,
+                invalidate_after=expires_at,
+            ) as response:
+                if response.status == 200:
+                    response_json = await _read_json(
+                        response, LoginException, "OAuth token response was not valid JSON"
+                    )
+                    if not isinstance(response_json, dict):
+                        raise LoginException("OAuth token response was malformed")
+                    # {
+                    #     "access_token": "40 chars [A-Za-z0-9]",
+                    #     "refresh_token": "40 chars [A-Za-z0-9]",
+                    #     "scope": [...],
+                    #     "token_type": "bearer"
+                    # }
+                    access_token = response_json.get("access_token")
+                    if not isinstance(access_token, str) or not access_token:
+                        raise LoginException("OAuth token response omitted access_token")
+                    refresh_token = response_json.get("refresh_token")
+                    if isinstance(refresh_token, str) and refresh_token:
+                        self._save_refresh_token(client_info.CLIENT_ID, refresh_token)
+                    else:
+                        logger.debug(
+                            "Twitch device login response did not include a refresh token"
+                        )
+                    self.access_token = access_token
+                    return self.access_token
+                try:
+                    response_json = await response.json(loads=safe_loads)
+                except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError):
+                    response_json = {}
+                if not isinstance(response_json, dict):
+                    response_json = {}
+                error = response_json.get("message") or response_json.get("error")
+                if response.status == 429 or error == "slow_down":
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after is None:
+                        retry_delay = interval + 5
+                    else:
+                        try:
+                            retry_delay = max(1, int(float(retry_after)))
+                        except ValueError:
+                            retry_delay = interval + 5
+                    interval = max(interval + 5, retry_delay)
+                    continue
+                if error == "authorization_pending":
+                    continue
+                if error == "expired_token":
+                    raise RequestInvalid()
+                if error == "access_denied":
+                    raise LoginException("OAuth device authorization was denied")
+                raise LoginException(
+                    "OAuth device authorization failed "
+                    f"(HTTP {response.status}): {redact_log_value(response_json)}"
+                )
+
     async def _oauth_login(self) -> str:
         login_form: LoginForm = self._twitch.gui.login
         client_info: ClientInfo = self._twitch._client_type
@@ -282,70 +353,9 @@ class _AuthState:
                     "device_code": device_code,
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 }
-                while True:
-                    # sleep first, not like the user is gonna enter the code *that* fast
-                    await asyncio.sleep(interval)
-                    async with self._twitch.request(
-                        "POST",
-                        "https://id.twitch.tv/oauth2/token",
-                        headers=headers,
-                        data=payload,
-                        invalidate_after=expires_at,
-                    ) as response:
-                        if response.status == 200:
-                            response_json = await _read_json(
-                                response, LoginException, "OAuth token response was not valid JSON"
-                            )
-                            if not isinstance(response_json, dict):
-                                raise LoginException("OAuth token response was malformed")
-                            # {
-                            #     "access_token": "40 chars [A-Za-z0-9]",
-                            #     "refresh_token": "40 chars [A-Za-z0-9]",
-                            #     "scope": [...],
-                            #     "token_type": "bearer"
-                            # }
-                            access_token = response_json.get("access_token")
-                            if not isinstance(access_token, str) or not access_token:
-                                raise LoginException("OAuth token response omitted access_token")
-                            refresh_token = response_json.get("refresh_token")
-                            if isinstance(refresh_token, str) and refresh_token:
-                                self._save_refresh_token(
-                                    client_info.CLIENT_ID, refresh_token
-                                )
-                            else:
-                                logger.debug(
-                                    "Twitch device login response did not include a refresh token"
-                                )
-                            self.access_token = access_token
-                            return self.access_token
-                        try:
-                            response_json = await response.json(loads=safe_loads)
-                        except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError):
-                            response_json = {}
-                        if not isinstance(response_json, dict):
-                            response_json = {}
-                        error = response_json.get("message") or response_json.get("error")
-                        if response.status == 429 or error == "slow_down":
-                            retry_after = response.headers.get("Retry-After")
-                            if retry_after is None:
-                                retry_delay = interval + 5
-                            else:
-                                try:
-                                    retry_delay = max(1, int(float(retry_after)))
-                                except ValueError:
-                                    retry_delay = interval + 5
-                            interval = max(interval + 5, retry_delay)
-                            continue
-                        if error == "authorization_pending":
-                            continue
-                        if error == "expired_token":
-                            raise RequestInvalid()
-                        if error == "access_denied":
-                            raise LoginException("OAuth device authorization was denied")
-                        raise LoginException(
-                            "OAuth device authorization failed "
-                            f"(HTTP {response.status}): {redact_log_value(response_json)}"
-                        )
+                return await self._poll_device_token(
+                    headers, payload, interval, expires_at, client_info
+                )
             except RequestInvalid:
                 # the device_code has expired, request a new code
                 continue
