@@ -356,50 +356,68 @@ def _deserialize(obj: JsonType) -> Any:
     return obj
 
 
+def _merge_mappings(
+    primary: Mapping[Any, Any],
+    secondary: Mapping[Any, Any],
+    combine: Callable[[Any, Any], Any],
+    *,
+    keep_primary_only: bool,
+) -> dict[Any, Any]:
+    """Apply one recursive mapping policy to two JSON objects."""
+    merged: dict[Any, Any] = {}
+    for key in set(primary.keys()) | set(secondary.keys()):
+        if key in primary and key in secondary:
+            merged[key] = combine(primary[key], secondary[key])
+        elif key in primary:
+            if keep_primary_only:
+                merged[key] = primary[key]
+        else:
+            merged[key] = secondary[key]
+    return merged
+
+
+def _default_value(value: Any, default: Any) -> Any:
+    if type(value) is not type(default):
+        return default
+    if isinstance(value, dict):
+        _apply_defaults(value, default)
+    return value
+
+
 def _apply_defaults(obj: JsonType, template: Mapping[Any, Any]) -> None:
     # NOTE: This modifies object in place
-    for k, v in list(obj.items()):
-        if k not in template:
-            # unknown key: overwrite from template
-            del obj[k]
-        elif type(v) is not type(template[k]):
-            # types don't match: overwrite from template
-            obj[k] = template[k]
-        elif isinstance(v, dict):
-            if not isinstance(template[k], dict):
-                raise TypeError(f"Template value for {k!r} must be a mapping")
-            _apply_defaults(v, template[k])
-    # ensure the object is not missing any keys
-    for k in template.keys():
-        if k not in obj:
-            obj[k] = template[k]
+    merged = _merge_mappings(
+        obj,
+        template,
+        _default_value,
+        keep_primary_only=False,
+    )
+    obj.clear()
+    obj.update(merged)
 
 
 def merge_primary_json(primary: JsonType, secondary: JsonType) -> JsonType:
     """Merge API payloads while preserving primary values and progress."""
-    merged: JsonType = {}
-    for key in set(primary.keys()) | set(secondary.keys()):
-        in_primary = key in primary
-        if in_primary and key in secondary:
-            primary_value = primary[key]
-            secondary_value = secondary[key]
-            if primary_value is None:
-                merged[key] = secondary_value
-            elif secondary_value is None:
-                merged[key] = primary_value
-            elif type(primary_value) is not type(secondary_value):
-                raise TypeError("Inconsistent merge data")
-            elif isinstance(primary_value, dict):
-                merged[key] = merge_primary_json(primary_value, secondary_value)
-            elif isinstance(primary_value, list):
-                merged[key] = _merge_primary_lists(primary_value, secondary_value)
-            else:
-                merged[key] = primary_value
-        elif in_primary:
-            merged[key] = primary[key]
-        else:
-            merged[key] = secondary[key]
-    return merged
+    return _merge_mappings(
+        primary,
+        secondary,
+        _merge_primary_value,
+        keep_primary_only=True,
+    )
+
+
+def _merge_primary_value(primary: Any, secondary: Any) -> Any:
+    if primary is None:
+        return secondary
+    if secondary is None:
+        return primary
+    if type(primary) is not type(secondary):
+        raise TypeError("Inconsistent merge data")
+    if isinstance(primary, dict):
+        return merge_primary_json(primary, secondary)
+    if isinstance(primary, list):
+        return _merge_primary_lists(primary, secondary)
+    return primary
 
 
 def _merge_primary_lists(primary: list[Any], secondary: list[Any]) -> list[Any]:
