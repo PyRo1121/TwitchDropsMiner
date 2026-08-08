@@ -22,7 +22,7 @@ from oauth_storage import OAuthTokenStore
 from channel import Channel
 from websocket import WebsocketPool
 from inventory import DropsCampaign
-from session_history import Scalar, SessionHistory, Severity
+from session_history import HistoryEvent, Scalar, SessionHistory, Severity
 from exceptions import (
     ExitRequest,
     GQLException,
@@ -893,13 +893,17 @@ class Twitch:
         history = getattr(self, "history", None)
         if history is None:
             return
+        event: HistoryEvent | None = None
         try:
-            history.record(kind, severity=severity, data=data)
+            event = history.record(kind, severity=severity, data=data)
         except (RuntimeError, TypeError, ValueError) as exc:
             logger.debug("Unable to record history event %s: %s", kind, type(exc).__name__)
         refresh = getattr(self.gui, "history_changed", None)
         if refresh is not None:
             refresh()
+        on_event = getattr(self.gui, "on_history_event", None)
+        if event is not None and on_event is not None:
+            on_event(event)
 
     def history_increment(self, key: str, amount: int = 1) -> None:
         history = getattr(self, "history", None)
@@ -987,9 +991,12 @@ class Twitch:
             failure_reason = failure_reason or type(exc).__name__
             raise
         finally:
-            self.history.finish(session_status, reason=failure_reason)
+            finished = self.history.finish(session_status, reason=failure_reason)
             if refresh_history is not None:
                 refresh_history()
+            on_event = getattr(self.gui, "on_history_event", None)
+            if finished is not None and finished.events and on_event is not None:
+                on_event(finished.events[-1])
 
     async def _run(self):
         """

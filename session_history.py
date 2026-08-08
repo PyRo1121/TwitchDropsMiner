@@ -32,7 +32,7 @@ class HistoryEvent:
     at: str
     kind: str
     severity: Severity = "info"
-    data: dict[str, Scalar] = field(default_factory=dict)
+    data: Mapping[str, Scalar] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {

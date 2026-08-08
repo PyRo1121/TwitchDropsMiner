@@ -1,7 +1,7 @@
 """System tray for the Qt UI — QSystemTrayIcon with generated state icons."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -80,9 +80,27 @@ class QtTray:
     def change_icon(self, state: str) -> None:
         self._icon.setIcon(_state_icon(state))
 
-    def notify(self, message: str, title: str, duration: int = 5000) -> None:
-        if self.available and getattr(self._manager._twitch.settings, "tray_notifications", True):
-            self._icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, duration)
+    def notify(
+        self,
+        message: str,
+        title: str,
+        duration: int = 5000,
+        *,
+        severity: Literal["info", "warning", "error"] = "info",
+    ) -> bool:
+        if not (
+            self.available
+            and QSystemTrayIcon.supportsMessages()
+            and getattr(self._manager._twitch.settings, "tray_notifications", True)
+        ):
+            return False
+        message_icon = {
+            "info": QSystemTrayIcon.MessageIcon.Information,
+            "warning": QSystemTrayIcon.MessageIcon.Warning,
+            "error": QSystemTrayIcon.MessageIcon.Critical,
+        }[severity]
+        self._icon.showMessage(title, message, message_icon, duration)
+        return True
 
     def get_title(self, drop: TimedDrop | None) -> str:
         if drop is None:

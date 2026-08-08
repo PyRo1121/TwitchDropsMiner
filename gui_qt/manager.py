@@ -35,6 +35,8 @@ from translate import _
 from constants import OUTPUT_FORMATTER, State, _resource_path as resource_path
 from game_metadata import SteamMetadata, SteamMetadataProvider
 from utils import format_duration
+from notifications import Alert, NotificationCenter
+from session_history import HistoryEvent
 from .image_cache import QtImageCache
 from .pages import ActivityPage, ChannelsPage, HeroCard, HistoryPage, InventoryPage, LoginPanel
 from .subs import (
@@ -85,6 +87,7 @@ class QtGUIManager(QMainWindow):
         self._theme_dark = bool(twitch.settings.dark_mode)
         self._theme = make_theme(self._theme_dark)
         self._tasks = QtTaskRegistry()
+        self._notifications = NotificationCenter()
         self._image_cache = QtImageCache(twitch, tasks=self._tasks)
         self._steam_metadata = SteamMetadataProvider(twitch)
         self._metadata_task: asyncio.Task[Any] | None = None
@@ -804,6 +807,23 @@ class QtGUIManager(QMainWindow):
         history = getattr(self._twitch, "history", None)
         if history_page is not None and history is not None:
             history_page.set_sessions(history.sessions)
+
+    def on_history_event(self, event: HistoryEvent) -> None:
+        self.history_changed()
+        alert = self._notifications.handle(event)
+        if alert is None:
+            return
+        duration = 10000 if alert.severity != "info" else 7000
+        shown = self.tray.notify(
+            alert.message,
+            alert.title,
+            duration,
+            severity=alert.severity,
+        )
+        self.tray.change_icon("error" if alert.severity == "error" else "maint")
+        self.diagnostic_label.setText(alert.message)
+        if not shown:
+            self.print(f"Attention: {alert.title} — {alert.message}")
 
     def _apply_ring_theme(self) -> None:
         palette = self._theme.p
