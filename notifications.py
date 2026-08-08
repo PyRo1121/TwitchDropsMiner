@@ -44,6 +44,8 @@ class NotificationCenter:
         key = self._key_for(event)
         if key is None:
             return None
+        if event.kind == "session.failed" and "auth.required" in self._active:
+            return None
         if event.kind == "claim.unconfirmed":
             attempts = self._claim_attempts.get(key, 0) + 1
             self._claim_attempts[key] = attempts
@@ -71,7 +73,7 @@ class NotificationCenter:
         if event.kind == "session.failed":
             return "session.failed"
         if event.kind == "campaign.deadline":
-            return "campaign.deadline"
+            return "campaign.deadline:" + str(event.data.get("campaign", "unknown"))
         if event.kind == "claim.unconfirmed":
             return "claim.unconfirmed:" + self._claim_context(event)
         return None

@@ -764,6 +764,7 @@ class Twitch:
         self._dual_watch_enabled = True
         self._history_auth_recorded = False
         self._history_watch_signature: tuple[tuple[int, str], ...] | None = None
+        self._history_deadline_alerts: set[str] = set()
         # Websocket
         self.websocket = WebsocketPool(self)
         # Maintenance task
@@ -967,6 +968,7 @@ class Twitch:
         self.history.start()
         self._history_auth_recorded = False
         self._history_watch_signature = None
+        self._history_deadline_alerts.clear()
         refresh_history = getattr(self.gui, "history_changed", None)
         if refresh_history is not None:
             refresh_history()
@@ -1015,7 +1017,15 @@ class Twitch:
         # Re-enable the optional second slot after a full application reload;
         # a live reconciliation failure disables it for the current run.
         self._dual_watch_enabled = True
-        auth_state = await self.get_auth()
+        try:
+            auth_state = await self.get_auth()
+        except (CaptchaRequired, LoginException, RequestInvalid) as exc:
+            self.history_event(
+                "auth.required",
+                severity="warning",
+                data={"reason": type(exc).__name__},
+            )
+            raise
         if not self._history_auth_recorded:
             self.history_event("auth.restored")
             self._history_auth_recorded = True
@@ -1130,10 +1140,30 @@ class Twitch:
             "inventory.synced",
             data={"campaigns": len(self.inventory), "drops": len(self._drops)},
         )
+        self._record_campaign_deadlines()
         self.gui.set_games(set(campaign.game for campaign in self.inventory))
         # Save state on every inventory fetch
         self.save()
         self.change_state(State.GAMES_UPDATE)
+
+    def _record_campaign_deadlines(self) -> None:
+        now = datetime.now(timezone.utc)
+        for campaign in self.inventory:
+            remaining = (campaign.ends_at - now).total_seconds()
+            if campaign.finished or not campaign.active or not 0 < remaining <= 3600:
+                continue
+            if campaign.id in self._history_deadline_alerts:
+                continue
+            self._history_deadline_alerts.add(campaign.id)
+            self.history_event(
+                "campaign.deadline",
+                severity="warning",
+                data={
+                    "campaign": campaign.name,
+                    "game": campaign.game.name,
+                    "remaining_minutes": max(1, int(remaining // 60)),
+                },
+            )
 
     def _switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
         if self.settings.dump:
