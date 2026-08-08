@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from translate import _
 from game_metadata import SteamMetadata
+from utils import format_duration
 
 from .contracts import ImageCache
 from .widgets import (
@@ -38,6 +40,7 @@ from .widgets import (
 if TYPE_CHECKING:
     from channel import Channel
     from inventory import DropsCampaign, TimedDrop
+    from session_history import SessionRecord
 
 
 class LoginPanel(Card):
@@ -567,6 +570,118 @@ class ActivityPage(QWidget):
         if compact:
             self.log.setMaximumHeight(150)
         layout.addWidget(self.log)
+
+
+def _history_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone()
+
+
+def _history_time(value: str | None) -> str:
+    parsed = _history_datetime(value)
+    return parsed.strftime("%Y-%m-%d %H:%M") if parsed is not None else "—"
+
+
+class SessionCard(Card):
+    def __init__(self, session: SessionRecord) -> None:
+        super().__init__()
+        self.setObjectName("sessionCard")
+        status_values = {
+            "running": ("RUNNING", "#5fe1d3", "rgba(95,225,211,0.14)"),
+            "stopped": ("STOPPED", "#a1a9bd", "rgba(161,169,189,0.14)"),
+            "failed": ("FAILED", "#ff6f91", "rgba(255,111,145,0.14)"),
+            "interrupted": ("INTERRUPTED", "#ffb86b", "rgba(255,184,107,0.14)"),
+        }
+        label, color, background = status_values.get(
+            session.status, (session.status.upper(), "#a1a9bd", "rgba(161,169,189,0.14)")
+        )
+        header = QHBoxLayout()
+        title = QLabel(f"Session · {_history_time(session.started_at)}")
+        title.setObjectName("h2")
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(Badge(label, color, background))
+        self.body().addLayout(header)
+
+        ended = "in progress" if session.ended_at is None else _history_time(session.ended_at)
+        started = _history_datetime(session.started_at)
+        finished = _history_datetime(session.ended_at)
+        duration = "—"
+        if started is not None:
+            end = finished or datetime.now(started.tzinfo)
+            duration = format_duration(max(0, (end - started).total_seconds()))
+        summary = session.summary
+        summary_label = QLabel(
+            f"{_history_time(session.started_at)} → {ended} · {duration} · "
+            f"{summary.get('claims_succeeded', 0)} claims · "
+            f"{summary.get('inventory_syncs', 0)} inventory syncs"
+        )
+        summary_label.setObjectName("muted")
+        self.body().addWidget(summary_label)
+
+        if session.events:
+            event_text = " · ".join(
+                event.kind.replace(".", " ") for event in session.events[-5:]
+            )
+            events_label = QLabel(event_text)
+            events_label.setObjectName("subtle")
+            events_label.setWordWrap(True)
+            self.body().addWidget(events_label)
+
+
+class HistoryPage(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("historyShell")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(PageIntro(
+            "HISTORY / RUN LEDGER",
+            "Session history",
+            "A local record of meaningful farming sessions and outcomes.",
+        ))
+        self.empty = EmptyState(
+            "No sessions recorded",
+            "Session history will appear after the miner starts.",
+            "Dismiss",
+        )
+        self.empty.action.connect(self.empty.hide)
+        layout.addWidget(self.empty)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget()
+        self._cards_layout = QVBoxLayout(container)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(10)
+        self._cards_layout.addStretch(1)
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+
+    def set_sessions(self, sessions: Iterable[SessionRecord]) -> None:
+        while self._cards_layout.count() > 1:
+            item = self._cards_layout.takeAt(0)
+            if item is None:
+                break
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        session_list = list(sessions)
+        for session in session_list:
+            self._cards_layout.insertWidget(
+                self._cards_layout.count() - 1,
+                SessionCard(session),
+            )
+        self.empty.setVisible(not session_list)
 
 
 class DropRow(Card):

@@ -211,9 +211,19 @@ class BaseDrop:
         return delim.join(benefit.name for benefit in self.benefits)
 
     async def claim(self) -> bool:
+        claim_attempted = self.can_claim
         result = await self._claim()
+        record_history = getattr(self._twitch, "history_event", None)
         if result:
             self.is_claimed = result
+            if claim_attempted and record_history is not None:
+                record_history(
+                    "claim.succeeded",
+                    data={
+                        "game": self.campaign.game.name,
+                        "reward": self.rewards_text(),
+                    },
+                )
             claim_text = (
                 f"{self.campaign.game.name}\n"
                 f"{self.rewards_text()} "
@@ -226,6 +236,15 @@ class BaseDrop:
             )
             self._twitch.gui.tray.notify(claim_text, _("gui", "tray", "notification_title"))
         else:
+            if claim_attempted and record_history is not None:
+                record_history(
+                    "claim.unconfirmed",
+                    severity="warning",
+                    data={
+                        "game": self.campaign.game.name,
+                        "reward": self.rewards_text(),
+                    },
+                )
             logger.error(f"Drop claim has potentially failed! Drop ID: {self.id}")
         return result
 

@@ -36,7 +36,7 @@ from constants import OUTPUT_FORMATTER, State, _resource_path as resource_path
 from game_metadata import SteamMetadata, SteamMetadataProvider
 from utils import format_duration
 from .image_cache import QtImageCache
-from .pages import ActivityPage, ChannelsPage, HeroCard, InventoryPage, LoginPanel
+from .pages import ActivityPage, ChannelsPage, HeroCard, HistoryPage, InventoryPage, LoginPanel
 from .subs import (
     QtCampaignProgress,
     QtChannelList,
@@ -229,6 +229,7 @@ class QtGUIManager(QMainWindow):
             "channels": "ph.broadcast-fill",
             "drops": "ph.drop-fill",
             "activity": "ph.activity",
+            "history": "ph.clock-counter-clockwise",
             "settings": "ph.sliders-horizontal-fill",
             "help": "ph.question-fill",
         }
@@ -236,6 +237,7 @@ class QtGUIManager(QMainWindow):
             ("overview", "Overview"),
             ("channels", _("gui", "channels", "name")),
             ("drops", "Drops"),
+            ("history", "History"),
             ("settings", _("gui", "tabs", "settings")),
             ("help", f'{_("gui", "tabs", "help")} && About'),
         )
@@ -279,7 +281,7 @@ class QtGUIManager(QMainWindow):
         command.setMaximumWidth(310)
         command.returnPressed.connect(self._submit_command)
         completer = QCompleter(
-            ["Overview", "Channels", "Drops", "Settings", "Help", "Event log"],
+            ["Overview", "Channels", "Drops", "History", "Settings", "Help", "Event log"],
             command,
         )
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -317,6 +319,8 @@ class QtGUIManager(QMainWindow):
             "inventory": "drops",
             "activity": "activity",
             "event log": "activity",
+            "history": "history",
+            "session history": "history",
             "settings": "settings",
             "help": "help",
             "about": "help",
@@ -461,6 +465,11 @@ class QtGUIManager(QMainWindow):
         activity = ActivityPage()
         self.pages["activity"] = activity
         self._add_page("activity", activity)
+
+        history = HistoryPage()
+        self.pages["history"] = history
+        self._history_page = history
+        self._add_page("history", history)
 
         settings = QWidget()
         self.pages["settings"] = settings
@@ -665,6 +674,7 @@ class QtGUIManager(QMainWindow):
             "drops": "Drops",
             "inventory": "Drops",
             "activity": "Event log",
+            "history": "Session history",
             "settings": "Preferences",
             "help": "Help & about",
         }
@@ -788,6 +798,12 @@ class QtGUIManager(QMainWindow):
 
     def print(self, message: str) -> None:
         self.output.print(message)
+
+    def history_changed(self) -> None:
+        history_page = getattr(self, "_history_page", None)
+        history = getattr(self._twitch, "history", None)
+        if history_page is not None and history is not None:
+            history_page.set_sessions(history.sessions)
 
     def _apply_ring_theme(self) -> None:
         palette = self._theme.p

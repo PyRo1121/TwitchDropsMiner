@@ -7,7 +7,7 @@ from time import time
 from copy import deepcopy
 from functools import partial
 from collections import abc, deque, OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import suppress, asynccontextmanager
@@ -22,7 +22,7 @@ from oauth_storage import OAuthTokenStore
 from channel import Channel
 from websocket import WebsocketPool
 from inventory import DropsCampaign
-from session_history import SessionHistory
+from session_history import Scalar, SessionHistory, Severity
 from exceptions import (
     ExitRequest,
     GQLException,
@@ -758,6 +758,8 @@ class Twitch:
         self._watch_resync_cooldowns: dict[str, float] = {}
         self._watch_generation = 0
         self._dual_watch_enabled = True
+        self._history_auth_recorded = False
+        self._history_watch_signature: tuple[tuple[int, str], ...] | None = None
         # Websocket
         self.websocket = WebsocketPool(self)
         # Maintenance task
@@ -881,6 +883,36 @@ class Twitch:
         """
         self.gui.print(message)
 
+    def history_event(
+        self,
+        kind: str,
+        *,
+        severity: Severity = "info",
+        data: Mapping[str, Scalar] | None = None,
+    ) -> None:
+        history = getattr(self, "history", None)
+        if history is None:
+            return
+        try:
+            history.record(kind, severity=severity, data=data)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.debug("Unable to record history event %s: %s", kind, type(exc).__name__)
+        refresh = getattr(self.gui, "history_changed", None)
+        if refresh is not None:
+            refresh()
+
+    def history_increment(self, key: str, amount: int = 1) -> None:
+        history = getattr(self, "history", None)
+        if history is None:
+            return
+        try:
+            history.increment(key, amount)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            logger.debug("Unable to update history summary %s: %s", key, type(exc).__name__)
+        refresh = getattr(self.gui, "history_changed", None)
+        if refresh is not None:
+            refresh()
+
     def save(self, *, force: bool = False) -> None:
         """
         Saves the application state.
@@ -925,6 +957,11 @@ class Twitch:
 
     async def run(self):
         self.history.start()
+        self._history_auth_recorded = False
+        self._history_watch_signature = None
+        refresh_history = getattr(self.gui, "history_changed", None)
+        if refresh_history is not None:
+            refresh_history()
         session_status: Literal["stopped", "failed"] = "stopped"
         failure_reason: str | None = None
         try:
@@ -951,6 +988,8 @@ class Twitch:
             raise
         finally:
             self.history.finish(session_status, reason=failure_reason)
+            if refresh_history is not None:
+                refresh_history()
 
     async def _run(self):
         """
@@ -966,6 +1005,9 @@ class Twitch:
         # a live reconciliation failure disables it for the current run.
         self._dual_watch_enabled = True
         auth_state = await self.get_auth()
+        if not self._history_auth_recorded:
+            self.history_event("auth.restored")
+            self._history_auth_recorded = True
         await self.websocket.start()
         # Watch tasks are created per channel when the first targets are selected.
         # Add default topics
@@ -1062,7 +1104,21 @@ class Twitch:
         self.stop_watching()
         # ensure the websocket is running
         await self.websocket.start()
-        await self.fetch_inventory()
+        try:
+            await self.fetch_inventory()
+        except ExitRequest:
+            raise
+        except Exception as exc:
+            self.history_event(
+                "inventory.sync_failed",
+                severity="warning",
+                data={"error_type": type(exc).__name__},
+            )
+            raise
+        self.history_event(
+            "inventory.synced",
+            data={"campaigns": len(self.inventory), "drops": len(self._drops)},
+        )
         self.gui.set_games(set(campaign.game for campaign in self.inventory))
         # Save state on every inventory fetch
         self.save()
@@ -1107,6 +1163,11 @@ class Twitch:
         else:
             # not watching anything and there isn't anything to watch either
             self.print(_("status", "no_channel"))
+            self.history_event(
+                "watch.unavailable",
+                severity="warning",
+                data={"reason": "no_eligible_channel"},
+            )
             self.change_state(State.IDLE)
         del new_watching, selected_channel, watching_channel
         return False
@@ -1666,11 +1727,28 @@ class Twitch:
                 )
             )
         primary = channels[0] if channels else None
+        history_signature = getattr(self, "_history_watch_signature", None)
         if primary is None:
+            if history_signature is not None:
+                self.history_event(
+                    "watch.stopped",
+                    data={"targets": len(history_signature)},
+                )
+                self._history_watch_signature = None
             self._watch_drop_ids.clear()
             self.watching_channel.clear()
             self.gui.channels.clear_watching()
             return
+        signature = tuple((channel.id, drop.id) for channel, drop in assignments)
+        if signature != history_signature:
+            self.history_event(
+                "watch.started" if history_signature is None else "watch.changed",
+                data={
+                    "channels": ", ".join(channel.name for channel in channels),
+                    "targets": len(signature),
+                },
+            )
+            self._history_watch_signature = signature
         self.watching_channel.set(primary)
         set_watching_channels = getattr(self.gui.channels, "set_watching_channels", None)
         if set_watching_channels is not None:
@@ -1780,6 +1858,13 @@ class Twitch:
         return self._watch_generation
 
     def stop_watching(self):
+        history_signature = getattr(self, "_history_watch_signature", None)
+        if history_signature is not None:
+            self.history_event(
+                "watch.stopped",
+                data={"targets": len(history_signature)},
+            )
+            self._history_watch_signature = None
         self.gui.clear_drop()
         self._bump_watch_generation()
         for event in self._watch_restart_events.values():

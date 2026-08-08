@@ -20,6 +20,11 @@ Severity = Literal["info", "warning", "error"]
 SessionStatus = Literal["running", "stopped", "failed", "interrupted"]
 _VALID_SEVERITIES = {"info", "warning", "error"}
 _VALID_STATUSES = {"running", "stopped", "failed", "interrupted"}
+_SUMMARY_EVENTS = {
+    "inventory.synced": "inventory_syncs",
+    "claim.succeeded": "claims_succeeded",
+    "claim.unconfirmed": "claims_unconfirmed",
+}
 
 
 @dataclass
@@ -218,6 +223,8 @@ class SessionHistory:
         if any(not isinstance(key, str) or not _is_scalar(value) for key, value in event.data.items()):
             raise TypeError("History event data must contain scalar values")
         self._append_event(self._current, event)
+        if (summary_key := _SUMMARY_EVENTS.get(kind)) is not None:
+            self._current.summary[summary_key] = self._current.summary.get(summary_key, 0) + 1
         self._save()
         return event
 
