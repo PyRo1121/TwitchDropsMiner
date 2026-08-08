@@ -22,6 +22,7 @@ from oauth_storage import OAuthTokenStore
 from channel import Channel
 from websocket import WebsocketPool
 from inventory import DropsCampaign
+from session_history import SessionHistory
 from exceptions import (
     ExitRequest,
     GQLException,
@@ -718,6 +719,7 @@ class Twitch:
         gui_factory: Callable[["Twitch"], Any] | None = None,
     ):
         self.settings: Settings = settings
+        self.history = SessionHistory()
         # State management
         self._state: State = State.IDLE
         self._state_change = asyncio.Event()
@@ -922,20 +924,33 @@ class Twitch:
         return ordered
 
     async def run(self):
-        if self.settings.dump:
-            with _open_dump("w"):
-                # replace the existing file with an empty one
-                pass
-        while True:
-            try:
-                await self._run()
-                break
-            except ReloadRequest:
-                await self.shutdown()
-            except ExitRequest:
-                break
-            except aiohttp.ContentTypeError as exc:
-                raise RequestException(_("login", "unexpected_content")) from exc
+        self.history.start()
+        session_status: Literal["stopped", "failed"] = "stopped"
+        failure_reason: str | None = None
+        try:
+            if self.settings.dump:
+                with _open_dump("w"):
+                    # replace the existing file with an empty one
+                    pass
+            while True:
+                try:
+                    await self._run()
+                    break
+                except ReloadRequest:
+                    self.history.record("session.reload", data={"reason": "maintenance"})
+                    await self.shutdown()
+                except ExitRequest:
+                    break
+                except aiohttp.ContentTypeError as exc:
+                    session_status = "failed"
+                    failure_reason = "unexpected_content"
+                    raise RequestException(_("login", "unexpected_content")) from exc
+        except Exception as exc:
+            session_status = "failed"
+            failure_reason = failure_reason or type(exc).__name__
+            raise
+        finally:
+            self.history.finish(session_status, reason=failure_reason)
 
     async def _run(self):
         """

@@ -92,6 +92,7 @@ CACHE_DB = Path(CACHE_PATH, "mapping.json")
 COOKIES_PATH = Path(WORKING_DIR, "cookies.jar")
 OAUTH_TOKEN_PATH = Path(WORKING_DIR, "oauth.json")
 SETTINGS_PATH = Path(WORKING_DIR, "settings.json")
+HISTORY_PATH = Path(WORKING_DIR, "session_history.json")
 # Typing
 JsonType = Dict[str, Any]
 URLType = NewType("URLType", str)
