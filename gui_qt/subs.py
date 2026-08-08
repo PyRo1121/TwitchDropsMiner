@@ -466,6 +466,14 @@ class QtSettings:
         self.notifications.setChecked(bool(self._settings.tray_notifications))
         self.notifications.toggled.connect(lambda value: setattr(self._settings, "tray_notifications", value))
         form.addRow(_("gui", "settings", "general", "tray_notifications"), self.notifications)
+        self.history_retention = QComboBox()
+        for days in (30, 90, 365):
+            self.history_retention.addItem(f"{days} days", days)
+        retention_days = getattr(self._settings, "history_retention_days", 90)
+        current_index = self.history_retention.findData(retention_days)
+        self.history_retention.setCurrentIndex(current_index if current_index >= 0 else 1)
+        self.history_retention.currentIndexChanged.connect(self._history_retention_changed)
+        form.addRow("History retention", self.history_retention)
         self.dark = QCheckBox()
         self.dark.setChecked(bool(self._settings.dark_mode))
         self.dark.toggled.connect(self._dark_changed)
@@ -562,6 +570,14 @@ class QtSettings:
                 self._settings.priority_mode = mode
                 self._manager.inventory.refresh()
                 return
+
+    def _history_retention_changed(self, index: int) -> None:
+        days = self.history_retention.itemData(index)
+        if not isinstance(days, int):
+            return
+        self._settings.history_retention_days = days
+        self._manager._twitch.history.set_retention_days(days)
+        self._manager.history_changed()
 
     def _dark_changed(self, value: bool) -> None:
         self._settings.dark_mode = value

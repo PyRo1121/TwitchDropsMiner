@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -129,6 +129,16 @@ def _is_scalar(value: object) -> bool:
     return value is None or isinstance(value, (str, int, float, bool))
 
 
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _timestamp(value: datetime | None = None) -> str:
     current = value or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -151,12 +161,16 @@ class SessionHistory:
         *,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         max_events_per_session: int = DEFAULT_MAX_EVENTS_PER_SESSION,
+        retention_days: int | None = None,
     ) -> None:
         if max_sessions < 1 or max_events_per_session < 1:
             raise ValueError("History limits must be positive")
+        if retention_days is not None and retention_days < 1:
+            raise ValueError("History retention must be positive")
         self.path = path
         self.max_sessions = max_sessions
         self.max_events_per_session = max_events_per_session
+        self.retention_days = retention_days
         self._loaded = False
         self._sessions: list[SessionRecord] = []
         self._current: SessionRecord | None = None
@@ -198,7 +212,7 @@ class SessionHistory:
         )
         self._sessions.insert(0, session)
         self._current = session
-        self._trim()
+        self._trim(now=at)
         self._save()
         return session
 
@@ -236,6 +250,21 @@ class SessionHistory:
         self._current.summary[key] = self._current.summary.get(key, 0) + amount
         self._save()
 
+    def set_retention_days(self, days: int) -> None:
+        if not isinstance(days, int) or isinstance(days, bool) or days < 1:
+            raise ValueError("History retention must be positive")
+        self.retention_days = days
+        self._trim()
+        self._save()
+
+    def clear(self, *, keep_current: bool = True) -> None:
+        self._load()
+        current_id = self._current.id if keep_current and self._current is not None else None
+        self._sessions = [
+            session for session in self._sessions if current_id is not None and session.id == current_id
+        ]
+        self._save()
+
     def finish(
         self,
         status: Literal["stopped", "failed"] = "stopped",
@@ -261,8 +290,21 @@ class SessionHistory:
         if len(session.events) > self.max_events_per_session:
             del session.events[: -self.max_events_per_session]
 
-    def _trim(self) -> None:
+    def _trim(self, *, now: datetime | None = None) -> None:
         del self._sessions[self.max_sessions :]
+        if self.retention_days is None:
+            return
+        reference = now or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        cutoff = reference.astimezone(timezone.utc) - timedelta(days=self.retention_days)
+        self._sessions = [
+            session
+            for session in self._sessions
+            if session.status == "running"
+            or (started := _parse_timestamp(session.started_at)) is None
+            or started >= cutoff
+        ]
 
     def _load(self) -> None:
         if self._loaded:

@@ -719,7 +719,11 @@ class Twitch:
         gui_factory: Callable[["Twitch"], Any] | None = None,
     ):
         self.settings: Settings = settings
-        self.history = SessionHistory()
+        retention_days = getattr(settings, "history_retention_days", 90)
+        if not isinstance(retention_days, int) or isinstance(retention_days, bool):
+            retention_days = 90
+        retention_days = max(1, min(retention_days, 3650))
+        self.history = SessionHistory(retention_days=retention_days)
         # State management
         self._state: State = State.IDLE
         self._state_change = asyncio.Event()

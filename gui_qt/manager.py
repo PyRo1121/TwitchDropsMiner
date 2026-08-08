@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -470,6 +471,7 @@ class QtGUIManager(QMainWindow):
         self._add_page("activity", activity)
 
         history = HistoryPage()
+        history.set_clear_callback(self._clear_history)
         self.pages["history"] = history
         self._history_page = history
         self._add_page("history", history)
@@ -801,6 +803,21 @@ class QtGUIManager(QMainWindow):
 
     def print(self, message: str) -> None:
         self.output.print(message)
+
+    def _clear_history(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Clear completed history",
+            "Remove completed session records while keeping the current session?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        history = getattr(self._twitch, "history", None)
+        if history is not None:
+            history.clear(keep_current=True)
+            self.history_changed()
 
     def history_changed(self) -> None:
         history_page = getattr(self, "_history_page", None)

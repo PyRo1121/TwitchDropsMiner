@@ -85,6 +85,28 @@ class SessionHistoryTests(unittest.TestCase):
             self.assertLessEqual(len(history.sessions[1].events), 2)
             self.assertNotIn(first.id, {session.id for session in history.sessions})
 
+    def test_retention_removes_old_completed_sessions_but_keeps_current(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history = self.make_history(directory, retention_days=30)
+            old = history.start(at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+            history.finish(at=datetime(2026, 1, 1, 1, tzinfo=timezone.utc))
+            current = history.start(at=datetime(2026, 2, 15, tzinfo=timezone.utc))
+
+            self.assertEqual([session.id for session in history.sessions], [current.id])
+            self.assertNotIn(old.id, {session.id for session in history.sessions})
+
+    def test_clear_keeps_current_session_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history = self.make_history(directory)
+            old = history.start()
+            history.finish()
+            current = history.start()
+
+            history.clear()
+
+            self.assertEqual([session.id for session in history.sessions], [current.id])
+            self.assertNotIn(old.id, {session.id for session in history.sessions})
+
     def test_invalid_history_does_not_prevent_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "session_history.json"

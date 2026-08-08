@@ -38,6 +38,7 @@ class SettingsFile(TypedDict):
     autostart_tray: bool
     connection_quality: int
     tray_notifications: bool
+    history_retention_days: int
     enable_badges_emotes: bool
     available_drops_check: bool
     priority_mode: PriorityMode
@@ -52,6 +53,7 @@ default_settings: SettingsFile = {
     "connection_quality": 1,
     "language": DEFAULT_LANG,
     "tray_notifications": True,
+    "history_retention_days": 90,
     "enable_badges_emotes": False,
     "available_drops_check": False,
     "priority_mode": PriorityMode.PRIORITY_ONLY,
@@ -76,6 +78,7 @@ class Settings:
     autostart_tray: bool
     connection_quality: int
     tray_notifications: bool
+    history_retention_days: int
     enable_badges_emotes: bool
     available_drops_check: bool
     priority_mode: PriorityMode

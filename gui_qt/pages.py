@@ -637,17 +637,26 @@ class SessionCard(Card):
 
 
 class HistoryPage(QWidget):
+    clear_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("historyShell")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(12)
-        layout.addWidget(PageIntro(
+        header = QHBoxLayout()
+        header.addWidget(PageIntro(
             "HISTORY / RUN LEDGER",
             "Session history",
             "A local record of meaningful farming sessions and outcomes.",
         ))
+        header.addStretch(1)
+        clear_button = QPushButton("Clear completed")
+        clear_button.setObjectName("ghost")
+        clear_button.clicked.connect(self.clear_requested.emit)
+        header.addWidget(clear_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(header)
         self.empty = EmptyState(
             "No sessions recorded",
             "Session history will appear after the miner starts.",
@@ -666,6 +675,9 @@ class HistoryPage(QWidget):
         self._cards_layout.addStretch(1)
         scroll.setWidget(container)
         layout.addWidget(scroll, 1)
+
+    def set_clear_callback(self, callback: Any) -> None:
+        self.clear_requested.connect(callback)
 
     def set_sessions(self, sessions: Iterable[SessionRecord]) -> None:
         while self._cards_layout.count() > 1:
