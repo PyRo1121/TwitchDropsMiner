@@ -29,12 +29,9 @@ AppDir:
     arch:
       - "{{ARCH_APT}}"
     sources:
-      - sourceline: deb [arch=amd64] https://archive.ubuntu.com/ubuntu/ jammy main
-      - sourceline: deb [arch=amd64] https://archive.ubuntu.com/ubuntu/ jammy-updates main
-      - sourceline: deb [arch=amd64] https://archive.ubuntu.com/ubuntu/ jammy-security main
-      - sourceline: deb [arch=arm64] https://ports.ubuntu.com/ubuntu-ports/ jammy main
-      - sourceline: deb [arch=arm64] https://ports.ubuntu.com/ubuntu-ports/ jammy-updates main
-      - sourceline: deb [arch=arm64] https://ports.ubuntu.com/ubuntu-ports/ jammy-security main
+      - sourceline: deb [arch={{ARCH_APT}}] {{APT_REPOSITORY}} jammy main universe
+      - sourceline: deb [arch={{ARCH_APT}}] {{APT_REPOSITORY}} jammy-updates main universe
+      - sourceline: deb [arch={{ARCH_APT}}] {{APT_REPOSITORY}} jammy-security main universe
         key_url: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C
     include:
       # Python 3.10 runtime (interpreter + stdlib) so ${APPDIR}/usr/bin/python3

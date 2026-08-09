@@ -118,12 +118,25 @@ class BuildConfigurationTests(unittest.TestCase):
 
     def test_appimage_runtime_and_bootstrap_versions_are_explicit(self) -> None:
         recipe = (ROOT / "appimage/AppImageBuilder.yml").read_text(encoding="utf8")
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
+        runtime = (ROOT / "requirements.txt").read_text(encoding="utf8")
 
         self.assertIn("pip==26.2.1", recipe)
         self.assertIn("wheel==0.47.0", recipe)
         self.assertIn("python3.10", recipe)
         self.assertIn("python3.10/site-packages", recipe)
         self.assertIn("libxcb-cursor0", recipe)
+        self.assertIn("{{APT_REPOSITORY}}", recipe)
+        self.assertIn("jammy main universe", recipe)
+        self.assertNotIn("[arch=amd64]", recipe)
+        self.assertIn("APT_REPOSITORY:", workflow)
+        self.assertIn("FUSE_PACKAGE:", workflow)
+        self.assertEqual(workflow.count("runner: ubuntu-24.04-arm"), 2)
+        self.assertNotIn("runner: ubuntu-22.04-arm", workflow)
+        self.assertIn("PySide6==6.11.1", runtime)
+        self.assertNotIn("PySide6==6.8.0.2", runtime)
+        readme = (ROOT / "README.md").read_text(encoding="utf8")
+        self.assertIn("ARM64 artifacts require `glibc>=2.39`", readme)
         self.assertNotIn("pip install --upgrade", recipe)
 
     def test_documented_macos_command_quotes_the_application_path(self) -> None:
