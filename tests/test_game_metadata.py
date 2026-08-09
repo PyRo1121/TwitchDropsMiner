@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from yarl import URL
+
 from game_metadata import SteamMetadata, SteamMetadataProvider
 
 
@@ -34,7 +36,7 @@ class _Twitch:
     def request(self, _method: str, url):
         text = str(url)
         self.urls.append(text)
-        if "store.steampowered.com" in text:
+        if URL(text).host == "store.steampowered.com":
             payload = self.responses["store"]
         else:
             payload = self.responses["players"]
