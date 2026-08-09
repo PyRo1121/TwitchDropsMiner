@@ -352,7 +352,13 @@ jobs:
           "$image" --appimage-extract >/dev/null
           plugin="$(find squashfs-root -path '*/platforms/libqxcb.so' -print -quit)"
           test -n "$plugin"
-          dependencies="$(ldd "$plugin")"
+          runtime_library_path="$(
+            find squashfs-root/lib squashfs-root/usr/lib -type d \
+              \( -name '*linux-gnu' -o -path '*/PySide6/Qt/lib' \) \
+              -print | paste -sd: -
+          )"
+          test -n "$runtime_library_path"
+          dependencies="$(LD_LIBRARY_PATH="$runtime_library_path" ldd "$plugin")"
           printf '%s\n' "$dependencies"
           ! grep -q 'not found' <<< "$dependencies"
 
