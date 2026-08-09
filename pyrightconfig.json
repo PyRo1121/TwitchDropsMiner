@@ -3,6 +3,7 @@
   "exclude": [".venv", "build", "dist", "docs"],
   "venvPath": ".",
   "venv": ".venv",
+  "pythonVersion": "3.10",
   "executionEnvironments": [
     {
       "root": "."

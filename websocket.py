@@ -57,7 +57,9 @@ class Websocket:
         # websocket index
         self._idx: int = index
         # current websocket connection
-        self._ws: AwaitableValue[aiohttp.ClientWebSocketResponse] = AwaitableValue()
+        self._ws: AwaitableValue[
+            aiohttp.ClientWebSocketResponse[bool]
+        ] = AwaitableValue()
         # set when the websocket needs to be closed or reconnect
         self._closed = asyncio.Event()
         self._reconnect_requested = asyncio.Event()
@@ -205,7 +207,7 @@ class Websocket:
 
     async def _backoff_connect(
         self, ws_url: str, **kwargs
-    ) -> abc.AsyncGenerator[aiohttp.ClientWebSocketResponse, None]:
+    ) -> abc.AsyncGenerator[aiohttp.ClientWebSocketResponse[bool], None]:
         session = await self._twitch.get_session()
         backoff = ExponentialBackoff(**kwargs)
         if self._twitch.settings.proxy:
@@ -360,7 +362,7 @@ class Websocket:
             if remaining <= 0:
                 raise asyncio.TimeoutError()
             try:
-                raw_message: aiohttp.WSMessage = await ws.receive(timeout=remaining)
+                raw_message = await ws.receive(timeout=remaining)
             except aiohttp.ClientConnectionError as exc:
                 raise WebsocketClosed(received=False) from exc
             ws_logger.debug(

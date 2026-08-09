@@ -39,6 +39,10 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("requirements-appimage.txt", workflow)
         self.assertGreaterEqual(workflow.count("--self-test"), 4)
         self.assertIn("pyright@1.1.409", workflow)
+        self.assertIn("python -m venv .venv", workflow)
+        self.assertIn('${PWD}/.venv/bin', workflow)
+        pyright_config = (ROOT / "pyrightconfig.json").read_text(encoding="utf8")
+        self.assertIn('"pythonVersion": "3.10"', pyright_config)
         self.assertIn("tests.test_translation_schema", workflow)
         self.assertIn("github.repository == 'PyRo1121/TwitchDropsMiner'", workflow)
         self.assertIn("github.ref == 'refs/heads/master'", workflow)
@@ -66,6 +70,11 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("subject-path: |", workflow)
         self.assertIn("! -name SHA256SUMS", workflow)
         self.assertIn("Twitch.Drops.Miner.spdx.json", workflow)
+        self.assertIn("setuptools==83.0.0", workflow)
+        self.assertIn(
+            "setuptools==83.0.0",
+            (ROOT / "requirements-build.txt").read_text(encoding="utf8"),
+        )
         self.assertEqual(
             workflow.count("actions/checkout@"),
             workflow.count("persist-credentials: false"),
