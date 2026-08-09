@@ -8,9 +8,7 @@ from functools import partial
 from collections import abc, deque, OrderedDict
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from contextlib import suppress
-from typing import Any, Literal, Final, cast, TYPE_CHECKING
+from typing import Any, Literal, Final, TYPE_CHECKING
 
 import aiohttp
 from translate import _
@@ -38,7 +36,6 @@ from utils import (
     task_wrapper,
     AwaitableValue,
     redact_log_value,
-    atomic_write_path,
     extract_available_drops,
     require_int,
 )
@@ -46,7 +43,6 @@ from constants import (
     CALL,
     MAX_INT,
     DUMP_PATH,
-    COOKIES_PATH,
     MAX_CHANNELS,
     GQL_BATCH_SIZE,
     GQL_QUERIES,
@@ -101,9 +97,8 @@ class Twitch:
         self._inventory_retry_attempt = 0
         self._inventory_retry_task: asyncio.Task[None] | None = None
         self._mnt_triggers: deque[datetime] = deque()
-        # Client type, session, transport, and auth
+        # Client type, transport, and auth
         self._client_type: ClientInfo = ClientType.ANDROID_APP
-        self._session: aiohttp.ClientSession | None = None
         self.transport = HttpTransport(self)
         self._auth_state = AuthState(self)
         self.inventory_service = InventoryService(self)
@@ -132,51 +127,6 @@ class Twitch:
         # Maintenance task
         self._mnt_task: asyncio.Task[None] | None = None
 
-    async def get_session(self) -> aiohttp.ClientSession:
-        if (session := self._session) is not None:
-            if session.closed:
-                raise RuntimeError("Session is closed")
-            return session
-        # load in cookies
-        cookie_jar = aiohttp.CookieJar()
-        try:
-            if COOKIES_PATH.exists():
-                with suppress(OSError):
-                    COOKIES_PATH.chmod(0o600)
-                cookie_jar.load(COOKIES_PATH)
-        except Exception:
-            # if loading in the cookies file ends up in an error, just ignore it
-            # clear the jar, just in case
-            cookie_jar.clear()
-        # create timeouts
-        # Connection quality multiplier determines the magnitude of timeouts.
-        connection_quality = self.settings.connection_quality
-        if connection_quality < 1:
-            connection_quality = self.settings.connection_quality = 1
-        elif connection_quality > 6:
-            connection_quality = self.settings.connection_quality = 6
-        timeout = aiohttp.ClientTimeout(
-            sock_connect=5*connection_quality,
-            total=10*connection_quality,
-        )
-        # create session, limited to 50 connections at maximum
-        connector = aiohttp.TCPConnector(limit=50)
-        self._session = aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector,
-            cookie_jar=cookie_jar,
-            headers={"User-Agent": self._client_type.USER_AGENT},
-        )
-        return self._session
-
-    @staticmethod
-    def _save_cookie_jar(cookie_jar: aiohttp.CookieJar, path: Path) -> None:
-        """Persist cookies atomically without destroying the last good file."""
-        try:
-            atomic_write_path(path, cookie_jar.save)
-        except (OSError, TypeError, ValueError) as exc:
-            logger.warning("Unable to persist cookies: %s", type(exc).__name__)
-
     async def shutdown(self) -> None:
         start_time = monotonic()
         self._inventory_generation += 1
@@ -198,19 +148,9 @@ class Twitch:
         for channel in self.channels.values():
             channel.remove()
         await cancel_tasks((*background_tasks, *pending_channel_tasks))
-        # stop websocket, close session and save cookies
+        # stop websocket, close transport, and persist cookies
         await self.websocket.stop(clear_topics=True)
-        if self._session is not None:
-            cookie_jar = cast(aiohttp.CookieJar, self._session.cookie_jar)
-            # clear empty cookie entries off the cookies file before saving
-            # NOTE: Unfortunately, aiohttp provides no easy way of clearing empty cookies,
-            # so we need to access the private '_cookies' attribute for this.
-            for cookie_key, cookie in list(cookie_jar._cookies.items()):
-                if not cookie:
-                    del cookie_jar._cookies[cookie_key]
-            self._save_cookie_jar(cookie_jar, COOKIES_PATH)
-            await self._session.close()
-            self._session = None
+        await self.transport.close()
         try:
             await self.gui.inv.replace_campaigns(())
             self.gui.set_games(set())
@@ -346,15 +286,23 @@ class Twitch:
                 try:
                     await self._run()
                     break
-                except ReloadRequest:
-                    self.history.record("session.reload", data={"reason": "maintenance"})
-                    await self.shutdown()
-                except ExitRequest:
-                    break
-                except aiohttp.ContentTypeError as exc:
-                    session_status = "failed"
-                    failure_reason = "unexpected_content"
-                    raise RequestException(_("login", "unexpected_content")) from exc
+                except Exception as exc:
+                    if isinstance(exc, ReloadRequest):
+                        self.history.record(
+                            "session.reload",
+                            data={"reason": "maintenance"},
+                        )
+                        await self.shutdown()
+                    elif isinstance(exc, ExitRequest):
+                        break
+                    elif isinstance(exc, aiohttp.ContentTypeError):
+                        session_status = "failed"
+                        failure_reason = "unexpected_content"
+                        raise RequestException(
+                            _("login", "unexpected_content")
+                        ) from exc
+                    else:
+                        raise
         except Exception as exc:
             session_status = "failed"
             if failure_reason is None:
@@ -1007,7 +955,8 @@ class Twitch:
                 return
             self.change_state(State.INVENTORY_FETCH)
             return
-        assert msg_type == "drop-progress"
+        if msg_type != "drop-progress":
+            return
         current_progress = data.get("current_progress_min")
         required_progress = data.get("required_progress_min")
         if (
@@ -1123,7 +1072,7 @@ class Twitch:
         stream_gql_ops: list[GQLOperation] = [channel.stream_gql for channel in channels]
         if not stream_gql_ops:
             # shortcut for nothing to process
-            # NOTE: Have to do this here, becase "channels" can be any iterable
+            # NOTE: Have to do this here, because "channels" can be any iterable
             return
         stream_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
             asyncio.create_task(self.transport.gql_request(stream_gql_chunk))

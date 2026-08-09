@@ -208,7 +208,7 @@ class Websocket:
     async def _backoff_connect(
         self, ws_url: str, **kwargs
     ) -> abc.AsyncGenerator[aiohttp.ClientWebSocketResponse[bool], None]:
-        session = await self._twitch.get_session()
+        session = await self._twitch.transport.get_session()
         backoff = ExponentialBackoff(**kwargs)
         if self._twitch.settings.proxy:
             proxy = self._twitch.settings.proxy
@@ -230,6 +230,12 @@ class Websocket:
                     )
                     if await self._wait_for_backoff(delay):
                         break
+            except RuntimeError:
+                ws_logger.warning(
+                    f"Websocket[{self._idx}] exiting backoff connect loop "
+                    "because session is closed (RuntimeError)"
+                )
+                break
             except (
                 asyncio.TimeoutError,
                 aiohttp.ClientResponseError,
@@ -240,12 +246,6 @@ class Websocket:
                 )
                 if await self._wait_for_backoff(delay):
                     break
-            except RuntimeError:
-                ws_logger.warning(
-                    f"Websocket[{self._idx}] exiting backoff connect loop "
-                    "because session is closed (RuntimeError)"
-                )
-                break
 
     @task_wrapper(critical=True)
     async def _handle(self):
@@ -279,18 +279,20 @@ class Websocket:
                     # set _topics_changed to let the next WS connection resub to the topics
                     self._topics_changed.set()
                 # A reconnect was requested
-            except WebsocketClosed as exc:
-                if self._closed.is_set():
-                    ws_logger.info(f"Websocket[{self._idx}] stopped.")
-                    self.set_status(_("gui", "websocket", "disconnected"))
-                    return
-                if exc.received:
-                    # server closed the connection, not us - reconnect
-                    ws_logger.warning(
-                        f"Websocket[{self._idx}] closed unexpectedly: {websocket.close_code}"
-                    )
-            except Exception:
-                ws_logger.exception(f"Exception in Websocket[{self._idx}]")
+            except Exception as exc:
+                if isinstance(exc, WebsocketClosed):
+                    if self._closed.is_set():
+                        ws_logger.info(f"Websocket[{self._idx}] stopped.")
+                        self.set_status(_("gui", "websocket", "disconnected"))
+                        return
+                    if exc.received:
+                        # server closed the connection, not us - reconnect
+                        ws_logger.warning(
+                            f"Websocket[{self._idx}] closed unexpectedly: "
+                            f"{websocket.close_code}"
+                        )
+                else:
+                    ws_logger.exception(f"Exception in Websocket[{self._idx}]")
             self.set_status(_("gui", "websocket", "reconnecting"))
             ws_logger.warning(f"Websocket[{self._idx}] reconnecting...")
 

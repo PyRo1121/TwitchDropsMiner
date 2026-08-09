@@ -180,7 +180,7 @@ class WebsocketLifecycleTests(unittest.TestCase):
             websocket._twitch = cast(
                 Any,
                 SimpleNamespace(
-                    get_session=get_session,
+                    transport=SimpleNamespace(get_session=get_session),
                     settings=SimpleNamespace(proxy=None),
                 ),
             )

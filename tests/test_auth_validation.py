@@ -7,8 +7,9 @@ import unittest
 import aiohttp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from constants import ClientType
 from oauth_storage import OAuthTokenStore
@@ -56,6 +57,26 @@ class _Twitch:
 
 
 class AuthValidationTests(unittest.TestCase):
+    def test_cookie_invalidation_removes_disk_state_without_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "cookies.jar"
+            cookie_path.write_text("stale", encoding="utf8")
+            transport = SimpleNamespace(clear_cookies=Mock())
+            twitch = SimpleNamespace(
+                transport=transport,
+                gui=SimpleNamespace(set_authenticated=lambda _value: None),
+            )
+            auth = AuthState(cast(Any, twitch))
+            auth.access_token = "token"
+            auth.user_id = 42
+
+            with patch("auth.COOKIES_PATH", cookie_path):
+                auth.invalidate(delete_cookies=True)
+
+            transport.clear_cookies.assert_called_once_with()
+            self.assertFalse(cookie_path.exists())
+            self.assertFalse(hasattr(auth, "access_token"))
+
     def test_missing_device_cookie_is_a_controlled_login_failure(self) -> None:
         class BodyResponse(_Response):
             async def read(self) -> bytes:

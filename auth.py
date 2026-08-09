@@ -87,11 +87,8 @@ class AuthState:
         self._logged_in.clear()
         self._twitch.gui.set_authenticated(False)
         if delete_cookies:
-            session = self._twitch._session
-            if session is not None:
-                jar = cast(aiohttp.CookieJar, session.cookie_jar)
-                jar.clear()
-                remove_file(COOKIES_PATH)
+            self._transport.clear_cookies()
+            remove_file(COOKIES_PATH)
         if delete_refresh_token:
             self._clear_refresh_token()
 
@@ -572,7 +569,7 @@ class AuthState:
         logger.info("Login successful, user ID: %s", self.user_id)
         login_form.update(_("gui", "login", "logged_in"), self.user_id)
         jar.update_cookies(cookie, client_info.CLIENT_URL)
-        self._twitch._save_cookie_jar(jar, COOKIES_PATH)
+        self._transport.save_cookie_jar(jar, COOKIES_PATH)
 
     async def _validate(self) -> None:
         if not hasattr(self, "session_id"):
@@ -586,7 +583,7 @@ class AuthState:
             not self._hasattrs("device_id")
             or not self._hasattrs("access_token", "user_id")
         ):
-            session = await self._twitch.get_session()
+            session = await self._transport.get_session()
             jar = cast(aiohttp.CookieJar, session.cookie_jar)
         if not self._hasattrs("device_id"):
             if jar is None:

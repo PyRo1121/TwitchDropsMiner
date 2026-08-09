@@ -68,7 +68,6 @@ class GraphQLAuthRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
-        miner._session = None
         miner._client_type = ClientType.WEB
         transport = HttpTransport(miner)
         transport._gql_limiter = cast(Any, _Limiter())

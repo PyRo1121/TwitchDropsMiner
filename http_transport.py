@@ -4,12 +4,13 @@ import asyncio
 import json
 import logging
 from collections import abc
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from math import isfinite
+from pathlib import Path
 from time import time
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
 import aiohttp
 from yarl import URL
@@ -21,9 +22,16 @@ from exceptions import (
     RequestException,
     RequestInvalid,
 )
-from constants import GQL_RETRY_ATTEMPTS, HTTP_RETRY_MAX_DELAY
+from constants import COOKIES_PATH, GQL_RETRY_ATTEMPTS, HTTP_RETRY_MAX_DELAY
 from translate import _
-from utils import ExponentialBackoff, RateLimiter, cancel_tasks, redact_log_value, safe_int
+from utils import (
+    ExponentialBackoff,
+    RateLimiter,
+    atomic_write_path,
+    cancel_tasks,
+    redact_log_value,
+    safe_int,
+)
 
 if TYPE_CHECKING:
     from constants import GQLOperation, JsonType
@@ -83,9 +91,74 @@ class HttpTransport:
 
     def __init__(self, twitch: Twitch) -> None:
         self._twitch = twitch
+        self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
         self._gql_limiter = RateLimiter(capacity=5, window=1)
         self.rate_limit_remaining: int | None = None
         self.rate_limit_reset: datetime | None = None
+
+    @property
+    def session(self) -> aiohttp.ClientSession | None:
+        return self._session
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        async with self._session_lock:
+            if (session := self._session) is not None:
+                if session.closed:
+                    raise RuntimeError("Session is closed")
+                return session
+
+            cookie_jar = aiohttp.CookieJar()
+            try:
+                if COOKIES_PATH.exists():
+                    with suppress(OSError):
+                        COOKIES_PATH.chmod(0o600)
+                    cookie_jar.load(COOKIES_PATH)
+            except Exception:
+                cookie_jar.clear()
+
+            connection_quality = self._twitch.settings.connection_quality
+            if connection_quality < 1:
+                connection_quality = self._twitch.settings.connection_quality = 1
+            elif connection_quality > 6:
+                connection_quality = self._twitch.settings.connection_quality = 6
+            timeout = aiohttp.ClientTimeout(
+                sock_connect=5 * connection_quality,
+                total=10 * connection_quality,
+            )
+            connector = aiohttp.TCPConnector(limit=50)
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                cookie_jar=cookie_jar,
+                headers={"User-Agent": self._twitch._client_type.USER_AGENT},
+            )
+            return self._session
+
+    @staticmethod
+    def save_cookie_jar(cookie_jar: aiohttp.CookieJar, path: Path) -> None:
+        """Persist cookies atomically without destroying the last good file."""
+        try:
+            atomic_write_path(path, cookie_jar.save)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("Unable to persist cookies: %s", type(exc).__name__)
+
+    def clear_cookies(self) -> None:
+        if self._session is not None:
+            self._session.cookie_jar.clear()
+
+    async def close(self) -> None:
+        async with self._session_lock:
+            session = self._session
+            self._session = None
+            if session is None:
+                return
+            cookie_jar = cast(aiohttp.CookieJar, session.cookie_jar)
+            for cookie_key, cookie in list(cookie_jar._cookies.items()):
+                if not cookie:
+                    del cookie_jar._cookies[cookie_key]
+            self.save_cookie_jar(cookie_jar, COOKIES_PATH)
+            await session.close()
 
     async def wait_for_delay(
         self,
@@ -145,7 +218,7 @@ class HttpTransport:
         preload: bool = True,
         **kwargs: Any,
     ) -> abc.AsyncIterator[aiohttp.ClientResponse]:
-        session = await self._twitch.get_session()
+        session = await self.get_session()
         method = method.upper()
         if self._twitch.settings.proxy and "proxy" not in kwargs:
             kwargs["proxy"] = self._twitch.settings.proxy

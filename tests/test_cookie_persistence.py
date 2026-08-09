@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-from twitch import Twitch
+from http_transport import HttpTransport
 
 
 class _CookieJar:
@@ -31,7 +31,7 @@ class CookiePersistenceTests(unittest.TestCase):
             path.write_text("old", encoding="utf8")
             jar = _CookieJar()
 
-            Twitch._save_cookie_jar(cast(Any, jar), path)
+            HttpTransport.save_cookie_jar(cast(Any, jar), path)
 
             self.assertEqual(path.read_text(encoding="utf8"), "new")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
@@ -44,7 +44,7 @@ class CookiePersistenceTests(unittest.TestCase):
             path = Path(directory) / "cookies.jar"
             path.write_text("old", encoding="utf8")
 
-            Twitch._save_cookie_jar(cast(Any, _FailingCookieJar()), path)
+            HttpTransport.save_cookie_jar(cast(Any, _FailingCookieJar()), path)
 
             self.assertEqual(path.read_text(encoding="utf8"), "old")
             self.assertFalse(path.with_name("cookies.jar.new").exists())
