@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,8 +31,7 @@ class OAuthTokenStoreTests(unittest.TestCase):
             path.write_text("not-json", encoding="utf8")
             self.assertIsNone(store.load("client-a"))
 
-    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "requires no-follow open support")
-    def test_save_does_not_follow_a_temporary_symlink(self) -> None:
+    def test_save_does_not_follow_a_legacy_temporary_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "oauth.json"
@@ -42,12 +40,13 @@ class OAuthTokenStoreTests(unittest.TestCase):
             path.with_name("oauth.json.new").symlink_to(target)
             store = OAuthTokenStore(path)
 
-            with self.assertRaises(OSError):
-                store.save("client-a", "fresh")
+            store.save("client-a", "fresh")
 
+            self.assertEqual(store.load("client-a"), "fresh")
             self.assertEqual(target.read_text(encoding="utf8"), "protected")
+            self.assertFalse(path.with_name("oauth.json.new").exists())
 
-    def test_save_replaces_a_partial_temporary_file(self) -> None:
+    def test_save_removes_an_obsolete_partial_temporary_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oauth.json"
             temporary = path.with_name("oauth.json.new")

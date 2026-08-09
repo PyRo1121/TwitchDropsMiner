@@ -1,11 +1,19 @@
 @echo off
-cls
-set dirpath=%~dp0
-if "%dirpath:~-1%" == "\" set dirpath=%dirpath:~0,-1%
+setlocal
+
+set "script_dir=%~dp0"
+set "venv_dir=%script_dir%.venv"
 set /p "choice=Start with a console? (y/n) "
-if "%choice%"=="y" (
-    set "exepath=%dirpath%\env\scripts\python"
+if /I "%choice%"=="y" (
+    set "python=%venv_dir%\Scripts\python.exe"
 ) else (
-    set "exepath=%dirpath%\env\scripts\pythonw"
+    set "python=%venv_dir%\Scripts\pythonw.exe"
 )
-start "TwitchDropsMiner" "%exepath%" "%dirpath%\main.py"
+
+if not exist "%python%" (
+    echo No development environment found. Run setup_env.bat first.
+    exit /b 1
+)
+
+start "TwitchDropsMiner" "%python%" "%script_dir%main.py"
+exit /b 0

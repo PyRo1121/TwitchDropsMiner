@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from session_history import HistoryEvent
+from translate import _
 
 AlertSeverity = Literal["info", "warning", "error"]
 
@@ -73,58 +74,62 @@ class NotificationCenter:
         if event.kind == "session.failed":
             return "session.failed"
         if event.kind == "campaign.deadline":
-            return "campaign.deadline:" + str(event.data.get("campaign", "unknown"))
+            campaign_id = event.data.get("campaign_id")
+            return (
+                f"campaign.deadline:{campaign_id}"
+                if isinstance(campaign_id, str) and campaign_id
+                else None
+            )
         if event.kind == "claim.unconfirmed":
-            return "claim.unconfirmed:" + self._claim_context(event)
+            drop_id = event.data.get("drop_id")
+            return (
+                f"claim.unconfirmed:{drop_id}"
+                if isinstance(drop_id, str) and drop_id
+                else None
+            )
         return None
-
-    @staticmethod
-    def _claim_context(event: HistoryEvent) -> str:
-        game = event.data.get("game", "unknown")
-        reward = event.data.get("reward", "unknown")
-        return f"{game}:{reward}"
 
     def _build_alert(self, key: str, event: HistoryEvent) -> Alert | None:
         if event.kind == "auth.required":
             return Alert(
                 key,
-                "Twitch authentication required",
-                "Open Twitch Drops Miner and sign in to resume farming.",
+                _("notifications", "auth_required_title"),
+                _("notifications", "auth_required_message"),
                 "warning",
             )
         if event.kind == "inventory.sync_failed":
             return Alert(
                 key,
-                "Inventory refresh failed",
-                "Twitch inventory could not be refreshed; farming state may be stale.",
+                _("notifications", "inventory_failed_title"),
+                _("notifications", "inventory_failed_message"),
                 "warning",
             )
         if event.kind == "watch.unavailable":
             return Alert(
                 key,
-                "No eligible live channel",
-                "The miner is standing by until an eligible channel becomes available.",
+                _("notifications", "watch_unavailable_title"),
+                _("notifications", "watch_unavailable_message"),
                 "info",
             )
         if event.kind == "session.failed":
             return Alert(
                 key,
-                "Miner stopped unexpectedly",
-                "Open the event log to inspect the failure and restart the miner.",
+                _("notifications", "session_failed_title"),
+                _("notifications", "session_failed_message"),
                 "error",
             )
         if event.kind == "campaign.deadline":
             return Alert(
                 key,
-                "Drop campaign ending soon",
-                "An unfinished campaign is approaching its deadline.",
+                _("notifications", "campaign_deadline_title"),
+                _("notifications", "campaign_deadline_message"),
                 "warning",
             )
         if event.kind == "claim.unconfirmed":
             return Alert(
                 key,
-                "Drop claim needs attention",
-                "A claim could not be confirmed after retrying; it will be reconciled again.",
+                _("notifications", "claim_unconfirmed_title"),
+                _("notifications", "claim_unconfirmed_message"),
                 "warning",
             )
         return None
@@ -137,9 +142,11 @@ class NotificationCenter:
         elif event.kind == "watch.started":
             self._active.pop("watch.unavailable", None)
         elif event.kind == "claim.succeeded":
-            prefix = "claim.unconfirmed:" + self._claim_context(event)
-            self._active.pop(prefix, None)
-            self._claim_attempts.pop(prefix, None)
+            drop_id = event.data.get("drop_id")
+            if isinstance(drop_id, str) and drop_id:
+                key = f"claim.unconfirmed:{drop_id}"
+                self._active.pop(key, None)
+                self._claim_attempts.pop(key, None)
 
 
 def _parse_timestamp(value: str) -> datetime:

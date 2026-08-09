@@ -10,22 +10,9 @@
         "no_campaign": "没有可用于掉宝的活动，正在等待掉宝活动开放..."
     },
     "login": {
-        "unexpected_content": "返回的内容类型异常，这通常是由于网页被重定向。\n您是否需要先设置VPN或登录到当前网络？",
-        "chrome": {
-            "startup": "正在打开Chrome浏览器...",
-            "login_to_complete": "请再次点击登录按钮，并手动完成登录流程。",
-            "no_token": "无法获取授权令牌。",
-            "closed_window": "Chrome浏览器窗口在登录未完成时被关闭。"
-        },
-        "error_code": "登录出错。错误码: {error_code}",
-        "incorrect_login_pass": "用户名或密码错误。",
-        "incorrect_email_code": "电子邮箱验证码错误。",
-        "incorrect_twofa_code": "双重验证码错误。",
-        "email_code_required": "需要电子邮件验证码，请检查您的邮箱。",
-        "twofa_code_required": "需要双重验证码。"
+        "unexpected_content": "返回的内容类型异常，这通常是由于网页被重定向。\n您是否需要先设置VPN或登录到当前网络？"
     },
     "error": {
-        "captcha": "由于验证码验证失败，您的登录请求已被Twitch拒绝，请在12小时后重试。",
         "site_down": "无法连接到Twitch，将在{seconds}秒后重试...",
         "no_connection": "无法连接到Twitch，将在{seconds}秒后重试，请确保您已经登录到当前网络。若您的网络无法直连Twitch，请在教程指导下开启VPN及添加代理。({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "登录Twitch账户",
-            "labels": "状态:\n用户ID：",
             "logged_in": "已登录",
             "logged_out": "未登录",
             "logging_in": "登录中...",
-            "required": "请先登录",
-            "request": "您需要先登录才能挖掘掉宝。",
-            "username": "用户名",
-            "password": "密码",
-            "twofa_code": "双重验证码",
             "button": "登录"
         },
         "websocket": {

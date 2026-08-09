@@ -1,6 +1,7 @@
 # Cache files
 __pycache__
 .mypy_cache
+.pytest_cache
 # Build and dist files
 /build
 /dist
@@ -10,7 +11,6 @@ __pycache__
 /Twitch Drops Miner
 # Dev files
 *.new
-/env
 /cache
 /*.jar
 log.txt
@@ -19,6 +19,7 @@ log.txt
 settings.json
 cookies.jar
 oauth.json
+session_history.json
 /lang/English.json
 # AppImage
 /AppDir

@@ -34,7 +34,9 @@ class CookiePersistenceTests(unittest.TestCase):
             Twitch._save_cookie_jar(cast(Any, jar), path)
 
             self.assertEqual(path.read_text(encoding="utf8"), "new")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertFalse(path.with_name("cookies.jar.new").exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
             self.assertEqual(jar.calls, 1)
 
     def test_cookie_save_failure_keeps_the_last_good_file(self) -> None:
@@ -46,6 +48,7 @@ class CookiePersistenceTests(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf8"), "old")
             self.assertFalse(path.with_name("cookies.jar.new").exists())
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
 
 if __name__ == "__main__":

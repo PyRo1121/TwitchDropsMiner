@@ -6,12 +6,13 @@ are kept in a separate atomically-written file with restrictive permissions.
 """
 from __future__ import annotations
 
+import io
 import json
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from utils import atomic_write, remove_stale_new
+from utils import atomic_write, remove_file
 
 
 class OAuthTokenStore:
@@ -36,16 +37,15 @@ class OAuthTokenStore:
         if not client_id or not refresh_token:
             raise ValueError("OAuth token records require non-empty values")
 
-        def writer(temporary_path: Path) -> None:
-            with temporary_path.open("w", encoding="utf8") as file:
-                json.dump(
-                    {"client_id": client_id, "refresh_token": refresh_token},
-                    file,
-                    sort_keys=True,
-                )
-                file.write("\n")
+        def writer(file: io.TextIOWrapper) -> None:
+            json.dump(
+                {"client_id": client_id, "refresh_token": refresh_token},
+                file,
+                sort_keys=True,
+            )
+            file.write("\n")
 
         atomic_write(self._path, writer)
 
     def clear(self) -> None:
-        remove_stale_new(self._path)
+        remove_file(self._path)

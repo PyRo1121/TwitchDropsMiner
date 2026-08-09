@@ -8,12 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
 
 import qtawesome as qta
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, QSize, Qt
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    QTimer,
+    QSize,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,7 +42,7 @@ from PySide6.QtWidgets import (
 from translate import _
 from constants import OUTPUT_FORMATTER, State, _resource_path as resource_path
 from game_metadata import SteamMetadata, SteamMetadataProvider
-from utils import format_duration
+from utils import cancel_tasks, format_duration
 from notifications import Alert, NotificationCenter
 from session_history import HistoryEvent
 from .image_cache import QtImageCache
@@ -54,7 +61,7 @@ from .subs import (
 from .theme import apply_theme, make_theme
 from .tasks import QtTaskRegistry
 from .tray import QtTray
-from .widgets import Card, IconButton, Metric, SignalPulse, StatusDot
+from .widgets import Badge, Card, IconButton, Metric, SignalPulse, StatusDot
 
 if TYPE_CHECKING:
     from inventory import TimedDrop
@@ -64,13 +71,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger("TwitchDrops")
 
 
+class _QtLogEmitter(QObject):
+    message = Signal(str)
+
+
 class _QtLogHandler(logging.Handler):
     def __init__(self, console: QtConsole) -> None:
         super().__init__()
-        self._console = console
+        self._emitter = _QtLogEmitter()
+        self._emitter.message.connect(console.print)
 
     def emit(self, record: logging.LogRecord) -> None:
-        self._console.print(self.format(record))
+        self._emitter.message.emit(self.format(record))
 
 
 class QtGUIManager(QMainWindow):
@@ -102,13 +114,14 @@ class QtGUIManager(QMainWindow):
         self.campaigns_metric: Metric
         self.claimed_metric: Metric
         self.diagnostic_label: QLabel
+        self._current_status_text = _("gui", "status", "idle")
         apply_theme(self._app, self._theme)
         self._app.setLayoutDirection(
             Qt.LayoutDirection.RightToLeft
             if _.current == "العربية"
             else Qt.LayoutDirection.LeftToRight
         )
-        self.setWindowTitle("Twitch Drops Miner")
+        self.setWindowTitle(_("gui", "text", "app_name"))
         brand_icon = QIcon(str(resource_path("gui_qt/assets/drop_deck_brand.png")))
         if brand_icon.isNull():
             brand_icon = QIcon(str(resource_path("icons/pickaxe.ico")))
@@ -132,12 +145,15 @@ class QtGUIManager(QMainWindow):
         root.addWidget(workspace, 1)
         self.setCentralWidget(central)
         self._page_animation: QPropertyAnimation | None = None
+        self._animation_page: QWidget | None = None
         self._command_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self._command_shortcut.activated.connect(self._focus_command)
 
         self.pages: dict[str, QWidget] = {}
         self._build_pages()
         self._wire_backend()
+        self._refresh_semantic_colors()
+        self._status_changed(self._current_status_text)
         self._metrics_timer = QTimer(self)
         self._metrics_timer.setInterval(1000)
         self._metrics_timer.timeout.connect(self._refresh_dashboard_metrics)
@@ -147,13 +163,17 @@ class QtGUIManager(QMainWindow):
         self._log_handler.setFormatter(OUTPUT_FORMATTER)
         logger.addHandler(self._log_handler)
         if logger.getEffectiveLevel() < logging.ERROR:
-            self.print(f"Logging level: {logging.getLevelName(logger.getEffectiveLevel())}")
+            self.print(
+                _("gui", "text", "logging_level").format(
+                    level=logging.getLevelName(logger.getEffectiveLevel())
+                )
+            )
         self.tray = QtTray(self, self)
         self._tray_requested = bool(
             twitch.settings.tray or twitch.settings.autostart_tray
         )
         self.tray.start()
-        if self._tray_requested and self.tray.available and sys.platform != "darwin":
+        if self._tray_requested and self.tray.available:
             self.hide()
         else:
             # A tray-only launch must still expose a window when the platform
@@ -187,6 +207,10 @@ class QtGUIManager(QMainWindow):
         self.campaigns_metric.set_value(str(len(campaigns)))
         claimed = sum(getattr(campaign, "claimed_drops", 0) for campaign in campaigns)
         self.claimed_metric.set_value(str(claimed))
+        if self._watching_id is not None:
+            channel = getattr(self._twitch, "channels", {}).get(self._watching_id)
+            if channel is not None:
+                self.hero.set_channel(channel.name, channel.viewers)
 
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
@@ -217,11 +241,11 @@ class QtGUIManager(QMainWindow):
                 )
             )
         brand_layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignHCenter)
-        name = QLabel("TDM")
+        name = QLabel(_("gui", "text", "brand_name"))
         name.setObjectName("brandName")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_layout.addWidget(name)
-        sub = QLabel("DROP DECK")
+        sub = QLabel(_("gui", "text", "brand_subtitle"))
         sub.setObjectName("brandSub")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         brand_layout.addWidget(sub)
@@ -232,18 +256,22 @@ class QtGUIManager(QMainWindow):
             "overview": "ph.house-fill",
             "channels": "ph.broadcast-fill",
             "drops": "ph.drop-fill",
-            "activity": "ph.activity",
             "history": "ph.clock-counter-clockwise",
             "settings": "ph.sliders-horizontal-fill",
             "help": "ph.question-fill",
         }
         navigation = (
-            ("overview", "Overview"),
+            ("overview", _("gui", "text", "overview")),
             ("channels", _("gui", "channels", "name")),
-            ("drops", "Drops"),
-            ("history", "History"),
+            ("drops", _("gui", "text", "inventory_title")),
+            ("history", _("gui", "text", "history")),
             ("settings", _("gui", "tabs", "settings")),
-            ("help", f'{_("gui", "tabs", "help")} && About'),
+            (
+                "help",
+                _("gui", "text", "help_about").format(
+                    help=_("gui", "tabs", "help")
+                ).replace("&", "&&"),
+            ),
         )
         for key, label in navigation:
             button = QPushButton(label)
@@ -257,7 +285,10 @@ class QtGUIManager(QMainWindow):
             layout.addWidget(button)
 
         layout.addStretch(1)
-        self._sidebar_status = StatusDot("#a1a9bd", "Starting")
+        self._sidebar_status = StatusDot(
+            "#a1a9bd",
+            _("gui", "text", "starting"),
+        )
         layout.addWidget(self._sidebar_status)
         return sidebar
 
@@ -269,10 +300,10 @@ class QtGUIManager(QMainWindow):
         layout.setSpacing(12)
         context = QVBoxLayout()
         context.setSpacing(1)
-        kicker = QLabel("CONTROL CENTER")
+        kicker = QLabel(_("gui", "text", "control_center"))
         kicker.setObjectName("pageKicker")
         context.addWidget(kicker)
-        self._page_context = QLabel("Drop deck")
+        self._page_context = QLabel(_("gui", "text", "deck_title"))
         self._page_context.setObjectName("pageTitle")
         context.addWidget(self._page_context)
         layout.addLayout(context)
@@ -280,12 +311,20 @@ class QtGUIManager(QMainWindow):
 
         command = QLineEdit()
         command.setObjectName("command")
-        command.setPlaceholderText("Search  ·  Ctrl K")
+        command.setPlaceholderText(_("gui", "text", "search_placeholder"))
         command.setClearButtonEnabled(True)
         command.setMaximumWidth(310)
         command.returnPressed.connect(self._submit_command)
         completer = QCompleter(
-            ["Overview", "Channels", "Drops", "History", "Settings", "Help", "Event log"],
+            [
+                _("gui", "text", "overview"),
+                _("gui", "channels", "name"),
+                _("gui", "text", "inventory_title"),
+                _("gui", "text", "history"),
+                _("gui", "tabs", "settings"),
+                _("gui", "tabs", "help"),
+                _("gui", "text", "event_log_command"),
+            ],
             command,
         )
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -299,11 +338,18 @@ class QtGUIManager(QMainWindow):
         status_frame.setObjectName("statusChip")
         status_layout = QHBoxLayout(status_frame)
         status_layout.setContentsMargins(10, 2, 10, 2)
-        self._topbar_status = StatusDot("#a1a9bd", "Idle")
+        self._topbar_status = StatusDot(
+            "#a1a9bd",
+            _("gui", "text", "idle"),
+        )
         status_layout.addWidget(self._topbar_status)
         layout.addWidget(status_frame)
 
-        account = IconButton("ph.user-circle-fill", "Account", color="#a1a9bd")
+        account = IconButton(
+            "ph.user-circle-fill",
+            _("gui", "text", "account"),
+            color="#a1a9bd",
+        )
         account.setFixedSize(36, 36)
         account.clicked.connect(lambda: self._navigate("settings"))
         layout.addWidget(account)
@@ -329,6 +375,18 @@ class QtGUIManager(QMainWindow):
             "help": "help",
             "about": "help",
         }
+        aliases.update(
+            {
+                _("gui", "text", "overview").lower(): "overview",
+                _("gui", "channels", "name").lower(): "channels",
+                _("gui", "text", "inventory_title").lower(): "drops",
+                _("gui", "text", "event_log_command").lower(): "activity",
+                _("gui", "text", "history").lower(): "history",
+                _("gui", "text", "history_title").lower(): "history",
+                _("gui", "tabs", "settings").lower(): "settings",
+                _("gui", "tabs", "help").lower(): "help",
+            }
+        )
         target = aliases.get(query)
         if target is not None:
             self._navigate(target)
@@ -347,36 +405,44 @@ class QtGUIManager(QMainWindow):
         intro.setSpacing(18)
         title = QVBoxLayout()
         title.setSpacing(3)
-        eyebrow = QLabel("OVERVIEW  /  LIVE CONTROL")
+        eyebrow = QLabel(_("gui", "text", "overview_kicker"))
         eyebrow.setObjectName("pageKicker")
         title.addWidget(eyebrow)
-        title_label = QLabel("Drop deck")
+        title_label = QLabel(_("gui", "text", "deck_title"))
         title_label.setObjectName("h1")
         title.addWidget(title_label)
-        subtitle = QLabel("The quiet control surface for everything you are farming.")
+        subtitle = QLabel(_("gui", "text", "overview_subtitle"))
         subtitle.setObjectName("muted")
         title.addWidget(subtitle)
         intro.addLayout(title)
         intro.addStretch(1)
-        self._health = StatusDot("#a1a9bd", "Starting")
+        self._health = StatusDot(
+            "#a1a9bd",
+            _("gui", "text", "starting"),
+        )
         intro.addWidget(self._health, 0, Qt.AlignmentFlag.AlignTop)
         overview_layout.addLayout(intro)
 
-        self.status_label = QLabel("Starting")
+        self.status_label = QLabel(_("gui", "text", "starting"))
         self.status_label.setObjectName("muted")
-        self.websocket_label = QLabel()
-        self.websocket_label.setVisible(False)
+        self.websocket_label = QLabel(_("gui", "text", "websocket_waiting"))
+        self.websocket_label.setObjectName("subtle")
         signal_strip = QFrame()
         signal_strip.setObjectName("metricStrip")
         signal_layout = QHBoxLayout(signal_strip)
         signal_layout.setContentsMargins(0, 10, 0, 0)
         signal_layout.setSpacing(26)
         signal_layout.addWidget(self.status_label)
-        hint = QLabel("Claims run automatically while the miner is live.")
+        signal_layout.addWidget(self.websocket_label)
+        hint = QLabel(_("gui", "text", "claims_automatic"))
         hint.setObjectName("subtle")
         signal_layout.addWidget(hint)
         signal_layout.addStretch(1)
-        signal_layout.addWidget(QLabel("Ctrl K  ·  jump anywhere"), 0, Qt.AlignmentFlag.AlignRight)
+        signal_layout.addWidget(
+            QLabel(_("gui", "text", "jump_anywhere")),
+            0,
+            Qt.AlignmentFlag.AlignRight,
+        )
         overview_layout.addWidget(signal_strip)
 
         diagnostic = QFrame()
@@ -386,10 +452,10 @@ class QtGUIManager(QMainWindow):
         diagnostic_layout.setSpacing(10)
         self._signal_pulse = SignalPulse()
         diagnostic_layout.addWidget(self._signal_pulse)
-        diagnostic_tag = QLabel("STATE READOUT")
+        diagnostic_tag = QLabel(_("gui", "text", "state_readout"))
         diagnostic_tag.setObjectName("eyebrow")
         diagnostic_layout.addWidget(diagnostic_tag)
-        self.diagnostic_label = QLabel("Warming up the drop deck…")
+        self.diagnostic_label = QLabel(_("gui", "text", "warming_up"))
         self.diagnostic_label.setObjectName("muted")
         self.diagnostic_label.setWordWrap(True)
         diagnostic_layout.addWidget(self.diagnostic_label, 1)
@@ -406,12 +472,16 @@ class QtGUIManager(QMainWindow):
         metric_layout = QHBoxLayout(metric_rail)
         metric_layout.setContentsMargins(0, 8, 0, 8)
         metric_layout.setSpacing(0)
-        self.campaign_metric = Metric("Campaign", "0.0%")
-        self.drop_metric = Metric("Drop", "—")
-        self.watch_metric = Metric("Session watch", "00:00:00")
-        self.live_metric = Metric("Live channels", "0/0")
-        self.campaigns_metric = Metric("Campaigns", "0")
-        self.claimed_metric = Metric("Claimed drops", "0")
+        self.campaign_metric = Metric(_("gui", "text", "campaign_metric"), "0.0%")
+        self.drop_metric = Metric(_("gui", "text", "drop_metric"), "—")
+        self.watch_metric = Metric(
+            _("gui", "text", "session_watch_metric"),
+            "00:00:00",
+        )
+        self.live_metric = Metric(_("gui", "text", "live_channels_metric"), "0/0")
+        self.campaigns_metric = Metric(_("gui", "text", "campaigns_metric"), "0")
+        self.claimed_metric = Metric(_("gui", "text", "claimed_drops_metric"), "0")
+        self.claimed_metric.setProperty("lastMetric", True)
         for metric in (
             self.campaign_metric,
             self.drop_metric,
@@ -428,17 +498,25 @@ class QtGUIManager(QMainWindow):
         quick_actions.setObjectName("quickCard")
         quick_body = quick_actions.body()
         quick_header = QHBoxLayout()
-        quick_title = QLabel("QUICK STEERING")
+        quick_title = QLabel(_("gui", "text", "quick_steering"))
         quick_title.setObjectName("eyebrow")
         quick_header.addWidget(quick_title)
         quick_header.addStretch(1)
-        quick_header.addWidget(QLabel("Keep the miner moving"), 0, Qt.AlignmentFlag.AlignRight)
+        quick_header.addWidget(
+            QLabel(_("gui", "text", "keep_moving")),
+            0,
+            Qt.AlignmentFlag.AlignRight,
+        )
         quick_body.addLayout(quick_header)
         actions = QHBoxLayout()
         for label, target, icon in (
-            ("View channels", "channels", "ph.broadcast-fill"),
-            ("Browse drops", "drops", "ph.drop-fill"),
-            ("Open preferences", "settings", "ph.sliders-horizontal-fill"),
+            (_("gui", "text", "view_channels"), "channels", "ph.broadcast-fill"),
+            (_("gui", "text", "browse_drops"), "drops", "ph.drop-fill"),
+            (
+                _("gui", "text", "open_preferences"),
+                "settings",
+                "ph.sliders-horizontal-fill",
+            ),
         ):
             action = QPushButton(label)
             action.setObjectName("ghost")
@@ -455,40 +533,40 @@ class QtGUIManager(QMainWindow):
         overview_scroll.setFrameShape(QFrame.Shape.NoFrame)
         overview_scroll.setWidget(overview)
         self.pages["overview"] = overview_scroll
-        self._add_page("overview", overview_scroll)
+        self._add_page(overview_scroll)
 
         channels = ChannelsPage()
         self.pages["channels"] = channels
-        self._add_page("channels", channels)
+        self._add_page(channels)
 
         self.inventory_page = InventoryPage(self._twitch.settings)
         self.pages["drops"] = self.inventory_page
         self.pages["inventory"] = self.inventory_page
-        self._add_page("drops", self.inventory_page)
+        self._add_page(self.inventory_page)
 
         activity = ActivityPage()
         self.pages["activity"] = activity
-        self._add_page("activity", activity)
+        self._add_page(activity)
 
         history = HistoryPage()
         history.set_clear_callback(self._clear_history)
         self.pages["history"] = history
         self._history_page = history
-        self._add_page("history", history)
+        self._add_page(history)
 
         settings = QWidget()
         self.pages["settings"] = settings
-        self._add_page("settings", settings)
+        self._add_page(settings)
 
         help_page = QWidget()
         self.pages["help"] = help_page
-        self._add_page("help", help_page)
+        self._add_page(help_page)
 
         self.full_activity = activity
         self.settings_page = settings
         self.help_page = help_page
 
-    def _add_page(self, key: str, page: QWidget) -> None:
+    def _add_page(self, page: QWidget) -> None:
         if self.stack.indexOf(page) < 0:
             self.stack.addWidget(page)
 
@@ -527,21 +605,29 @@ class QtGUIManager(QMainWindow):
     @staticmethod
     def _metadata_text(metadata: SteamMetadata) -> str:
         if metadata.error:
-            return "GAME INTEL  ·  Steam signal unavailable  ·  search links ready"
+            return _("gui", "text", "game_intel_unavailable")
         if not metadata.available:
-            return "GAME INTEL  ·  no exact Steam match  ·  search links ready"
+            return _("gui", "text", "game_intel_no_match")
         parts: list[str] = []
         if metadata.players is not None:
-            parts.append(f"{metadata.players:,} playing")
+            parts.append(
+                _("gui", "text", "players_playing").format(
+                    players=f"{metadata.players:,}"
+                )
+            )
         if metadata.price is not None:
-            parts.append(f"{metadata.price} US")
+            parts.append(
+                _("gui", "text", "price_us").format(price=metadata.price)
+            )
         elif metadata.free_to_play:
-            parts.append("Free to play")
+            parts.append(_("gui", "text", "free_to_play"))
         if metadata.discount_percent:
             parts.append(f"-{metadata.discount_percent}%")
         if not parts:
-            parts.append("Steam listing found")
-        return "STEAM INTEL  ·  " + "  ·  ".join(parts)
+            parts.append(_("gui", "text", "steam_listing_found"))
+        return _("gui", "text", "steam_intel").format(
+            details="  ·  ".join(parts)
+        )
 
     def _queue_game_context(self, drop: TimedDrop) -> None:
         campaign = drop.campaign
@@ -600,96 +686,137 @@ class QtGUIManager(QMainWindow):
         )
         self.hero.set_intel(self._metadata_text(metadata))
 
-    @staticmethod
-    def _status_explanation(text: str) -> str:
-        lowered = text.lower()
-        if any(term in lowered for term in ("error", "failed", "captcha", "terminated")):
-            return "The miner needs attention. Open Event log for the exact request or login detail."
-        if any(term in lowered for term in ("gather", "fetch", "cleanup", "reload")):
-            return "Scanning campaign inventory and live channels. This usually clears in a few seconds."
-        if any(term in lowered for term in ("switch", "goes online", "goes offline")):
-            return "Re-evaluating the watch queue so the next minute lands on the best eligible channel."
-        if any(term in lowered for term in ("no available", "no active", "idle")):
-            return "Nothing eligible is live right now. The miner is standing by and will resume automatically."
-        if any(term in lowered for term in ("watch", "active", "connected")):
-            return "A live channel is selected; Twitch watch minutes are being sent automatically."
-        return "The deck is connected and waiting for the next backend signal."
-
     def _status_changed(self, text: str) -> None:
-        lowered = text.lower()
+        self._current_status_text = text
+        display = text or _("gui", "status", "idle")
+        lowered = display.lower()
 
         def translated_prefix(*path: str) -> str:
-            value = _("status", *path)
+            value = _(*path)
             return value.split("{", 1)[0].strip().lower()
+
+        def matches(terms: tuple[str, ...]) -> bool:
+            return any(term and term in lowered for term in terms)
 
         error_terms = (
             "error",
             "failed",
             "captcha",
             "terminated",
-            translated_prefix("terminated"),
+            translated_prefix("status", "terminated"),
+            translated_prefix("gui", "status", "terminated"),
         )
-        warning_terms = (
+        switch_terms = (
+            "switch",
+            "goes online",
+            "goes offline",
+            translated_prefix("gui", "status", "switching"),
+            translated_prefix("status", "goes_online"),
+            translated_prefix("status", "goes_offline"),
+        )
+        scan_terms = (
             "maint",
             "reload",
             "gather",
-            "switch",
-            *(
-                translated_prefix(key)
-                for key in (
-                    "no_channel",
-                    "no_campaign",
-                    "goes_online",
-                    "goes_offline",
-                )
-            ),
+            "fetch",
+            "cleanup",
+            translated_prefix("gui", "status", "cleanup"),
+            translated_prefix("gui", "status", "gathering"),
+            translated_prefix("gui", "status", "fetching_inventory"),
+            translated_prefix("gui", "status", "inventory_retry"),
+            translated_prefix("gui", "status", "fetching_campaigns"),
+            translated_prefix("gui", "status", "adding_campaigns"),
+        )
+        idle_attention_terms = (
+            "no available",
+            "no active",
+            translated_prefix("status", "no_channel"),
+            translated_prefix("status", "no_campaign"),
         )
         active_terms = (
             "watch",
             "active",
             "connected",
-            translated_prefix("watching"),
+            translated_prefix("status", "watching"),
+            translated_prefix("gui", "websocket", "connected"),
         )
+        idle_terms = (
+            "idle",
+            translated_prefix("gui", "status", "idle"),
+        )
+
         palette = self._theme.p
-        if any(value and value in lowered for value in error_terms):
+        if matches(error_terms):
             color = palette.error
-        elif any(value and value in lowered for value in warning_terms):
+            explanation = _("gui", "text", "status_error_detail")
+        elif matches(switch_terms):
             color = palette.amber
-        elif any(value and value in lowered for value in active_terms):
+            explanation = _("gui", "text", "status_switching_detail")
+        elif matches(scan_terms):
+            color = palette.amber
+            explanation = _("gui", "text", "status_scanning_detail")
+        elif matches(idle_attention_terms):
+            color = palette.amber
+            explanation = _("gui", "text", "status_idle_detail")
+        elif matches(active_terms):
             color = palette.green
+            explanation = _("gui", "text", "status_watching_detail")
+        elif matches(idle_terms):
+            color = palette.idle
+            explanation = _("gui", "text", "status_idle_detail")
         else:
             color = palette.idle
-        display = text or _("gui", "status", "idle")
-        compact = "Live" if color == palette.green else "Error" if color == palette.error else "Attention" if color == palette.amber else "Idle"
+            explanation = _("gui", "text", "status_waiting_detail")
+
+        compact = (
+            _("gui", "text", "status_live")
+            if color == palette.green
+            else _("gui", "text", "status_error")
+            if color == palette.error
+            else _("gui", "text", "status_attention")
+            if color == palette.amber
+            else _("gui", "text", "idle")
+        )
         for widget in self._status_widgets:
             widget.set_state(color, compact)
             widget.setToolTip(display)
         self._signal_pulse.set_state(color, color != palette.idle)
-        self.diagnostic_label.setText(self._status_explanation(display))
+        self.diagnostic_label.setText(explanation)
 
     def _reload_inventory(self) -> None:
         self._twitch.change_state(State.INVENTORY_FETCH)
-        self.print("Campaign reload requested.")
+        self.print(_("gui", "text", "reload_requested"))
 
     def _navigate(self, key: str) -> None:
         self._active_page = key
         titles = {
-            "overview": "Drop deck",
-            "channels": "Live channels",
-            "drops": "Drops",
-            "inventory": "Drops",
-            "activity": "Event log",
-            "history": "Session history",
-            "settings": "Preferences",
-            "help": "Help & about",
+            "overview": _("gui", "text", "deck_title"),
+            "channels": _("gui", "text", "live_channels_metric"),
+            "drops": _("gui", "text", "inventory_title"),
+            "inventory": _("gui", "text", "inventory_title"),
+            "activity": _("gui", "text", "event_log"),
+            "history": _("gui", "text", "history_title"),
+            "settings": _("gui", "text", "preferences"),
+            "help": _("gui", "text", "help_about").format(
+                help=_("gui", "tabs", "help")
+            ),
         }
         palette = self._theme.p
         for name, button in self._nav_buttons.items():
             active = name == key
             button.setChecked(active)
             button.setIcon(qta.icon(self._nav_icons[name], color=palette.accent if active else palette.muted))
-        self._page_context.setText(titles.get(key, "Drop deck"))
+        self._page_context.setText(
+            titles.get(key, _("gui", "text", "deck_title"))
+        )
         page = self.pages["drops"] if key == "inventory" else self.pages[key]
+        if self._page_animation is not None:
+            self._page_animation.stop()
+            self._page_animation.deleteLater()
+            self._page_animation = None
+        if self._animation_page is not None:
+            self._animation_page.setGraphicsEffect(cast(Any, None))
+            self._animation_page = None
         self.stack.setCurrentWidget(page)
         effect = QGraphicsOpacityEffect(page)
         effect.setOpacity(0.92)
@@ -699,8 +826,16 @@ class QtGUIManager(QMainWindow):
         animation.setStartValue(0.92)
         animation.setEndValue(1.0)
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        animation.finished.connect(lambda: page.setGraphicsEffect(cast(Any, None)))
+        def finish_animation() -> None:
+            page.setGraphicsEffect(cast(Any, None))
+            if self._page_animation is animation:
+                self._page_animation = None
+                self._animation_page = None
+            animation.deleteLater()
+
+        animation.finished.connect(finish_animation)
         self._page_animation = animation
+        self._animation_page = page
         animation.start()
         if key in ("drops", "inventory"):
             self.inventory.refresh()
@@ -719,18 +854,20 @@ class QtGUIManager(QMainWindow):
     async def coro_unless_closed(self, awaitable: Any) -> Any:
         from exceptions import ExitRequest
 
-        tasks = [
-            asyncio.ensure_future(awaitable),
-            asyncio.ensure_future(self._close_requested.wait()),
-        ]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        if self._close_requested.is_set():
-            raise ExitRequest()
-        return await next(iter(done))
+        work_task = asyncio.ensure_future(awaitable)
+        close_task = asyncio.create_task(self._close_requested.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (work_task, close_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if work_task in done:
+                return await work_task
+            if close_task in done:
+                raise ExitRequest()
+            return await work_task
+        finally:
+            await cancel_tasks((work_task, close_task))
 
     def prevent_close(self) -> None:
         self._close_requested.clear()
@@ -738,11 +875,20 @@ class QtGUIManager(QMainWindow):
     def start(self) -> None:
         self._started = True
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         self._started = False
+        self._metrics_timer.stop()
         self.progress.stop_timer()
+        self.inventory_page.stop()
         self._cancel_metadata_task()
-        self._tasks.cancel_all()
+        if self._page_animation is not None:
+            self._page_animation.stop()
+            self._page_animation.deleteLater()
+            self._page_animation = None
+        if self._animation_page is not None:
+            self._animation_page.setGraphicsEffect(cast(Any, None))
+            self._animation_page = None
+        await self._tasks.cancel_and_wait()
         self._steam_metadata.save()
         self._image_cache.save()
 
@@ -785,6 +931,9 @@ class QtGUIManager(QMainWindow):
         if sound:
             QApplication.beep()
 
+    def set_authenticated(self, authenticated: bool) -> None:
+        self.help.set_authenticated(authenticated)
+
     def set_games(self, games: set[Game]) -> None:
         self.settings.set_games(games)
 
@@ -798,7 +947,6 @@ class QtGUIManager(QMainWindow):
         self._context_key = None
         self._metadata_generation += 1
         self._cancel_metadata_task()
-        self.hero.clear()
         self.tray.update_title(None)
 
     def print(self, message: str) -> None:
@@ -826,7 +974,6 @@ class QtGUIManager(QMainWindow):
             history_page.set_sessions(history.sessions)
 
     def on_history_event(self, event: HistoryEvent) -> None:
-        self.history_changed()
         alert = self._notifications.handle(event)
         if alert is None:
             return
@@ -840,7 +987,12 @@ class QtGUIManager(QMainWindow):
         self.tray.change_icon("error" if alert.severity == "error" else "maint")
         self.diagnostic_label.setText(alert.message)
         if not shown:
-            self.print(f"Attention: {alert.title} — {alert.message}")
+            self.print(
+                _("notifications", "attention").format(
+                    title=alert.title,
+                    message=alert.message,
+                )
+            )
 
     def _apply_ring_theme(self) -> None:
         palette = self._theme.p
@@ -852,6 +1004,11 @@ class QtGUIManager(QMainWindow):
         )
         self.hero.set_backdrop_color(palette.bg)
 
+    def _refresh_semantic_colors(self) -> None:
+        palette = self._theme.p
+        for badge in self.findChildren(Badge):
+            badge.apply_palette(palette)
+
     def apply_theme(self, dark: bool) -> None:
         self._theme_dark = dark
         self._theme = make_theme(dark)
@@ -859,6 +1016,8 @@ class QtGUIManager(QMainWindow):
         palette = self._theme.p
         if hasattr(self, "hero"):
             self._apply_ring_theme()
+            self._refresh_semantic_colors()
+            self._status_changed(self._current_status_text)
         active = getattr(self, "_active_page", "overview")
         for name, button in self._nav_buttons.items():
             button.setIcon(qta.icon(self._nav_icons[name], color=palette.accent if name == active else palette.muted))

@@ -75,7 +75,6 @@ class Theme:
     def _sheet(self) -> str:
         p = self.p
         accent_rgba = "rgba(182,156,255,0.13)" if self.dark else "rgba(102,83,199,0.12)"
-        accent_soft = "rgba(95,225,211,0.12)" if self.dark else "rgba(31,152,143,0.11)"
         focus = p.accent
         return f"""
 /* ---------- foundation: continuous ink canvas ---------- */
@@ -84,7 +83,6 @@ QWidget {{
     font-family: "Noto Sans", "Liberation Sans", "Segoe UI", sans-serif;
 }}
 QMainWindow, QDialog {{ background: {p.bg}; }}
-* {{ outline: none; }}
 QLabel {{ background: transparent; color: {p.text}; }}
 QLabel#muted {{ color: {p.muted}; }}
 QLabel#subtle {{ color: {p.subtle}; }}
@@ -223,8 +221,10 @@ QFrame#metricRail {{
     background: transparent; border-top: 1px solid {p.border};
     border-bottom: 1px solid {p.border};
 }}
-QFrame#metricRail QWidget {{ border-right: 1px solid {p.border}; padding: 0 9px; }}
-QFrame#metricRail QWidget:last-child {{ border-right: none; }}
+QFrame#metricRail > QWidget#metricTile {{
+    border-right: 1px solid {p.border}; padding: 0 9px;
+}}
+QFrame#metricRail > QWidget#metricTile[lastMetric="true"] {{ border-right: none; }}
 
 /* ---------- controls: square, legible, quiet ---------- */
 QLineEdit, QComboBox, QSpinBox {{
@@ -243,6 +243,7 @@ QPushButton {{
     border-radius: 0; padding: 8px 14px; font-weight: 650;
 }}
 QPushButton:hover {{ background: {accent_rgba}; border-color: {p.accent}; }}
+QPushButton:focus {{ border: 2px solid {focus}; padding: 7px 13px; }}
 QPushButton:pressed {{ background: {p.surface3}; }}
 QPushButton:disabled {{ color: {p.subtle}; background: transparent; }}
 QPushButton#primary {{ background: {p.accent}; color: {p.bg}; border: 1px solid {p.accent}; }}
@@ -280,6 +281,7 @@ QCheckBox#filterChip::indicator {{
 }}
 QCheckBox#filterChip::indicator:checked {{ background: {p.accent}; }}
 QCheckBox, QRadioButton {{ background: transparent; color: {p.text}; spacing: 8px; }}
+QCheckBox:focus, QRadioButton:focus {{ color: {focus}; }}
 QCheckBox::indicator, QRadioButton::indicator {{
     width: 16px; height: 16px; border: 1px solid {p.border}; border-radius: 0; background: {p.surface2};
 }}
@@ -308,6 +310,9 @@ QTableWidget, QListView, QTreeView, QListWidget {{
     background: transparent; color: {p.text}; alternate-background-color: {p.surface2};
     border: 1px solid {p.border}; border-radius: 0;
 }}
+QTableWidget:focus, QListView:focus, QTreeView:focus, QListWidget:focus {{
+    border: 2px solid {focus};
+}}
 QPlainTextEdit, QTextEdit {{
     background: {p.surface2}; color: {p.muted}; border: 1px solid {p.border};
     border-radius: 0; padding: 10px; selection-background-color: {focus};
@@ -326,6 +331,7 @@ QSplitter::handle {{ background: {p.border}; }}
 
 def apply_theme(app, theme: Theme) -> None:
     """Apply the semantic theme globally to a QApplication."""
+    app.setProperty("tdmDarkTheme", theme.dark)
     app.setStyleSheet(theme.qss)
     font = app.font()
     font.setPointSize(theme.base_pt)

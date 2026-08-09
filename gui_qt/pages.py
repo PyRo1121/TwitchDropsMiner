@@ -1,12 +1,13 @@
 """Reusable Qt pages for the TwitchDropsMiner presentation layer."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import qtawesome as qta
-from PySide6.QtCore import QUrl, QSize, Qt, Signal
+from PySide6.QtCore import QTimer, QUrl, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,11 +24,12 @@ from PySide6.QtWidgets import (
 
 from translate import _
 from game_metadata import SteamMetadata
-from utils import format_duration
+from utils import cancel_tasks, format_duration, webopen
 
 from .contracts import ImageCache
 from .widgets import (
     Badge,
+    BadgeRole,
     Card,
     EmptyState,
     PageIntro,
@@ -61,22 +63,18 @@ class LoginPanel(Card):
         header.addWidget(self.status)
         self.body().addLayout(header)
 
-        fields = QHBoxLayout()
-        fields.setSpacing(8)
-        self.username = QLineEdit(placeholderText=_("gui", "login", "username"))
-        self.password = QLineEdit(placeholderText=_("gui", "login", "password"))
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token = QLineEdit(placeholderText=_("gui", "login", "twofa_code"))
-        self.token.setEchoMode(QLineEdit.EchoMode.Password)
-        for field in (self.username, self.password, self.token):
-            field.setMinimumWidth(140)
-            fields.addWidget(field, 1)
+        authorization = QHBoxLayout()
+        authorization.setSpacing(8)
+        explanation = QLabel(_("gui", "text", "device_authorization"))
+        explanation.setWordWrap(True)
+        explanation.setObjectName("muted")
+        authorization.addWidget(explanation, 1)
         self.submit_button = QPushButton(_("gui", "login", "button"))
         self.submit_button.setObjectName("primary")
         self.submit_button.setIcon(qta.icon("ph.sign-in", color="#0b0d14"))
         self.submit_button.clicked.connect(self.on_submit.emit)
-        fields.addWidget(self.submit_button)
-        self.body().addLayout(fields)
+        authorization.addWidget(self.submit_button)
+        self.body().addLayout(authorization)
         self.setVisible(False)
 
     def set_busy(self, busy: bool) -> None:
@@ -102,7 +100,7 @@ class HeroCard(Card):
         content.setContentsMargins(2, 2, 2, 2)
         content.setSpacing(20)
 
-        self.game_art = QLabel("ART")
+        self.game_art = QLabel(_("gui", "text", "art_placeholder"))
         self.game_art.setObjectName("gameArt")
         self.game_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.game_art.setFixedSize(128, 172)
@@ -112,16 +110,16 @@ class HeroCard(Card):
         left = QVBoxLayout()
         left.setContentsMargins(0, 2, 0, 0)
         left.setSpacing(6)
-        self.eyebrow = QLabel("LIVE TARGET  /  FARMING NOW")
+        self.eyebrow = QLabel(_("gui", "text", "live_target"))
         self.eyebrow.setObjectName("eyebrow")
-        self.game = QLabel("Idle")
+        self.game = QLabel(_("gui", "text", "idle"))
         self.game.setObjectName("heroGame")
-        self.campaign = QLabel("No active campaign")
+        self.campaign = QLabel(_("gui", "text", "no_active_campaign"))
         self.campaign.setObjectName("heroCaption")
         self.campaign.setWordWrap(True)
-        self.channel = QLabel("NO ACTIVE WATCH")
+        self.channel = QLabel(_("gui", "text", "no_active_watch"))
         self.channel.setObjectName("heroChannel")
-        self.intel = QLabel("GAME INTEL  ·  waiting for a target")
+        self.intel = QLabel(_("gui", "text", "game_intel_waiting"))
         self.intel.setObjectName("heroIntel")
         left.addWidget(self.eyebrow)
         left.addWidget(self.game)
@@ -140,7 +138,7 @@ class HeroCard(Card):
             links.addWidget(button)
         links.addStretch(1)
         left.addLayout(links)
-        self.badge = Badge("IDLE", "#a1a9bd", "rgba(161,169,189,0.14)")
+        self.badge = Badge(_("gui", "text", "idle_badge"), "idle")
         left.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignLeft)
         left.addStretch(1)
         content.addLayout(left, 1)
@@ -153,22 +151,31 @@ class HeroCard(Card):
         campaign_block = QVBoxLayout()
         campaign_block.setSpacing(5)
         campaign_head = QHBoxLayout()
-        campaign_head.addWidget(self._eyebrow("CAMPAIGN"))
+        campaign_head.addWidget(
+            self._eyebrow(_("gui", "progress", "campaign").rstrip(":").upper())
+        )
         campaign_head.addStretch(1)
         self.campaign_percent = QLabel("0.0%")
         self.campaign_percent.setObjectName("heroPercent")
         campaign_head.addWidget(self.campaign_percent)
         campaign_block.addLayout(campaign_head)
         self.campaign_progress = SegmentedProgress()
+        self.campaign_progress.setAccessibleName(
+            _("gui", "progress", "campaign").rstrip(":")
+        )
         campaign_block.addWidget(self.campaign_progress)
-        self.campaign_remaining = QLabel("Campaign remaining: —")
+        self.campaign_remaining = QLabel(
+            _("gui", "text", "campaign_remaining").format(time="—")
+        )
         self.campaign_remaining.setObjectName("subtle")
         campaign_block.addWidget(self.campaign_remaining)
 
         drop_block = QVBoxLayout()
         drop_block.setSpacing(5)
         drop_head = QHBoxLayout()
-        drop_head.addWidget(self._eyebrow("CURRENT DROP"))
+        drop_head.addWidget(
+            self._eyebrow(_("gui", "progress", "drop").rstrip(":").upper())
+        )
         drop_head.addStretch(1)
         self.drop_percent = QLabel("0.0%")
         self.drop_percent.setObjectName("heroPercent")
@@ -178,8 +185,13 @@ class HeroCard(Card):
         self.drop_rewards.setObjectName("heroCaption")
         drop_block.addWidget(self.drop_rewards)
         self.drop_progress = SegmentedProgress()
+        self.drop_progress.setAccessibleName(
+            _("gui", "progress", "drop").rstrip(":")
+        )
         drop_block.addWidget(self.drop_progress)
-        self.drop_remaining = QLabel("Drop remaining: —")
+        self.drop_remaining = QLabel(
+            _("gui", "text", "drop_remaining").format(time="—")
+        )
         self.drop_remaining.setObjectName("subtle")
         drop_block.addWidget(self.drop_remaining)
         progress_row.addLayout(campaign_block, 1)
@@ -242,7 +254,7 @@ class HeroCard(Card):
         self._art_pixmap = None if pixmap is None or pixmap.isNull() else pixmap
         if self._art_pixmap is None:
             self.game_art.setPixmap(QPixmap())
-            self.game_art.setText("ART")
+            self.game_art.setText(_("gui", "text", "art_placeholder"))
         else:
             self.game_art.setText("")
             self.game_art.setPixmap(self._art_pixmap)
@@ -250,10 +262,20 @@ class HeroCard(Card):
 
     def set_channel(self, name: str | None, viewers: int | None = None) -> None:
         if not name:
-            self.channel.setText("NO ACTIVE WATCH")
+            self.channel.setText(_("gui", "text", "no_active_watch"))
             return
-        suffix = f"  ·  {viewers:,} viewers" if viewers is not None else ""
-        self.channel.setText(f"WATCHING  /  @{name}{suffix}")
+        viewer_label = _("gui", "channels", "headings", "viewers").lower()
+        suffix = (
+            f"  ·  {viewers:,} {viewer_label}"
+            if viewers is not None
+            else ""
+        )
+        self.channel.setText(
+            _("gui", "text", "watching_channel").format(
+                name=name,
+                suffix=suffix,
+            )
+        )
 
     def set_intel(self, text: str) -> None:
         self.intel.setText(text)
@@ -277,34 +299,57 @@ class HeroCard(Card):
         self.campaign.setText(name)
         self.campaign_progress.set_value(progress)
         self.campaign_percent.setText(progress_text)
-        self.ring.set_progress(progress, f"{progress:.0%}")
+        self.ring.set_progress(
+            progress,
+            f"{progress:.0%}",
+            _("gui", "progress", "campaign").rstrip(":"),
+        )
         self.badge.setText(f"{progress:.1%}")
+        self.badge.set_role("accent")
         self.drop_rewards.setText(drop_rewards or "—")
         self.drop_progress.set_value(drop_progress)
         self.drop_percent.setText(drop_percent)
         self.campaign_changed.emit(progress, name, drop_percent, drop_rewards or "—")
 
     def set_remaining(self, *, drop: str, campaign: str) -> None:
-        self.drop_remaining.setText(f"Drop remaining: {drop}")
-        self.campaign_remaining.setText(f"Campaign remaining: {campaign}")
+        self.drop_remaining.setText(
+            _("gui", "text", "drop_remaining").format(time=drop)
+        )
+        self.campaign_remaining.setText(
+            _("gui", "text", "campaign_remaining").format(time=campaign)
+        )
 
     def clear(self) -> None:
-        self.game.setText("Idle")
-        self.campaign.setText("No active campaign")
+        self.game.setText(_("gui", "text", "idle"))
+        self.campaign.setText(_("gui", "text", "no_active_campaign"))
         self.set_art(None)
         self.set_channel(None)
-        self.set_intel("GAME INTEL  ·  waiting for a target")
+        self.set_intel(_("gui", "text", "game_intel_waiting"))
         self.set_links(steam="", steamdb="", twitch="")
         self.campaign_progress.set_value(0)
         self.campaign_percent.setText("0.0%")
-        self.ring.set_progress(0, "0%")
-        self.campaign_remaining.setText("Campaign remaining: —")
+        self.ring.set_progress(
+            0,
+            "0%",
+            _("gui", "progress", "campaign").rstrip(":"),
+        )
+        self.campaign_remaining.setText(
+            _("gui", "text", "campaign_remaining").format(time="—")
+        )
         self.drop_rewards.setText("—")
         self.drop_progress.set_value(0)
         self.drop_percent.setText("0.0%")
-        self.drop_remaining.setText("Drop remaining: —")
-        self.badge.setText("IDLE")
-        self.campaign_changed.emit(0.0, "No active campaign", "—", "No active drop")
+        self.drop_remaining.setText(
+            _("gui", "text", "drop_remaining").format(time="—")
+        )
+        self.badge.setText(_("gui", "text", "idle_badge"))
+        self.badge.set_role("idle")
+        self.campaign_changed.emit(
+            0.0,
+            _("gui", "text", "no_active_campaign"),
+            "—",
+            _("gui", "text", "no_active_drop"),
+        )
 
 
 class ChannelRow(Card):
@@ -320,6 +365,11 @@ class ChannelRow(Card):
         super().__init__()
         self.channel_id = channel.id
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(
+            _("gui", "text", "select_channel").format(channel=channel.name)
+        )
+        self.setAccessibleDescription(self._meta(channel))
         self.setObjectName("selectedChannelRow" if watching or selected else "channelRow")
         row = QHBoxLayout()
         avatar = QLabel(channel.name[:1].upper())
@@ -339,18 +389,30 @@ class ChannelRow(Card):
         copy.addWidget(meta)
         row.addLayout(copy, 1)
         if channel.pending_online:
-            row.addWidget(Badge("ONLINE?", "#ffb86b", "rgba(255,184,107,0.14)"))
+            row.addWidget(
+                Badge(_("gui", "text", "pending_badge"), "warning")
+            )
         elif channel.online:
-            row.addWidget(Badge("LIVE", "#5fe1d3", "rgba(95,225,211,0.14)"))
+            row.addWidget(
+                Badge(_("gui", "text", "live_badge"), "success")
+            )
         else:
-            row.addWidget(Badge("OFFLINE", "#69728a", "rgba(105,114,138,0.14)"))
+            row.addWidget(
+                Badge(_("gui", "text", "offline_badge"), "idle")
+            )
         if getattr(channel, "drops_enabled", False):
-            row.addWidget(Badge("DROPS", "#8fc6ff", "rgba(143,198,255,0.14)"))
+            row.addWidget(
+                Badge(_("gui", "text", "drops_badge"), "info")
+            )
         if watching:
-            row.addWidget(Badge("WATCHING", "#b69cff", "rgba(182,156,255,0.14)"))
-        open_button = QPushButton("OPEN")
+            row.addWidget(
+                Badge(_("gui", "text", "watching_badge"), "accent")
+            )
+        open_button = QPushButton(_("gui", "text", "open"))
         open_button.setObjectName("rowAction")
-        open_button.setToolTip(f"Open {channel.name} on Twitch")
+        open_button.setToolTip(
+            _("gui", "text", "open_channel").format(channel=channel.name)
+        )
         open_button.setCursor(Qt.CursorShape.PointingHandCursor)
         channel_url = str(getattr(channel, "url", ""))
         open_button.setEnabled(bool(channel_url))
@@ -366,12 +428,20 @@ class ChannelRow(Card):
         if channel.game is not None:
             parts.append(str(channel.game.name))
         if channel.viewers is not None:
-            parts.append(f"{channel.viewers:,} viewers")
+            viewers = _("gui", "channels", "headings", "viewers").lower()
+            parts.append(f"{channel.viewers:,} {viewers}")
         return " · ".join(parts)
 
     def mouseReleaseEvent(self, event: Any) -> None:
         self.clicked.emit(self.channel_id)
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit(self.channel_id)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class ChannelsPage(QWidget):
@@ -387,11 +457,13 @@ class ChannelsPage(QWidget):
         layout.setSpacing(14)
         header = QHBoxLayout()
         header.addWidget(PageIntro(
-            "CHANNELS / WATCH LIST",
+            _("gui", "text", "channels_kicker"),
             _("gui", "channels", "name"),
-            "Choose what the miner should watch next.",
+            _("gui", "text", "channels_subtitle"),
         ))
-        self.count = QLabel("0 monitored")
+        self.count = QLabel(
+            _("gui", "text", "monitored").format(count=0)
+        )
         self.count.setObjectName("muted")
         self.switch_button = QPushButton(_("gui", "channels", "switch"))
         self.switch_button.setObjectName("primary")
@@ -404,10 +476,14 @@ class ChannelsPage(QWidget):
         layout.addLayout(header)
         self.search = QLineEdit()
         self.search.setObjectName("searchField")
-        self.search.setPlaceholderText("Filter channels  ·  name or game")
+        self.search.setPlaceholderText(_("gui", "text", "filter_channels"))
         self.search.textChanged.connect(self._apply_filter)
         layout.addWidget(self.search)
-        self.empty = EmptyState("No channels yet", "The miner will populate monitored channels here.", "Dismiss")
+        self.empty = EmptyState(
+            _("gui", "text", "no_channels"),
+            _("gui", "text", "no_channels_body"),
+            _("gui", "text", "dismiss"),
+        )
         self.empty.action.connect(self.empty.hide)
         layout.addWidget(self.empty)
         scroll = QScrollArea()
@@ -432,7 +508,12 @@ class ChannelsPage(QWidget):
 
     def _update_count(self) -> None:
         live = sum(bool(channel.online) for channel in self._channels.values())
-        self.count.setText(f"{len(self._channels)} monitored  ·  {live} live")
+        self.count.setText(
+            _("gui", "text", "monitored_live").format(
+                count=len(self._channels),
+                live=live,
+            )
+        )
 
     def _apply_filter(self) -> None:
         query = self.search.text().strip().lower()
@@ -516,11 +597,6 @@ class ChannelsPage(QWidget):
     def selected(self) -> Channel | None:
         return self._channels.get(self._selected_id) if self._selected_id is not None else None
 
-    def clear_selection(self) -> None:
-        self._selected_id = None
-        self.switch_button.setEnabled(False)
-        self._rerender()
-
     def clear_all(self) -> None:
         for row in self._rows.values():
             self._rows_layout.removeWidget(row)
@@ -557,11 +633,15 @@ class ActivityPage(QWidget):
         layout.setContentsMargins(14, 14, 14, 14) if compact else layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(10)
         heading = QHBoxLayout()
-        title = QLabel("LATEST SIGNALS" if compact else "Event log")
+        title = QLabel(
+            _("gui", "text", "latest_signals")
+            if compact
+            else _("gui", "text", "event_log")
+        )
         title.setObjectName("eyebrow" if compact else "h2")
         heading.addWidget(title)
         heading.addStretch(1)
-        hint = QLabel("diagnostics")
+        hint = QLabel(_("gui", "text", "diagnostics"))
         hint.setObjectName("subtle")
         heading.addWidget(hint)
         layout.addLayout(heading)
@@ -593,24 +673,34 @@ class SessionCard(Card):
     def __init__(self, session: SessionRecord) -> None:
         super().__init__()
         self.setObjectName("sessionCard")
-        status_values = {
-            "running": ("RUNNING", "#5fe1d3", "rgba(95,225,211,0.14)"),
-            "stopped": ("STOPPED", "#a1a9bd", "rgba(161,169,189,0.14)"),
-            "failed": ("FAILED", "#ff6f91", "rgba(255,111,145,0.14)"),
-            "interrupted": ("INTERRUPTED", "#ffb86b", "rgba(255,184,107,0.14)"),
+        status_values: dict[str, tuple[str, BadgeRole]] = {
+            "running": (_("gui", "text", "session_running"), "success"),
+            "stopped": (_("gui", "text", "session_stopped"), "idle"),
+            "failed": (_("gui", "text", "session_failed"), "error"),
+            "interrupted": (_("gui", "text", "session_interrupted"), "warning"),
         }
-        label, color, background = status_values.get(
-            session.status, (session.status.upper(), "#a1a9bd", "rgba(161,169,189,0.14)")
+        default_status: tuple[str, BadgeRole] = (
+            session.status.upper(),
+            "idle",
         )
+        label, role = status_values.get(session.status, default_status)
         header = QHBoxLayout()
-        title = QLabel(f"Session · {_history_time(session.started_at)}")
+        title = QLabel(
+            _("gui", "text", "session_title").format(
+                time=_history_time(session.started_at)
+            )
+        )
         title.setObjectName("h2")
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(Badge(label, color, background))
+        header.addWidget(Badge(label, role))
         self.body().addLayout(header)
 
-        ended = "in progress" if session.ended_at is None else _history_time(session.ended_at)
+        ended = (
+            _("gui", "text", "session_in_progress")
+            if session.ended_at is None
+            else _history_time(session.ended_at)
+        )
         started = _history_datetime(session.started_at)
         finished = _history_datetime(session.ended_at)
         duration = "—"
@@ -619,9 +709,13 @@ class SessionCard(Card):
             duration = format_duration(max(0, (end - started).total_seconds()))
         summary = session.summary
         summary_label = QLabel(
-            f"{_history_time(session.started_at)} → {ended} · {duration} · "
-            f"{summary.get('claims_succeeded', 0)} claims · "
-            f"{summary.get('inventory_syncs', 0)} inventory syncs"
+            _("gui", "text", "session_summary").format(
+                start=_history_time(session.started_at),
+                end=ended,
+                duration=duration,
+                claims=summary.get("claims_succeeded", 0),
+                syncs=summary.get("inventory_syncs", 0),
+            )
         )
         summary_label.setObjectName("muted")
         self.body().addWidget(summary_label)
@@ -647,20 +741,20 @@ class HistoryPage(QWidget):
         layout.setSpacing(12)
         header = QHBoxLayout()
         header.addWidget(PageIntro(
-            "HISTORY / RUN LEDGER",
-            "Session history",
-            "A local record of meaningful farming sessions and outcomes.",
+            _("gui", "text", "history_kicker"),
+            _("gui", "text", "history_title"),
+            _("gui", "text", "history_subtitle"),
         ))
         header.addStretch(1)
-        clear_button = QPushButton("Clear completed")
+        clear_button = QPushButton(_("gui", "text", "clear_completed"))
         clear_button.setObjectName("ghost")
         clear_button.clicked.connect(self.clear_requested.emit)
         header.addWidget(clear_button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
         self.empty = EmptyState(
-            "No sessions recorded",
-            "Session history will appear after the miner starts.",
-            "Dismiss",
+            _("gui", "text", "no_sessions"),
+            _("gui", "text", "no_sessions_body"),
+            _("gui", "text", "dismiss"),
         )
         self.empty.action.connect(self.empty.hide)
         layout.addWidget(self.empty)
@@ -742,7 +836,10 @@ class DropRow(Card):
             self._status.setStyleSheet("")
         elif drop.required_minutes > 0:
             self._status.setText(
-                _("gui", "inventory", "starts").format(time=f"{drop.required_minutes} minutes")
+                _("gui", "inventory", "percent_progress").format(
+                    percent="0.0%",
+                    minutes=drop.required_minutes,
+                )
             )
             self._status.setStyleSheet("")
         else:
@@ -760,7 +857,7 @@ class CampaignCard(Card):
         self.image = QLabel()
         self.image.setFixedSize(108, 144)
         self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image.setText("IMAGE")
+        self.image.setText(_("gui", "text", "image_placeholder"))
         self.image.setObjectName("imagePlaceholder")
         root.addWidget(self.image, 0, Qt.AlignmentFlag.AlignTop)
         content = QVBoxLayout()
@@ -769,7 +866,7 @@ class CampaignCard(Card):
         self.game = QLabel(campaign.game.name)
         self.game.setObjectName("h2")
         heading.addWidget(self.game)
-        self.status = Badge("", "#a1a9bd", "rgba(161,169,189,0.14)")
+        self.status = Badge("", "idle")
         heading.addWidget(self.status)
         heading.addStretch(1)
         content.addLayout(heading)
@@ -779,7 +876,7 @@ class CampaignCard(Card):
         self.timeline = QLabel()
         self.timeline.setObjectName("subtle")
         content.addWidget(self.timeline)
-        self.link = QPushButton("Link this campaign on Twitch")
+        self.link = QPushButton(_("gui", "text", "link_campaign"))
         self.link.setObjectName("ghost")
         self.link.clicked.connect(self._open_link)
         content.addWidget(self.link, 0, Qt.AlignmentFlag.AlignLeft)
@@ -798,7 +895,7 @@ class CampaignCard(Card):
         self.allowed = QLabel()
         self.allowed.setObjectName("subtle")
         self.allowed.setWordWrap(True)
-        self.allowed.setVisible(False)
+        content.addWidget(self.allowed)
         self.progress = Progress()
         content.addWidget(self.progress)
         self.summary = QLabel()
@@ -817,7 +914,10 @@ class CampaignCard(Card):
         self.refresh()
 
     def _open_link(self) -> None:
-        QDesktopServices.openUrl(QUrl(str(self.campaign.link_url)))
+        try:
+            webopen(str(self.campaign.link_url))
+        except ValueError:
+            return
 
     async def load_images(self, cache: ImageCache) -> None:
         self.image.setPixmap(await cache.get(self.campaign.image_url, (108, 144)))
@@ -828,39 +928,43 @@ class CampaignCard(Card):
     def refresh(self) -> None:
         c = self.campaign
         if c.active:
-            label, color, bg = _("gui", "inventory", "status", "active"), "#5fe1d3", "rgba(95,225,211,0.14)"
+            label, role = _("gui", "inventory", "status", "active"), "success"
         elif c.upcoming:
-            label, color, bg = _("gui", "inventory", "status", "upcoming"), "#ffb86b", "rgba(255,184,107,0.14)"
+            label, role = _("gui", "inventory", "status", "upcoming"), "warning"
         else:
-            label, color, bg = _("gui", "inventory", "status", "expired"), "#ff6f91", "rgba(255,111,145,0.14)"
+            label, role = _("gui", "inventory", "status", "expired"), "error"
         self.status.setText(label)
-        self.status.setStyleSheet(f"background:{bg};color:{color};border-radius:0;padding:2px 8px;")
+        self.status.set_role(role)
         self.timeline.setText(self._timeline(c))
         self.link.setVisible(not c.linked)
         if c.allowed_channels:
             names = ", ".join(channel.name for channel in c.allowed_channels[:5])
             if len(c.allowed_channels) > 5:
-                names += f" + {len(c.allowed_channels) - 5} more"
+                names += " + " + _(
+                    "gui", "inventory", "and_more"
+                ).format(amount=len(c.allowed_channels) - 5)
             self.allowed.setText(f'{_("gui", "inventory", "allowed_channels")} {names}')
         else:
             self.allowed.setText(
                 f'{_("gui", "inventory", "allowed_channels")} {_("gui", "inventory", "all_channels")}'
             )
         self.progress.set_fraction(c.progress)
-        self.summary.setText(f"{c.progress:.1%} · {c.claimed_drops}/{c.total_drops} claimed")
+        self.summary.setText(
+            _("gui", "text", "claimed_summary").format(
+                progress=f"{c.progress:.1%}",
+                claimed=c.claimed_drops,
+                total=c.total_drops,
+            )
+        )
         for row in self._drop_rows.values():
             row.refresh()
 
     @staticmethod
     def _timeline(campaign: DropsCampaign) -> str:
-        prefix = "Starts in" if campaign.upcoming else "Ends in"
-        return f"{prefix} {max(0, campaign.remaining_minutes)} min"
-
-    def update_drop(self, drop: TimedDrop) -> None:
-        row = self._drop_rows.get(drop.id)
-        if row is not None:
-            row.refresh()
-        self.refresh()
+        target = campaign.starts_at if campaign.upcoming else campaign.ends_at
+        key = "starts" if campaign.upcoming else "ends"
+        local_time = target.astimezone().strftime("%Y-%m-%d %H:%M")
+        return _("gui", "inventory", key).format(time=local_time)
 
 
 class InventoryPage(QWidget):
@@ -868,14 +972,18 @@ class InventoryPage(QWidget):
         super().__init__()
         self._settings = settings
         self._campaigns: dict[str, CampaignCard] = {}
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(30_000)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
         header = QHBoxLayout()
         header.addWidget(PageIntro(
-            "DROPS / REWARD TRACKER",
-            "Drops",
-            "Campaigns are sorted by what can be claimed next.",
+            _("gui", "text", "inventory_kicker"),
+            _("gui", "text", "inventory_title"),
+            _("gui", "text", "inventory_subtitle"),
         ))
         self._refresh_button = QPushButton(_("gui", "inventory", "filter", "refresh"))
         self._refresh_button.setObjectName("ghost")
@@ -897,7 +1005,11 @@ class InventoryPage(QWidget):
             filters.addWidget(box)
         filters.addStretch(1)
         layout.addLayout(filters)
-        self.empty = EmptyState("No campaigns", "Inventory will appear after Twitch data is loaded.", "Dismiss")
+        self.empty = EmptyState(
+            _("gui", "text", "no_campaigns"),
+            _("gui", "text", "no_campaigns_body"),
+            _("gui", "text", "dismiss"),
+        )
         self.empty.action.connect(self.empty.hide)
         layout.addWidget(self.empty)
         scroll = QScrollArea()
@@ -914,39 +1026,54 @@ class InventoryPage(QWidget):
     def set_refresh_callback(self, callback: Any) -> None:
         self._refresh_button.clicked.connect(callback)
 
-    async def add_campaign(self, campaign: DropsCampaign, cache: ImageCache) -> None:
-        if campaign.id in self._campaigns:
-            self._campaigns[campaign.id].refresh()
-            return
-        card = CampaignCard(campaign)
-        self._campaigns[campaign.id] = card
-        self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
-        self.empty.setVisible(False)
-        await card.load_images(cache)
+    def stop(self) -> None:
+        self._refresh_timer.stop()
+
+    async def replace_campaigns(
+        self,
+        campaigns: Iterable[DropsCampaign],
+        cache: ImageCache,
+    ) -> None:
+        staged: dict[str, CampaignCard] = {}
+        for campaign in campaigns:
+            if campaign.id in staged:
+                raise ValueError(f"Duplicate campaign ID: {campaign.id}")
+            staged[campaign.id] = CampaignCard(campaign)
+
+        load_tasks = [
+            asyncio.create_task(card.load_images(cache))
+            for card in staged.values()
+        ]
+        loaded = False
+        try:
+            await asyncio.gather(*load_tasks)
+            loaded = True
+        finally:
+            await cancel_tasks(load_tasks)
+            if not loaded:
+                for card in staged.values():
+                    card.deleteLater()
+
+        self._clear_campaigns()
+        self._campaigns = staged
+        for card in staged.values():
+            self._cards_layout.insertWidget(
+                self._cards_layout.count() - 1,
+                card,
+            )
+        self.empty.setVisible(not staged)
         self.refresh()
 
-    def clear(self) -> None:
+    def _clear_campaigns(self) -> None:
         for card in self._campaigns.values():
             self._cards_layout.removeWidget(card)
             card.deleteLater()
         self._campaigns.clear()
-        self.empty.setVisible(True)
 
     def update_drop(self, drop: TimedDrop) -> None:
-        card = self._campaigns.get(drop.campaign.id)
-        if card is not None:
-            card.update_drop(drop)
+        if drop.campaign.id in self._campaigns:
             self.refresh()
 
-    def update_progress(self, drop: TimedDrop, label: Any = None) -> None:
-        self.update_drop(drop)
-
-    def get_status(self, campaign: DropsCampaign) -> tuple[str, str]:
-        if campaign.active:
-            return _("gui", "inventory", "status", "active"), "#5fe1d3"
-        if campaign.upcoming:
-            return _("gui", "inventory", "status", "upcoming"), "#ffb86b"
-        return _("gui", "inventory", "status", "expired"), "#ff6f91"
 
     def _visible(self, campaign: DropsCampaign) -> bool:
         priority_only = self._settings.priority_mode.name == "PRIORITY_ONLY"

@@ -10,22 +10,9 @@
         "no_campaign": "Nu există campanii active pentru a mina drop-uri. În așteptarea unei campanii active..."
     },
     "login": {
-        "chrome": {
-            "startup": "Deschidere Chrome",
-            "login_to_complete": "Finalizați procedura de conectare manual apăsând din nou butonul Conectare.",
-            "no_token": "Nu a putut fi găsit niciun token de autorizare.",
-            "closed_window": "Fereastra Chrome a fost închisă înainte de finalizarea procesului de conectare."
-        },
-        "error_code": "Cod de eroare de conexiune: {error_code}",
-        "unexpected_content": "Tip de conținut neașteptat returnat, de obicei din cauza unei redirecționări. Trebuie să vă autentificați pentru a accesa Internetul?",
-        "incorrect_login_pass": "Numele de utilizator sau parola introdusă este incorectă.",
-        "incorrect_email_code": "Codul de verificare din e-mail este incorect.",
-        "incorrect_twofa_code": "Codul 2FA este incorect.",
-        "email_code_required": "Codul de verificare din e-mail este necesar. Vă rugăm să vă verificați e-mailul.",
-        "twofa_code_required": "Este necesar un cod 2FA."
+        "unexpected_content": "Tip de conținut neașteptat returnat, de obicei din cauza unei redirecționări. Trebuie să vă autentificați pentru a accesa Internetul?"
     },
     "error": {
-        "captcha": "Conexiunea a fost respinsă de CAPTCHA. Vă rugăm să încercați din nou în aprox. 12 ore.",
         "site_down": "Twitch nu este disponibil. Vă rugăm să încercați din nou în {seconds} secunde...",
         "no_connection": "Nu se poate conecta la Twitch. Vă rugăm să încercați din nou în {seconds} secunde... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Formular de conectare",
-            "labels": "Statut :\nID-ul de utilizator :",
             "logged_in": "Conectat",
             "logged_out": "Deconectat",
             "logging_in": "Se conectează...",
-            "required": "Este necesară conectarea",
-            "request": "Vă rugăm să vă conectați pentru a continua.",
-            "username": "Nume utilizator",
-            "password": "Parolă",
-            "twofa_code": "Cod 2FA (opțional)",
             "button": "Conectare"
         },
         "websocket": {
@@ -135,14 +116,16 @@
                 "tray": "Pornire automată în bara de activități :",
                 "tray_notifications": "Notificări în bara de activități :",
                 "dark_mode": "Mod întunecat :",
-                "priority_only": "Doar cu prioritate :",
                 "proxy": "Proxy (necesită repornire) :"
             },
             "game_name": "Nume joc",
             "priority": "Prioritate",
             "exclude": "Exclude",
             "reload": "Reîncarcă",
-            "reload_text": "Cele mai multe modificări necesită o reîncărcare pentru a se aplica imediat : "
+            "reload_text": "Cele mai multe modificări necesită o reîncărcare pentru a se aplica imediat : ",
+            "priority_modes": {
+                "priority_only": "Doar cu prioritate :"
+            }
         },
         "help": {
             "links": {

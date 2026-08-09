@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -16,7 +17,7 @@ from urllib.parse import quote_plus
 from yarl import URL
 
 from constants import CACHE_PATH
-from utils import json_load, json_save, normalize_key, safe_int
+from utils import cancel_tasks, json_load, json_save, normalize_key, safe_int
 
 logger = logging.getLogger("TwitchDrops.ui")
 
@@ -68,17 +69,56 @@ class SteamMetadataProvider:
 
     CACHE_FILE = CACHE_PATH / "steam-metadata.json"
     CACHE_SECONDS = 6 * 60 * 60
+    MAX_CACHE_ENTRIES = 500
+    REQUEST_TIMEOUT = 30.0
 
     def __init__(self, twitch: Any, *, country: str = "us") -> None:
         self._twitch = twitch
         self._country = country
+        self._cache: dict[str, dict[str, Any]] = {}
+        self._persistence_available = True
         try:
             loaded = json_load(self.CACHE_FILE, {}, merge=False)
             self._cache = loaded if isinstance(loaded, dict) else {}
-        except (OSError, ValueError, TypeError):
-            self._cache: dict[str, dict[str, Any]] = {}
+        except OSError as exc:
+            self._persistence_available = False
+            logger.warning(
+                "Steam metadata persistence disabled during load: %s",
+                type(exc).__name__,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            logger.warning(
+                "Ignoring invalid Steam metadata cache: %s",
+                type(exc).__name__,
+            )
         self._inflight: dict[str, asyncio.Task[SteamMetadata]] = {}
+        self._waiters: dict[str, int] = {}
         self._altered = False
+        self._prune_cache()
+
+    def _prune_cache(self) -> None:
+        now = time.time()
+        valid: list[tuple[float, str]] = []
+        for key, raw in list(self._cache.items()):
+            updated_at = raw.get("updated_at") if isinstance(raw, dict) else None
+            if not isinstance(updated_at, (int, float)) or isinstance(
+                updated_at, bool
+            ):
+                del self._cache[key]
+                self._altered = True
+                continue
+            if (
+                not math.isfinite(updated_at)
+                or now - updated_at >= self.CACHE_SECONDS
+            ):
+                del self._cache[key]
+                self._altered = True
+                continue
+            valid.append((updated_at, key))
+        valid.sort(reverse=True)
+        for _updated_at, key in valid[self.MAX_CACHE_ENTRIES :]:
+            del self._cache[key]
+            self._altered = True
 
     @staticmethod
     def normalize_name(name: str) -> str:
@@ -97,13 +137,42 @@ class SteamMetadataProvider:
 
         task = self._inflight.get(key)
         if task is None:
-            task = asyncio.create_task(self._fetch(name, key))
+            task = asyncio.create_task(self._bounded_fetch(name, key))
             self._inflight[key] = task
+            task.add_done_callback(
+                lambda completed: self._clear_inflight(key, completed)
+            )
+        self._waiters[key] = self._waiters.get(key, 0) + 1
         try:
+            return await asyncio.shield(task)
+        finally:
+            remaining = self._waiters.get(key, 1) - 1
+            if remaining > 0:
+                self._waiters[key] = remaining
+            else:
+                self._waiters.pop(key, None)
+                if not task.done():
+                    task.cancel()
+
+    async def _bounded_fetch(self, name: str, key: str) -> SteamMetadata:
+        task = asyncio.create_task(self._fetch(name, key))
+        try:
+            done, pending = await asyncio.wait((task,), timeout=self.REQUEST_TIMEOUT)
+            if pending:
+                await cancel_tasks(pending)
+                return SteamMetadata(game_name=name, error="Steam request timed out")
             return await task
         finally:
-            if self._inflight.get(key) is task:
-                del self._inflight[key]
+            if not task.done():
+                await cancel_tasks((task,))
+
+    def _clear_inflight(
+        self,
+        key: str,
+        task: asyncio.Task[SteamMetadata],
+    ) -> None:
+        if self._inflight.get(key) is task:
+            del self._inflight[key]
 
     def _cached(self, key: str, name: str) -> SteamMetadata | None:
         raw = self._cache.get(key)
@@ -115,10 +184,12 @@ class SteamMetadataProvider:
             return None
         if time.time() - updated_at >= self.CACHE_SECONDS or "free_to_play" not in raw:
             return None
-        return self._from_cache(raw, name)
+        return self._from_cache(raw, name, updated_at)
 
     @staticmethod
-    def _from_cache(raw: dict[str, Any], name: str) -> SteamMetadata:
+    def _from_cache(
+        raw: dict[str, Any], name: str, updated_at: float
+    ) -> SteamMetadata:
         return SteamMetadata(
             game_name=name,
             app_id=safe_int(raw.get("app_id")),
@@ -128,7 +199,7 @@ class SteamMetadataProvider:
             free_to_play=raw.get("free_to_play"),
             discount_percent=safe_int(raw.get("discount_percent")),
             error=raw.get("error"),
-            updated_at=float(raw["updated_at"]),
+            updated_at=updated_at,
         )
 
     async def _fetch(self, name: str, key: str) -> SteamMetadata:
@@ -146,7 +217,14 @@ class SteamMetadataProvider:
                 app_id = self._int(item.get("id"))
                 price, discount = self._price(item.get("price"))
                 players = await self._players(app_id) if app_id is not None else None
-                free_to_play = price is None
+                raw_free_to_play = item.get("is_free")
+                free_to_play = (
+                    raw_free_to_play
+                    if isinstance(raw_free_to_play, bool)
+                    else False
+                    if price is not None
+                    else None
+                )
                 result = SteamMetadata(
                     game_name=name,
                     app_id=app_id,
@@ -157,28 +235,29 @@ class SteamMetadataProvider:
                     discount_percent=discount,
                     updated_at=time.time(),
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # optional enrichment must never break farming
             logger.debug("Steam metadata unavailable for %s: %s", name, type(exc).__name__)
-            result = SteamMetadata(
+            return SteamMetadata(
                 game_name=name,
                 error=type(exc).__name__,
                 updated_at=time.time(),
             )
         self._cache[key] = asdict(result)
         self._altered = True
+        self._prune_cache()
         return result
 
     async def _json(self, url: URL) -> dict[str, Any]:
-        async with self._twitch.request("GET", url) as response:
+        async with self._twitch.transport.request("GET", url) as response:
             if response.status != 200:
-                return {}
+                raise RuntimeError(f"Steam metadata HTTP {response.status}")
             try:
                 value = await response.json(content_type=None)
-            except (TypeError, ValueError):
-                return {}
-        return value if isinstance(value, dict) else {}
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Steam metadata response is not JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("Steam metadata response must be an object")
+        return value
 
     async def _players(self, app_id: int | None) -> int | None:
         if app_id is None:
@@ -236,7 +315,16 @@ class SteamMetadataProvider:
         )
 
     def save(self, *, force: bool = False) -> None:
-        if self._altered or force:
+        if not self._persistence_available or not (self._altered or force):
+            return
+        try:
             CACHE_PATH.mkdir(parents=True, exist_ok=True)
             json_save(self.CACHE_FILE, self._cache, sort=True)
+        except (OSError, TypeError, ValueError) as exc:
+            self._persistence_available = False
+            logger.warning(
+                "Steam metadata persistence disabled during save: %s",
+                type(exc).__name__,
+            )
+        else:
             self._altered = False

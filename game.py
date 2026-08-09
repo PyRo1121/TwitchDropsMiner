@@ -14,9 +14,27 @@ class Game:
 
     def __init__(self, data: JsonType):
         try:
-            self.id = int(data["id"])
-        except (KeyError, TypeError, ValueError) as exc:
+            raw_id = data["id"]
+        except KeyError as exc:
             raise ValueError("Game data must contain an integer id") from exc
+        if type(raw_id) is int:
+            game_id = raw_id
+        elif (
+            isinstance(raw_id, str)
+            and raw_id.isascii()
+            and raw_id.isdecimal()
+        ):
+            try:
+                game_id = int(raw_id)
+            except ValueError as exc:
+                raise ValueError(
+                    "Game data must contain a bounded integer id"
+                ) from exc
+        else:
+            raise ValueError("Game data must contain an integer id")
+        if game_id < 0:
+            raise ValueError("Game id cannot be negative")
+        self.id = game_id
         name = data.get("displayName") or data.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError("Game data must contain a name")

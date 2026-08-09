@@ -10,22 +10,9 @@
         "no_campaign": "Geen actieve campagnes beschikbaar. Wachten op nieuwe campagne..."
     },
     "login": {
-        "chrome": {
-            "startup": "Chrome starten...",
-            "login_to_complete": "Druk nogmaals op Aanmelden om het aanmeldingsproces handmatig te voltooien.",
-            "no_token": "Er is geen autorisatietoken gevonden.",
-            "closed_window": "Het Chrome-venster werd gesloten voordat het inlogproces voltooid kon worden."
-        },
-        "error_code": "Login Foutcode: {error_code}",
-        "unexpected_content": "Onverwacht inhoudstype geretourneerd, meestal als gevolg van een omleiding.\nIs inloggen vereist voor toegang tot internet?",
-        "incorrect_login_pass": "Verkeerde gebruikersnaam of wachtwoord.",
-        "incorrect_email_code": "Onjuiste e-mailcode.",
-        "incorrect_twofa_code": "Onjuiste 2FA Code.",
-        "email_code_required": "E-mailcode vereist. Controleer de e-mail.",
-        "twofa_code_required": "2FA Token vereist."
+        "unexpected_content": "Onverwacht inhoudstype geretourneerd, meestal als gevolg van een omleiding.\nIs inloggen vereist voor toegang tot internet?"
     },
     "error": {
-        "captcha": "De inlogpoging is geweigerd door CAPTCHA.\nProbeer het over minimaal 12 uur opnieuw.",
         "site_down": "Twitch is niet beschikbaar. Probeer het over {seconds} seconden opnieuw...",
         "no_connection": "Kan geen verbinding maken met Twitch. Probeer het over {seconds} seconden opnieuw... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Login",
-            "labels": "Status:\nGebruiker ID:",
             "logged_in": "Ingelogd",
             "logged_out": "Uitgelogd",
             "logging_in": "Aanmelden...",
-            "required": "Aanmelden vereist",
-            "request": "Log in om door te gaan.",
-            "username": "Gebruikersnaam",
-            "password": "Wachtwoord",
-            "twofa_code": "2FA Code (optioneel)",
             "button": "Aanmelden"
         },
         "websocket": {
@@ -104,7 +85,6 @@
             "filter": {
                 "name": "Filter",
                 "show": "Weergeven:",
-                "linked": "Alleen gekoppelde",
                 "upcoming": "Verwacht",
                 "expired": "Verlopen",
                 "excluded": "Uitgesloten",
@@ -133,7 +113,6 @@
                 "name": "Algemeen",
                 "autostart": "Autostart: ",
                 "tray": "Automatisch starten in de taakbalk: ",
-                "priority_only": "Alleen prioriteit: ",
                 "dark_mode": "Donkere modus: ",
                 "proxy": "Proxy (Vereist opnieuw opstarten):"
             },
@@ -141,7 +120,10 @@
             "priority": "Prioriteit",
             "exclude": "Uitsluiten",
             "reload": "Herladen",
-            "reload_text": "Voor de meeste wijzigingen is een herlaadbeurt vereist om onmiddellijk van kracht te zijn: "
+            "reload_text": "Voor de meeste wijzigingen is een herlaadbeurt vereist om onmiddellijk van kracht te zijn: ",
+            "priority_modes": {
+                "priority_only": "Alleen prioriteit: "
+            }
         },
         "help": {
             "links": {

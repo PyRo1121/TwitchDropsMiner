@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class BuildConfigurationTests(unittest.TestCase):
+    def test_dependency_files_are_exact_locks(self) -> None:
+        for name in (
+            "requirements.txt",
+            "requirements-build.txt",
+            "requirements-appimage.txt",
+        ):
+            with self.subTest(file=name):
+                for raw_line in (ROOT / name).read_text(encoding="utf8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or line.startswith("-r "):
+                        continue
+                    requirement = line.split(";", 1)[0].strip()
+                    exact_version = re.fullmatch(r"[^=<>!~\s]+==[^=<>!~\s]+", requirement)
+                    pinned_vcs = re.fullmatch(
+                        r"[^@\s]+\s+@\s+git\+https://[^\s]+@[0-9a-f]{40}",
+                        requirement,
+                    )
+                    self.assertTrue(
+                        exact_version or pinned_vcs,
+                        f"{name} contains an unlocked requirement: {line}",
+                    )
+
+    def test_ci_uses_locks_and_real_frozen_self_tests(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
+
+        self.assertIn("concurrency:", workflow)
+        self.assertGreaterEqual(workflow.count("requirements-build.txt"), 3)
+        self.assertIn("requirements-appimage.txt", workflow)
+        self.assertGreaterEqual(workflow.count("--self-test"), 4)
+        self.assertIn("pyright@1.1.409", workflow)
+        self.assertIn("tests.test_translation_schema", workflow)
+        self.assertIn("github.repository == 'PyRo1121/TwitchDropsMiner'", workflow)
+        self.assertIn("github.ref == 'refs/heads/master'", workflow)
+        self.assertIn("dev-build-${{github.sha}}", workflow)
+        self.assertIn("SHA256SUMS", workflow)
+        self.assertNotIn("gh release delete", workflow)
+        self.assertNotIn("--appimage-extract-and-run", workflow)
+        self.assertIn('"$image" --self-test', workflow)
+        self.assertIn("macos-15-intel", workflow)
+        self.assertIn("Twitch.Drops.Miner.MacOS-${{matrix.arch}}", workflow)
+        self.assertNotIn("runs-on: macos-latest", workflow)
+
+    def test_local_scripts_anchor_outputs_and_share_dot_venv(self) -> None:
+        build_sh = (ROOT / "build.sh").read_text(encoding="utf8")
+        setup_sh = (ROOT / "setup_env.sh").read_text(encoding="utf8")
+        build_bat = (ROOT / "build.bat").read_text(encoding="utf8")
+        setup_bat = (ROOT / "setup_env.bat").read_text(encoding="utf8")
+        pack_bat = (ROOT / "pack.bat").read_text(encoding="utf8")
+        run_dev_bat = (ROOT / "run_dev.bat").read_text(encoding="utf8")
+
+        self.assertIn('cd "$script_dir"', build_sh)
+        self.assertIn("--clean --noconfirm", build_sh)
+        self.assertIn('venv_dir="$script_dir/.venv"', build_sh)
+        self.assertIn('venv_dir="$script_dir/.venv"', setup_sh)
+        self.assertIn(".venv", build_bat)
+        self.assertIn("pushd", build_bat.lower())
+        self.assertIn("--clean --noconfirm", build_bat)
+        self.assertIn(".venv", setup_bat)
+        self.assertIn("where 7z.exe", pack_bat.lower())
+        self.assertIn("%~dp0", pack_bat)
+        self.assertIn(".venv", run_dev_bat)
+        self.assertNotIn("\\env\\", run_dev_bat)
+
+    def test_appimage_runtime_and_bootstrap_versions_are_explicit(self) -> None:
+        recipe = (ROOT / "appimage/AppImageBuilder.yml").read_text(encoding="utf8")
+
+        self.assertIn("pip==26.2.1", recipe)
+        self.assertIn("wheel==0.47.0", recipe)
+        self.assertIn("python3.10", recipe)
+        self.assertIn("python3.10/site-packages", recipe)
+        self.assertIn("libxcb-cursor0", recipe)
+        self.assertNotIn("pip install --upgrade", recipe)
+
+    def test_documented_macos_command_quotes_the_application_path(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf8")
+        self.assertIn(
+            "xattr -cr 'Twitch Drops Miner (by DevilXD).app'",
+            readme,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

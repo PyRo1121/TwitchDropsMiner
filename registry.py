@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import winreg as reg
-from typing import Any
+import winreg as _winreg
 from enum import Enum, Flag
-from collections.abc import Generator
+from typing import Any, cast
+
+# winreg is available only on Windows; Linux type analyzers expose an
+# intentionally incomplete platform stub. Keep the runtime module dynamic.
+reg = cast(Any, _winreg)
 
 
 class RegistryError(Exception):
@@ -58,7 +61,7 @@ class ValueType(Enum):
 
 
 class RegistryKey:
-    def __init__(self, path: str, *, read_only: bool = False):
+    def __init__(self, path: str, *, read_only: bool = False) -> None:
         main_key, _, path = path.replace('/', '\\').partition('\\')
         self.main_key = MainKey[main_key]
         self.path = path
@@ -70,7 +73,7 @@ class RegistryKey:
     def __enter__(self) -> RegistryKey:
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self._handle.Close()
 
     def get(self, name: str) -> tuple[ValueType, Any]:
@@ -81,9 +84,8 @@ class RegistryKey:
             raise ValueNotFound(name)
         return (ValueType(value_type), value)
 
-    def set(self, name: str, value_type: ValueType, value: Any) -> bool:
+    def set(self, name: str, value_type: ValueType, value: Any) -> None:
         reg.SetValueEx(self._handle, name, 0, value_type.value, value)
-        return True  # TODO: return False if the set operation fails
 
     def delete(self, name: str, *, silent: bool = False) -> bool:
         try:
@@ -93,20 +95,3 @@ class RegistryKey:
                 raise ValueNotFound(name)
             return False
         return True
-
-    def values(self) -> Generator[tuple[str, ValueType, Any], None, None]:
-        len_keys, len_values, last_modified = reg.QueryInfoKey(self._handle)
-        for i in range(len_values):
-            try:
-                name, value, value_type = reg.EnumValue(self._handle, i)
-                yield name, ValueType(value_type), value
-            except OSError:
-                return
-
-
-if __name__ == "__main__":
-    with RegistryKey("HKCU/Software/Microsoft/Windows/CurrentVersion/Run") as key:
-        # key.get("test")
-        # key.set("test", ValueType.REG_SZ, "test\\path")
-        for name, value_type, value in key.values():
-            print(name, value_type, value)

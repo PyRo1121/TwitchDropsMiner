@@ -1,43 +1,36 @@
 @echo off
+setlocal
 
-REM Get the directory path of the script
-set "dirpath=%~dp0"
-if "%dirpath:~-1%" == "\" set "dirpath=%dirpath:~0,-1%"
+set "script_dir=%~dp0"
+set "venv_dir=%script_dir%.venv"
+set "pyinstaller=%venv_dir%\Scripts\pyinstaller.exe"
 
-REM Check if the virtual environment exists
-if not exist "%dirpath%\env" (
+if not exist "%pyinstaller%" (
     echo:
-    echo No virtual environment found! Run setup_env.bat to set it up first.
+    echo No build environment found. Run setup_env.bat first.
     echo:
-    if not "%~1"=="--nopause" pause
+    if /I not "%~1"=="--nopause" pause
     exit /b 1
 )
 
-REM Check if PyInstaller is installed in the virtual environment
-if not exist "%dirpath%\env\scripts\pyinstaller.exe" (
-    echo Installing PyInstaller...
-    "%dirpath%\env\scripts\pip" install pyinstaller
-    if errorlevel 1 (
-        echo:
-        echo Failed to install PyInstaller.
-        echo:
-        if not "%~1"=="--nopause" pause
-        exit /b 1
-    )
-)
+pushd "%script_dir%" >nul
+if errorlevel 1 exit /b 1
 
-REM Run PyInstaller with the specified build spec file
 echo Building...
-"%dirpath%\env\scripts\pyinstaller" "%dirpath%\build.spec"
-if errorlevel 1 (
+"%pyinstaller%" --clean --noconfirm "%script_dir%build.spec"
+set "build_status=%errorlevel%"
+popd
+
+if not "%build_status%"=="0" (
     echo:
     echo PyInstaller build failed.
     echo:
-    if not "%~1"=="--nopause" pause
-    exit /b 1
+    if /I not "%~1"=="--nopause" pause
+    exit /b %build_status%
 )
 
 echo:
 echo Build completed successfully.
 echo:
-if not "%~1"=="--nopause" pause
+if /I not "%~1"=="--nopause" pause
+exit /b 0

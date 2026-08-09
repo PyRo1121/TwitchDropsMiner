@@ -20,6 +20,16 @@ class QtTaskRegistryTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_closed_registry_rejects_new_tasks(self) -> None:
+        async def exercise() -> None:
+            registry = QtTaskRegistry()
+            await registry.cancel_and_wait()
+
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                registry.create(asyncio.sleep(0))
+
+        asyncio.run(exercise())
+
     def test_task_failures_are_logged_and_removed(self) -> None:
         async def fail() -> None:
             raise RuntimeError("boom")

@@ -10,22 +10,9 @@
     "no_campaign": "Ingen aktive kampanjer å få belønninger fra. Venter på en aktiv kampanje..."
   },
   "login": {
-    "unexpected_content": "Uventet innholdstype returnert, vanligvis på grunn av omdirigering. Trenger du å logge inn for internettilgang?",
-    "chrome": {
-      "startup": "Åpner Chrome...",
-      "login_to_complete": "Fullfør innloggingen manuelt ved å trykke på Logg inn-knappen igjen.",
-      "no_token": "Ingen autorisasjonstoken ble funnet.",
-      "closed_window": "Chrome-vinduet ble lukket før innloggingen kunne fullføres."
-    },
-    "error_code": "Innloggingsfeilkode: {error_code}",
-    "incorrect_login_pass": "Feil brukernavn eller passord.",
-    "incorrect_email_code": "Feil e-postkode.",
-    "incorrect_twofa_code": "Feil 2FA-kode.",
-    "email_code_required": "E-postkode påkrevd. Sjekk e-posten din.",
-    "twofa_code_required": "2FA-token påkrevd."
+    "unexpected_content": "Uventet innholdstype returnert, vanligvis på grunn av omdirigering. Trenger du å logge inn for internettilgang?"
   },
   "error": {
-    "captcha": "Innloggingsforsøket ditt ble avvist av CAPTCHA.\nVennligst prøv igjen om 12+ timer.",
     "site_down": "Twitch er nede, prøver igjen om {seconds} sekunder...",
     "no_connection": "Kan ikke koble til Twitch, prøver igjen om {seconds} sekunder... ({url})"
   },
@@ -57,15 +44,9 @@
     },
     "login": {
       "name": "Innloggingsskjema",
-      "labels": "Status:\nBruker-ID:",
       "logged_in": "Logget inn",
       "logged_out": "Logget ut",
       "logging_in": "Logger inn...",
-      "required": "Innlogging påkrevd",
-      "request": "Vennligst logg inn for å fortsette.",
-      "username": "Brukernavn",
-      "password": "Passord",
-      "twofa_code": "2FA-kode (valgfritt)",
       "button": "Logg inn"
     },
     "websocket": {

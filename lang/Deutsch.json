@@ -10,22 +10,9 @@
         "no_campaign": "Keine aktiven Kampagnen verfügbar. Warten auf neue Kampagne..."
     },
     "login": {
-        "chrome": {
-            "startup": "Starte Chrome...",
-            "login_to_complete": "Erneut auf Anmelden drücken, um den Anmeldevorgang manuell abzuschließen.",
-            "no_token": "Es wurde kein Autorisierungs-Token gefunden.",
-            "closed_window": "Das Chrome-Fenster wurde geschlossen, bevor der Anmeldevorgang abgeschlossen werden konnte."
-        },
-        "error_code": "Login-Fehlercode: {error_code}",
-        "unexpected_content": "Unerwarteter Inhaltstyp zurückgegeben, normalerweise aufgrund einer Weiterleitung.\nIst ein Login für den Internetzugang erforderlich?",
-        "incorrect_login_pass": "Falscher Benutzername oder Passwort.",
-        "incorrect_email_code": "Falscher E-Mail Code.",
-        "incorrect_twofa_code": "Falscher 2FA Code.",
-        "email_code_required": "E-Mail Code erforderlich. Bitte E-Mail prüfen.",
-        "twofa_code_required": "2FA Token erforderlich."
+        "unexpected_content": "Unerwarteter Inhaltstyp zurückgegeben, normalerweise aufgrund einer Weiterleitung.\nIst ein Login für den Internetzugang erforderlich?"
     },
     "error": {
-        "captcha": "Der Anmeldeversuch wurde durch CAPTCHA verweigert.\nBitte versuche es in mindestens 12 Stunden erneut.",
         "site_down": "Twitch ist nicht erreichbar. Erneuter Versuch in {seconds} Sekunden...",
         "no_connection": "Keine Verbindung zu Twitch möglich. Erneuter Versuch in {seconds} Sekunden... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Login",
-            "labels": "Status:\nBenutzer ID:",
             "logged_in": "Angemeldet",
             "logged_out": "Abgemeldet",
             "logging_in": "Anmelden...",
-            "required": "Anmeldung erforderlich",
-            "request": "Bitte einloggen um fortzufahren.",
-            "username": "Benutzername",
-            "password": "Passwort",
-            "twofa_code": "2FA Code (optional)",
             "button": "Anmelden"
         },
         "websocket": {
@@ -133,7 +114,6 @@
                 "name": "Allgemein",
                 "autostart": "Autostart: ",
                 "tray": "Autostart ins System Tray: ",
-                "priority_only": "Nur Priorität: ",
                 "dark_mode": "Dunkler Modus: ",
                 "proxy": "Proxy (Erfordert Neustart):"
             },
@@ -141,7 +121,10 @@
             "priority": "Priorität",
             "exclude": "Ausschließen",
             "reload": "Neu laden",
-            "reload_text": "Die meisten Änderungen erfordern ein neu laden, um sofort wirksam zu werden: "
+            "reload_text": "Die meisten Änderungen erfordern ein neu laden, um sofort wirksam zu werden: ",
+            "priority_modes": {
+                "priority_only": "Nur Priorität: "
+            }
         },
         "help": {
             "links": {

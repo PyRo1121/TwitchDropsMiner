@@ -10,22 +10,9 @@
         "no_campaign": "Der er ingen aktive kampagner at hente. Venter på en aktiv kampagne..."
     },
     "login": {
-        "unexpected_content": "Uventet indholdstype returneres, normalt på grund af at blive omdirigeret. Skal du logge ind for internetadgang?",
-        "chrome": {
-            "startup": "Åbner Chrome...",
-            "login_to_complete": "Fuldfør login-proceduren manuelt ved at trykke på Login-knappen igen.",
-            "no_token": "Der blev ikke fundet noget autorisationstoken.",
-            "closed_window": "Chrome-vinduet blev lukket, før login-proceduren kunne fuldføres."
-        },
-        "error_code": "Login fejlkode: {error_code}",
-        "incorrect_login_pass": "Forkert brugernavn eller kodeord.",
-        "incorrect_email_code": "Forkert email kode.",
-        "incorrect_twofa_code": "Forkert 2FA-kode.",
-        "email_code_required": "Email kode påkrævet. Tjek din email.",
-        "twofa_code_required": "2FA token påkrævet."
+        "unexpected_content": "Uventet indholdstype returneres, normalt på grund af at blive omdirigeret. Skal du logge ind for internetadgang?"
     },
     "error": {
-        "captcha": "Dit loginforsøg blev afvist af CAPTCHA.\nPrøv venligst igen om 12+ timer",
         "site_down": "Twitch er nede, prøver igen om {seconds} sekunder...",
         "no_connection": "Kan ikke oprette forbindelse til Twitch, prøver igen om {seconds} sekunder... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Login formular",
-            "labels": "Status:\nBruger ID:",
             "logged_in": "Logget ind",
             "logged_out": "Logget ud",
             "logging_in": "Logger ind...",
-            "required": "Login påkrævet",
-            "request": "Log venligst ind for at fortsætte.",
-            "username": "Brugernavn",
-            "password": "Kodeord",
-            "twofa_code": "2FA code (valgfrit)",
             "button": "Login"
         },
         "websocket": {
@@ -90,9 +71,9 @@
         "channels": {
             "name": "Kanaler",
             "switch": "Skift",
-            "online": "ONLINE  \u2714",
-            "pending": "OFFLINE \u23f3",
-            "offline": "OFFLINE \u274c",
+            "online": "ONLINE  ✔",
+            "pending": "OFFLINE ⏳",
+            "offline": "OFFLINE ❌",
             "headings": {
                 "channel": "Kanal",
                 "status": "Status",
@@ -112,13 +93,13 @@
                 "refresh": "Opdater"
             },
             "status": {
-                "linked": "Forbundet \u2714",
-                "not_linked": "Ikke forbundet \u274c",
-                "active": "Aktiv \u2714",
-                "upcoming": "Kommende \u23f3",
-                "expired": "Udløbet \u274c",
-                "claimed": "Hentet \u2714",
-                "ready_to_claim": "Klar til at hente \u23f3"
+                "linked": "Forbundet ✔",
+                "not_linked": "Ikke forbundet ❌",
+                "active": "Aktiv ✔",
+                "upcoming": "Kommende ⏳",
+                "expired": "Udløbet ❌",
+                "claimed": "Hentet ✔",
+                "ready_to_claim": "Klar til at hente ⏳"
             },
             "starts": "Starter: {time}",
             "ends": "Slutter: {time}",
@@ -134,7 +115,6 @@
                 "autostart": "Automatisk start: ",
                 "tray": "Automatisk start i systembakken: ",
                 "tray_notifications": "Bakkemeddelelser: ",
-                "priority_only": "Kun prioritet: ",
                 "dark_mode": "Mørk tilstand: ",
                 "proxy": "Proxy (kræver genstart):"
             },
@@ -142,7 +122,10 @@
             "priority": "Prioritet",
             "exclude": "Udelukke",
             "reload": "Genindlæs",
-            "reload_text": "De fleste ændringer kræver en genindlæsning for at få en øjeblikkelig virkning: "
+            "reload_text": "De fleste ændringer kræver en genindlæsning for at få en øjeblikkelig virkning: ",
+            "priority_modes": {
+                "priority_only": "Kun prioritet: "
+            }
         },
         "help": {
             "links": {

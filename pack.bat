@@ -1,24 +1,26 @@
 @echo off
-IF NOT EXIST 7z.exe GOTO NO7Z
-IF NOT EXIST "Twitch Drops Miner" mkdir "Twitch Drops Miner"
-rem Prepare files
-copy /y /v dist\*.exe "Twitch Drops Miner"
-copy /y /v manual.txt "Twitch Drops Miner"
-IF EXIST "Twitch Drops Miner.zip" (
-    rem Add action
-    set action=a
-) ELSE (
-    rem Update action
-    set action=u
+setlocal
+
+set "script_dir=%~dp0"
+set "release_dir=%script_dir%Twitch Drops Miner"
+set "archive=%script_dir%Twitch Drops Miner.zip"
+
+where 7z.exe >nul 2>&1
+if errorlevel 1 (
+    echo No 7z.exe detected in PATH, skipping packaging.
+    exit /b 1
 )
-rem Pack and test
-7z %action% "Twitch Drops Miner.zip" "Twitch Drops Miner/" -r
-7z t "Twitch Drops Miner.zip" * -r
-rem Cleanup
-IF EXIST "Twitch Drops Miner" rmdir /s /q "Twitch Drops Miner"
-GOTO EXIT
-:NO7Z
-echo No 7z.exe detected, skipping packaging!
-GOTO EXIT
-:EXIT
-exit %errorlevel%
+
+if not exist "%release_dir%" mkdir "%release_dir%"
+copy /y /v "%script_dir%dist\*.exe" "%release_dir%\" >nul
+if errorlevel 1 exit /b 1
+copy /y /v "%script_dir%manual.txt" "%release_dir%\" >nul
+if errorlevel 1 exit /b 1
+
+7z.exe a -tzip "%archive%" "%release_dir%\*" -r
+if errorlevel 1 exit /b 1
+7z.exe t "%archive%"
+set "pack_status=%errorlevel%"
+
+if exist "%release_dir%" rmdir /s /q "%release_dir%"
+exit /b %pack_status%

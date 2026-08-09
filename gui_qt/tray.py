@@ -52,8 +52,6 @@ class QtTray:
         self._icon.setContextMenu(menu)
         self._icon.activated.connect(self._on_activated)
         self._icon.setToolTip("TwitchDropsMiner")
-        self._shown = False
-        self._title = ""
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -63,11 +61,9 @@ class QtTray:
         if not self.available:
             return
         self._icon.show()
-        self._shown = True
 
     def stop(self) -> None:
         self._icon.hide()
-        self._shown = False
 
     def restore(self) -> None:
         self._parent.show()
@@ -111,6 +107,4 @@ class QtTray:
         return text
 
     def update_title(self, drop: TimedDrop | None) -> None:
-        title = self.get_title(drop)
-        self._title = title
-        self._icon.setToolTip(title)
+        self._icon.setToolTip(self.get_title(drop))

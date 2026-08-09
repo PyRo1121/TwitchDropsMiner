@@ -1,6 +1,6 @@
 {
   "include": ["*.py", "gui_qt", "tests"],
-  "exclude": [".venv", "build", "dist", "docs", "gui.py", "registry.py"],
+  "exclude": [".venv", "build", "dist", "docs"],
   "venvPath": ".",
   "venv": ".venv",
   "executionEnvironments": [

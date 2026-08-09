@@ -14,7 +14,13 @@ from yarl import URL
 from game import Game
 from utils import extract_available_drops, json_minify, isonow, require_int
 from exceptions import ExitRequest, MinerException, ReloadRequest
-from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType
+from constants import (
+    CALL,
+    GQL_QUERIES,
+    ONLINE_DELAY,
+    ONLINE_RETRY_DELAYS,
+    URLType,
+)
 
 if TYPE_CHECKING:
     from twitch import Twitch
@@ -47,7 +53,7 @@ class Stream:
             raise ValueError("Stream data must contain a title")
         self.title: str = title
 
-    def _watch_payload(self) -> list[JsonType]:
+    def _watch_payload(self, user_id: int) -> list[JsonType]:
         """Build a fresh viewer-presence event for this broadcast.
 
         Twitch's player sends a current timestamp for each minute-watched event.
@@ -70,15 +76,16 @@ class Stream:
                     "logged_in": True,
                     "minutes_logged": 1,
                     "muted": False,
-                    "user_id": self.channel._twitch._auth_state.user_id,
+                    "user_id": user_id,
                 }
             }
         ]
 
-    @property
-    def spade_payload(self) -> JsonType:
+    def spade_payload(self, user_id: int) -> JsonType:
         return {
-            "data": b64encode(json_minify(self._watch_payload()).encode("utf8")).decode("utf8")
+            "data": b64encode(
+                json_minify(self._watch_payload(user_id)).encode("utf8")
+            ).decode("utf8")
         }
 
 
@@ -254,20 +261,32 @@ class Channel:
         """
         SETTINGS_PATTERN: str = r'src="(https://[\w.-]+/config/settings\.[0-9a-f]{32}\.js)"'
         SPADE_PATTERN: str = r'"spade_?url"\s*:\s*"(https://[^"]+)"'
-        async with self._twitch.request("GET", self.url) as response1:
-            streamer_html: str = await response1.text(encoding="utf8")
+        try:
+            async with self._twitch.transport.request("GET", self.url) as response1:
+                streamer_html: str = await response1.text(encoding="utf8")
+        except UnicodeError as exc:
+            raise MinerException("Invalid Twitch channel page encoding") from exc
         match = re.search(SPADE_PATTERN, streamer_html, re.I)
         if not match:
             match = re.search(SETTINGS_PATTERN, streamer_html, re.I)
             if not match:
                 raise MinerException("Error while spade_url extraction: step #1")
             streamer_settings = match.group(1)
-            async with self._twitch.request("GET", streamer_settings) as response2:
-                settings_js: str = await response2.text(encoding="utf8")
+            try:
+                async with self._twitch.transport.request(
+                    "GET",
+                    streamer_settings,
+                ) as response2:
+                    settings_js: str = await response2.text(encoding="utf8")
+            except UnicodeError as exc:
+                raise MinerException("Invalid Twitch settings encoding") from exc
             match = re.search(SPADE_PATTERN, settings_js, re.I)
             if not match:
                 raise MinerException("Error while spade_url extraction: step #2")
-        spade_url = URL(html.unescape(match.group(1)).replace("\\/", "/"))
+        try:
+            spade_url = URL(html.unescape(match.group(1)).replace("\\/", "/"))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise MinerException("Invalid Spade endpoint") from exc
         if spade_url.scheme != "https" or spade_url.host != "spade.twitch.tv":
             raise MinerException("Unexpected Spade endpoint")
         return URLType(str(spade_url))
@@ -301,7 +320,9 @@ class Channel:
     async def get_stream(self) -> Stream | None:
         malformed_message = f"Channel: {self._login} returned malformed stream data"
         try:
-            response: JsonType = await self._twitch.gql_request(self.stream_gql)
+            response: JsonType = await self._twitch.transport.gql_request(
+                self.stream_gql
+            )
         except MinerException as exc:
             raise MinerException(f"Channel: {self._login}") from exc
         try:
@@ -329,8 +350,12 @@ class Channel:
             raise MinerException(malformed_message) from exc
         if not stream.drops_enabled:
             try:
-                available_drops_campaigns: JsonType = await self._twitch.gql_request(
-                    GQL_QUERIES["AvailableDrops"].with_variables({"channelID": str(self.id)})
+                available_drops_campaigns: JsonType = (
+                    await self._twitch.transport.gql_request(
+                        GQL_QUERIES["AvailableDrops"].with_variables(
+                            {"channelID": str(self.id)}
+                        )
+                    )
                 )
             except MinerException:
                 logger.log(CALL, f"AvailableDrops GQL call failed for channel: {self._login}")
@@ -354,15 +379,30 @@ class Channel:
         The 'stream-up' event is sent before the stream actually goes online,
         so just wait a bit and check if it's actually online by then.
         """
+        current_task = asyncio.current_task()
+        delays = (ONLINE_DELAY.total_seconds(), *ONLINE_RETRY_DELAYS)
         try:
-            await asyncio.sleep(ONLINE_DELAY.total_seconds())
-            await self.update_stream()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Delayed online check failed for channel %s", self._login)
+            for attempt, delay in enumerate(delays, start=1):
+                await asyncio.sleep(delay)
+                try:
+                    await self.update_stream()
+                except (ExitRequest, ReloadRequest):
+                    # A delayed probe is detached from the state loop; shutdown
+                    # and reload requests are normal cancellation signals here.
+                    return
+                except Exception:
+                    logger.exception(
+                        "Delayed online check %s/%s failed for channel %s",
+                        attempt,
+                        len(delays),
+                        self._login,
+                    )
+                    continue
+                return
         finally:
-            self._pending_stream_up = None  # for 'display' to work properly
+            if self._pending_stream_up is current_task:
+                self._pending_stream_up = None
+                self.display()
 
     def check_online(self):
         """
@@ -407,11 +447,18 @@ class Channel:
         try:
             if self._spade_url is None:
                 self._spade_url = await self.get_spade_url()
+            auth_state = await self._twitch.get_auth()
+            user_id = auth_state.user_id
+            if type(user_id) is not int or user_id < 1:
+                logger.warning("Spade watch event has no authenticated user")
+                return False
             stream = self._stream
             if stream is None:
                 return False
-            async with self._twitch.request(
-                "POST", self._spade_url, data=stream.spade_payload
+            async with self._twitch.transport.request(
+                "POST",
+                self._spade_url,
+                data=stream.spade_payload(user_id),
             ) as response:
                 if response.status in (401, 403, 404, 410):
                     self._spade_url = None

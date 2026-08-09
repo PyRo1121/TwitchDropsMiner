@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import math
 import logging
 from enum import Enum
 from itertools import chain
 from typing import TYPE_CHECKING
-from functools import cached_property
 from datetime import datetime, timedelta, timezone
 
 from translate import _
@@ -28,7 +28,19 @@ DIMS_PATTERN = re.compile(r'-\d+x\d+(?=\.(?:jpg|png|gif)$)', re.I)
 
 
 def remove_dimensions(url: URLType) -> URLType:
-    return URLType(DIMS_PATTERN.sub('', url))
+    return URLType(DIMS_PATTERN.sub("", url))
+
+
+def _strict_bool(value: object, field: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _nonnegative_int(value: object, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
 
 
 class BenefitType(Enum):
@@ -70,6 +82,7 @@ class BaseDrop:
         self, campaign: DropsCampaign, data: JsonType, claimed_benefits: dict[str, datetime]
     ):
         self._twitch: Twitch = campaign._twitch
+        self._claim_lock = asyncio.Lock()
         drop_id = data.get("id")
         name = data.get("name")
         start_at = data.get("startAt")
@@ -84,50 +97,55 @@ class BaseDrop:
         self.id: str = drop_id
         self.name: str = name
         self.campaign: DropsCampaign = campaign
-        benefit_edges = data.get("benefitEdges") or []
+        benefit_edges = data.get("benefitEdges", [])
+        if benefit_edges is None:
+            benefit_edges = []
         if not isinstance(benefit_edges, list):
             raise ValueError("Drop benefitEdges must be a list")
-        self.benefits: list[Benefit] = [
-            Benefit(benefit_data)
-            for benefit_data in benefit_edges
-            if isinstance(benefit_data, dict)
-        ]
+        self.benefits: list[Benefit] = []
+        for benefit_data in benefit_edges:
+            if not isinstance(benefit_data, dict):
+                raise ValueError("Drop benefitEdges contains invalid data")
+            self.benefits.append(Benefit(benefit_data))
         self.starts_at: datetime = timestamp(start_at)
         self.ends_at: datetime = timestamp(end_at)
         self.claim_id: str | None = None
-        self.is_claimed: bool = False
+        self.is_claimed = False
         self_data = data.get("self")
-        if isinstance(self_data, dict):
+        if self_data is not None:
+            if not isinstance(self_data, dict):
+                raise ValueError("Drop self data must be an object")
             claim_id = self_data.get("dropInstanceID")
-            self.claim_id = claim_id if isinstance(claim_id, str) else None
-            self.is_claimed = bool(self_data.get("isClaimed", False))
-        elif (
-            # If there's no self edge available, we can use claimed_benefits to determine
-            # (with pretty good certainty) if this drop has been claimed or not.
-            # To do this, we check if the benefitEdges appear in claimed_benefits, and then
-            # deref their "lastAwardedAt" timestamps into a list to check against.
-            # If the benefits were claimed while the drop was active,
-            # the drop has been claimed too.
-            (
-                dts := [
-                    claimed_benefits[bid]
-                    for benefit in self.benefits
-                    if (bid := benefit.id) in claimed_benefits
-                ]
+            if claim_id is not None and not isinstance(claim_id, str):
+                raise ValueError("Drop instance ID must be a string")
+            self.claim_id = claim_id
+            self.is_claimed = _strict_bool(
+                self_data.get("isClaimed", False),
+                "Drop isClaimed",
             )
-            and all(self.starts_at <= dt < self.ends_at for dt in dts)
+        elif self.benefits and all(
+            (awarded_at := claimed_benefits.get(benefit.id)) is not None
+            and self.starts_at <= awarded_at < self.ends_at
+            for benefit in self.benefits
         ):
+            # In the absence of a self edge, every benefit must have been
+            # awarded during this drop's active window.
             self.is_claimed = True
-        precondition_data = data.get("preconditionDrops") or []
+        precondition_data = data.get("preconditionDrops", [])
+        if precondition_data is None:
+            precondition_data = []
         if not isinstance(precondition_data, list):
             raise ValueError("Drop preconditionDrops must be a list")
         self.precondition_drops: list[str] = []
         for item in precondition_data:
             if not isinstance(item, dict):
-                continue
+                raise ValueError("Drop preconditionDrops contains invalid data")
             precondition_id = item.get("id")
-            if isinstance(precondition_id, str):
-                self.precondition_drops.append(precondition_id)
+            if not isinstance(precondition_id, str) or not precondition_id:
+                raise ValueError("Drop precondition ID must be a string")
+            if precondition_id in self.precondition_drops:
+                raise ValueError("Drop contains a duplicate precondition ID")
+            self.precondition_drops.append(precondition_id)
 
     def _state_suffix(self) -> str:
         if self.is_claimed:
@@ -140,11 +158,7 @@ class BaseDrop:
         return f"Drop({self.rewards_text()}{self._state_suffix()})"
 
     def _preconditions(self) -> list[TimedDrop]:
-        return [
-            precondition
-            for pid in self.precondition_drops
-            if (precondition := self.campaign.timed_drops.get(pid)) is not None
-        ]
+        return [self.campaign.timed_drops[pid] for pid in self.precondition_drops]
 
     @property
     def preconditions_met(self) -> bool:
@@ -153,10 +167,27 @@ class BaseDrop:
     def _on_state_changed(self) -> None:
         raise NotImplementedError
 
+    @property
+    def eligible(self) -> bool:
+        has_badge_or_emote = any(
+            benefit.type.is_badge_or_emote() for benefit in self.benefits
+        )
+        has_direct_entitlement = any(
+            not benefit.type.is_badge_or_emote() for benefit in self.benefits
+        )
+        if not self.benefits:
+            has_direct_entitlement = True
+        return (
+            has_direct_entitlement and self.campaign.linked
+            or has_badge_or_emote
+            and self._twitch.settings.enable_badges_emotes
+        )
+
     def _base_earn_conditions(self) -> bool:
         # define when a drop can be earned or not
         return (
-            self.preconditions_met  # preconditions are met
+            self.eligible
+            and self.preconditions_met  # preconditions are met
             and not self.is_claimed  # isn't already claimed
             # has at least one benefit, or participates in a preconditions chain
             and (bool(self.benefits) or self.id in self.campaign.preconditions_chain())
@@ -211,6 +242,12 @@ class BaseDrop:
         return delim.join(benefit.name for benefit in self.benefits)
 
     async def claim(self) -> bool:
+        async with self._claim_lock:
+            if self.is_claimed:
+                return True
+            return await self._claim_once()
+
+    async def _claim_once(self) -> bool:
         claim_attempted = self.can_claim
         result = await self._claim()
         record_history = getattr(self._twitch, "history_event", None)
@@ -220,6 +257,8 @@ class BaseDrop:
                 record_history(
                     "claim.succeeded",
                     data={
+                        "campaign_id": self.campaign.id,
+                        "drop_id": self.id,
                         "game": self.campaign.game.name,
                         "reward": self.rewards_text(),
                     },
@@ -241,6 +280,8 @@ class BaseDrop:
                     "claim.unconfirmed",
                     severity="warning",
                     data={
+                        "campaign_id": self.campaign.id,
+                        "drop_id": self.id,
                         "game": self.campaign.game.name,
                         "reward": self.rewards_text(),
                     },
@@ -257,7 +298,7 @@ class BaseDrop:
         if not self.can_claim:
             return False
         try:
-            response = await self._twitch.gql_request(
+            response = await self._twitch.transport.gql_request(
                 GQL_QUERIES["ClaimDrop"].with_variables(
                     {"input": {"dropInstanceID": self.claim_id}}
                 )
@@ -287,14 +328,27 @@ class TimedDrop(BaseDrop):
     ):
         super().__init__(campaign, data, claimed_benefits)
         self_data = data.get("self")
-        raw_minutes = self_data.get("currentMinutesWatched", 0) if isinstance(self_data, dict) else 0
+        raw_minutes = (
+            self_data.get("currentMinutesWatched", 0)
+            if isinstance(self_data, dict)
+            else 0
+        )
         try:
-            self.required_minutes = max(0, int(data["requiredMinutesWatched"]))
-            self.real_current_minutes = min(
-                max(0, int(raw_minutes or 0)), self.required_minutes
+            required_minutes = _nonnegative_int(
+                data["requiredMinutesWatched"],
+                "Timed Drop requiredMinutesWatched",
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except KeyError as exc:
             raise ValueError("Timed Drop minute data is invalid") from exc
+        current_minutes = _nonnegative_int(
+            raw_minutes,
+            "Timed Drop currentMinutesWatched",
+        )
+        # Twitch occasionally reports completed progress beyond the advertised
+        # requirement. Treat that as complete while preserving the domain
+        # invariant that progress never exceeds its requirement.
+        self.required_minutes = required_minutes
+        self.real_current_minutes = min(current_minutes, required_minutes)
         if self.is_claimed:
             # claimed drops may report inconsistent current minutes, so we need to overwrite them
             self.real_current_minutes = self.required_minutes
@@ -368,13 +422,29 @@ class TimedDrop(BaseDrop):
     def display(self, *, countdown: bool = True, subone: bool = False):
         self._twitch.gui.display_drop(self, countdown=countdown, subone=subone)
 
-    def update_minutes(self, new_minutes: int):
-        """Apply only newer authoritative progress; stale snapshots cannot rewind it."""
-        if new_minutes <= self.real_current_minutes:
+    def update_minutes(
+        self,
+        new_minutes: int,
+        required_minutes: int | None = None,
+    ) -> None:
+        """Apply a newer authoritative progress/requirement pair."""
+        current = _nonnegative_int(new_minutes, "Drop current progress")
+        required = (
+            self.required_minutes
+            if required_minutes is None
+            else _nonnegative_int(required_minutes, "Drop required progress")
+        )
+        current = min(current, required)
+        if current < self.real_current_minutes:
             return
-        delta = min(new_minutes - self.real_current_minutes, self.required_minutes - self.real_current_minutes)
+
+        requirement_changed = required != self.required_minutes
+        self.required_minutes = required
+        delta = current - self.real_current_minutes
         if delta > 0:
             self.campaign._bump_all_minutes(delta)
+        elif requirement_changed:
+            self._on_state_changed()
 
 
 class DropsCampaign:
@@ -399,48 +469,109 @@ class DropsCampaign:
         box_art_url = game_data.get("boxArtURL")
         if not isinstance(box_art_url, str):
             raise ValueError("Campaign game artwork is missing")
+        known_statuses = {
+            "ACTIVE",
+            "UPCOMING",
+            "EXPIRED",
+            "EXPIRED_MANUALLY",
+            "DISABLED",
+        }
+        if status not in known_statuses:
+            raise ValueError(f"Campaign status is unknown: {status}")
+
         self.id: str = campaign_id
         self.name: str = name
         self.game: Game = Game(game_data)
-        self_data = data.get("self") or {}
-        self.linked: bool = (
-            bool(self_data.get("isAccountConnected", False))
-            if isinstance(self_data, dict)
-            else False
+        self_data = data.get("self")
+        if self_data is None:
+            self_data = {}
+        if not isinstance(self_data, dict):
+            raise ValueError("Campaign self data is invalid")
+        self.linked = _strict_bool(
+            self_data.get("isAccountConnected", False),
+            "Campaign isAccountConnected",
         )
         account_link_url = data.get("accountLinkURL")
-        self.link_url: str = account_link_url if isinstance(account_link_url, str) else ""
+        self.link_url: str = (
+            account_link_url if isinstance(account_link_url, str) else ""
+        )
         # Campaign artwork comes from the game object. Remove Twitch's size suffix.
         self.image_url: URLType = remove_dimensions(URLType(box_art_url))
         self.starts_at: datetime = timestamp(start_at)
         self.ends_at: datetime = timestamp(end_at)
-        self._valid: bool = status not in {"EXPIRED", "EXPIRED_MANUALLY", "DISABLED"}
-        allowed = data.get("allow") or {}
+        self._valid = status in {"ACTIVE", "UPCOMING"}
+
+        allowed = data.get("allow")
+        if allowed is None:
+            allowed = {}
         if not isinstance(allowed, dict):
             raise ValueError("Campaign allow data is invalid")
-        allowed_data = allowed.get("channels") or []
+        allowed_data = allowed.get("channels", [])
+        if allowed_data is None:
+            allowed_data = []
         if not isinstance(allowed_data, list):
             raise ValueError("Campaign allow channels must be a list")
-        allowlist_enabled = bool(allowed.get("isEnabled", True))
+        allowlist_enabled = _strict_bool(
+            allowed.get("isEnabled", False),
+            "Campaign allow isEnabled",
+        )
         self.allowed_channels: list[Channel] = []
         if allowlist_enabled:
+            if not allowed_data:
+                raise ValueError("Enabled campaign allowlist is empty")
             for channel_data in allowed_data:
                 if not isinstance(channel_data, dict):
-                    continue
+                    raise ValueError("Campaign allowlist contains invalid data")
                 try:
-                    self.allowed_channels.append(Channel.from_acl(twitch, channel_data))
-                except (KeyError, TypeError, ValueError):
-                    logger.warning("Ignoring malformed campaign allowlist channel")
-        time_based_drops = data.get("timeBasedDrops") or []
+                    channel = Channel.from_acl(twitch, channel_data)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "Campaign allowlist contains an invalid channel"
+                    ) from exc
+                self.allowed_channels.append(channel)
+
+        time_based_drops = data.get("timeBasedDrops", [])
+        if time_based_drops is None:
+            time_based_drops = []
         if not isinstance(time_based_drops, list):
             raise ValueError("Campaign timeBasedDrops must be a list")
         self.timed_drops: dict[str, TimedDrop] = {}
         for drop_data in time_based_drops:
             if not isinstance(drop_data, dict):
-                continue
+                raise ValueError("Campaign contains a malformed timed drop")
             drop_id = drop_data.get("id")
-            if isinstance(drop_id, str):
-                self.timed_drops[drop_id] = TimedDrop(self, drop_data, claimed_benefits)
+            if not isinstance(drop_id, str) or not drop_id:
+                raise ValueError("Campaign timed drop is missing an ID")
+            if drop_id in self.timed_drops:
+                raise ValueError(f"Campaign contains duplicate drop ID: {drop_id}")
+            self.timed_drops[drop_id] = TimedDrop(
+                self,
+                drop_data,
+                claimed_benefits,
+            )
+        self._validate_preconditions()
+
+    def _validate_preconditions(self) -> None:
+        states: dict[str, int] = {}
+
+        def visit(drop_id: str) -> None:
+            state = states.get(drop_id, 0)
+            if state == 1:
+                raise ValueError("Campaign drop prerequisites contain a cycle")
+            if state == 2:
+                return
+            states[drop_id] = 1
+            drop = self.timed_drops[drop_id]
+            for precondition_id in drop.precondition_drops:
+                if precondition_id not in self.timed_drops:
+                    raise ValueError(
+                        "Campaign drop references a missing prerequisite"
+                    )
+                visit(precondition_id)
+            states[drop_id] = 2
+
+        for drop_id in self.timed_drops:
+            visit(drop_id)
 
     def __repr__(self) -> str:
         return f"Campaign({self.game!s}, {self.name}, {self.claimed_drops}/{self.total_drops})"
@@ -476,15 +607,7 @@ class DropsCampaign:
 
     @property
     def eligible(self) -> bool:
-        if self.has_badge_or_emote:
-            return self._twitch.settings.enable_badges_emotes
-        return self.linked
-
-    @cached_property
-    def has_badge_or_emote(self) -> bool:
-        return any(
-            benefit.type.is_badge_or_emote() for drop in self.drops for benefit in drop.benefits
-        )
+        return any(drop.eligible for drop in self.drops)
 
     @property
     def finished(self) -> bool:
@@ -528,8 +651,7 @@ class DropsCampaign:
         self, channel: Channel | None = None, ignore_channel_status: bool = False
     ) -> bool:
         return (
-            self.eligible  # account is eligible
-            and self.active  # campaign is active (and valid)
+            self.active  # campaign is active (and valid)
             and (
                 channel is None or (  # channel isn't specified,
                     # or there's no ACL, or the channel is in the ACL

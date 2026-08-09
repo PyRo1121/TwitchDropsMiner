@@ -10,22 +10,9 @@
         "no_campaign": "Sem campanhas ativas no momento para minerar. Esperando por uma campanha ativa..."
     },
     "login": {
-        "chrome": {
-            "startup": "Abrindo Google Chrome",
-            "login_to_complete": "Por Favor complete o login pela pagina web manualmente pressionando o botão Login novamente.",
-            "no_token": "Seu Token de autorização Twitch não foi encontrado",
-            "closed_window": "O Google Chrome foi fechado antes da autenticação ser concluída."
-        },
-        "error_code": "Código de erro do login: {error_code}",
-        "unexpected_content": "Ocorreu um erro inesperado, geralmente causado por redirecionamento de internet. Você precisa se autenticar para ter acesso à internet?",
-        "incorrect_login_pass": "Usuário e/ou senha incorreto(s)",
-        "incorrect_email_code": "Codigo de email incorreto",
-        "incorrect_twofa_code": "Codigo F2A incorreto",
-        "email_code_required": "Código no email necessário. Verifique sua caixa de entrada",
-        "twofa_code_required": "Token 2FA necessário."
+        "unexpected_content": "Ocorreu um erro inesperado, geralmente causado por redirecionamento de internet. Você precisa se autenticar para ter acesso à internet?"
     },
     "error": {
-        "captcha": "Seu login foi negado pelo CAPTCHA.\nPor favor tente em aproximadamente 12+ horas.",
         "site_down": "Twitch está fora do ar, tentando novamente em {seconds} segundos...",
         "no_connection": "Sem conexão com a TWITCH, reconectando em {seconds} segundos... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Tela de login",
-            "labels": "Status:\nUser ID:",
             "logged_in": "Entrou",
             "logged_out": "Saiu",
             "logging_in": "Entrando...",
-            "required": "Login necessário",
-            "request": "Por favor, entre para continuar.",
-            "username": "Usuário",
-            "password": "Senha",
-            "twofa_code": "Código 2FA (opcional)",
             "button": "Entrar"
         },
         "websocket": {
@@ -90,9 +71,9 @@
         "channels": {
             "name": "Canais",
             "switch": "Trocar",
-            "online": "ONLINE  \u2714",
-            "pending": "OFFLINE \u23f3",
-            "offline": "OFFLINE \u274c",
+            "online": "ONLINE  ✔",
+            "pending": "OFFLINE ⏳",
+            "offline": "OFFLINE ❌",
             "headings": {
                 "channel": "Canal",
                 "status": "Status",
@@ -112,13 +93,13 @@
                 "refresh": "Atualizar"
             },
             "status": {
-                "linked": "Conectado \u2714",
-                "not_linked": "Desconectado \u274c",
-                "active": "Ativo \u2714",
-                "upcoming": "Se aproximando \u23f3",
-                "expired": "Expirado \u274c",
-                "claimed": "Coletado \u2714",
-                "ready_to_claim": "Pronto para coleta \u23f3"
+                "linked": "Conectado ✔",
+                "not_linked": "Desconectado ❌",
+                "active": "Ativo ✔",
+                "upcoming": "Se aproximando ⏳",
+                "expired": "Expirado ❌",
+                "claimed": "Coletado ✔",
+                "ready_to_claim": "Pronto para coleta ⏳"
             },
             "starts": "Começa em: {time}",
             "ends": "Termina em: {time}",
@@ -135,14 +116,16 @@
                 "tray": "Auto-iniciar na área de notificação: ",
                 "tray_notifications": "Notificações: ",
                 "dark_mode": "Modo escuro: ",
-                "priority_only": "Apenas com prioridade: ",
                 "proxy": "Proxy (requer o reinício do app):"
             },
             "game_name": "Nome do jogo",
             "priority": "Prioridade",
             "exclude": "Excluir",
             "reload": "Recarregar",
-            "reload_text": "A maioria das mudanças requer o reinício do app para serem efetivadas: "
+            "reload_text": "A maioria das mudanças requer o reinício do app para serem efetivadas: ",
+            "priority_modes": {
+                "priority_only": "Apenas com prioridade: "
+            }
         },
         "help": {
             "links": {

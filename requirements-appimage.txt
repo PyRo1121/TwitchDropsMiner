@@ -1,0 +1,33 @@
+# Reproducible appimage-builder dependency lock for CI.
+appimage-builder @ git+https://github.com/AppImageCrafters/appimage-builder.git@1a8794d3c89f288fbd82b9accd7c0b74611147d5
+arpy==2.3.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.4.9
+cryptography==50.0.0
+decorator==5.3.1
+docker==7.2.0
+emrichen==0.4.0
+idna==3.18
+jsonpath-rw==1.4.0
+libconf==2.0.1
+lief==1.0.0
+packaging==26.3
+PGPy13==0.6.1rc1
+ply==3.11
+prompt_toolkit==3.0.53
+pyaml==21.10.1
+pyasn1==0.6.4
+pycparser==3.0
+pydpkg==1.9.5
+python-gnupg==0.5.6
+PyYAML==6.0.3
+questionary==2.1.1
+requests==2.34.2
+roam==0.3.1
+ruamel.yaml==0.19.1
+schema==0.7.8
+six==1.17.0
+urllib3==2.7.0
+wcwidth==0.8.2
+zstandard==0.23.0

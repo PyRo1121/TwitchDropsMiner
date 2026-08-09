@@ -10,22 +10,9 @@
         "no_campaign": "沒有可用於掉寶的活動，正在等待一個有效的掉寶活動…"
     },
     "login": {
-        "unexpected_content": "回傳的內容類型有誤，通常是由於被重新導向導致。您是否需要先設定 VPN 或登入到目前的網路？",
-        "chrome": {
-            "startup": "正在開啟 Chrome 視窗…",
-            "login_to_complete": "請再次點擊登入按鈕來完成登入。",
-            "no_token": "無法獲取權杖。",
-            "closed_window": "Chrome 視窗在登入步驟完成之前被關閉。"
-        },
-        "error_code": "登入錯誤代碼：{error_code}",
-        "incorrect_login_pass": "使用者名稱或密碼錯誤。",
-        "incorrect_email_code": "電子郵件驗證碼錯誤。",
-        "incorrect_twofa_code": "2FA 驗證碼不正確。",
-        "email_code_required": "需要電子郵件驗證碼，請查看您的電子郵件信箱。",
-        "twofa_code_required": "需要 2FA 驗證碼。"
+        "unexpected_content": "回傳的內容類型有誤，通常是由於被重新導向導致。您是否需要先設定 VPN 或登入到目前的網路？"
     },
     "error": {
-        "captcha": "您的登入被 CAPTCHA 拒絕，請於12小時後重試。",
         "site_down": "Twitch 網頁目前無法開啟，將在 {seconds} 秒後重試…",
         "no_connection": "無法連接到 Twitch，將在 {seconds} 秒後重試… ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "登入 Twitch",
-            "labels": "狀態：\n用戶ID：",
             "logged_in": "已登入",
             "logged_out": "未登入",
             "logging_in": "正在登入…",
-            "required": "需要登入",
-            "request": "請先登入以繼續。",
-            "username": "使用者名稱",
-            "password": "密碼",
-            "twofa_code": "2FA 驗證碼（選用）",
             "button": "登入"
         },
         "websocket": {
@@ -90,9 +71,9 @@
         "channels": {
             "name": "活動頻道",
             "switch": "切換",
-            "online": "上線 \u2714",
-            "pending": "離線 \u23f3",
-            "offline": "離線 \u274c",
+            "online": "上線 ✔",
+            "pending": "離線 ⏳",
+            "offline": "離線 ❌",
             "headings": {
                 "channel": "頻道",
                 "game": "遊戲",
@@ -112,13 +93,13 @@
                 "refresh": "重新整理"
             },
             "status": {
-                "linked": "已連結 \u2714",
-                "not_linked": "未連結 \u274c",
-                "active": "已上線 \u2714",
-                "upcoming": "即將開始 \u23f3",
-                "expired": "已結束 \u274c",
-                "claimed": "已領取 \u2714",
-                "ready_to_claim": "可以領取 \u23f3"
+                "linked": "已連結 ✔",
+                "not_linked": "未連結 ❌",
+                "active": "已上線 ✔",
+                "upcoming": "即將開始 ⏳",
+                "expired": "已結束 ❌",
+                "claimed": "已領取 ✔",
+                "ready_to_claim": "可以領取 ⏳"
             },
             "starts": "開始時間：{time}",
             "ends": "結束時間：{time}",

@@ -21,7 +21,7 @@ python main.py --tray
 
 Then, inside the app:
 
-1. Log in / connect with the in-app login form.
+1. Authorize the app with Twitch's device-code login panel.
 2. On the **Settings** tab, add the games you want to farm to the **Priority List**.
 3. Press **Reload** — the miner finds eligible live channels and starts mining automatically.
 
@@ -48,7 +48,7 @@ About once per minute, the application sends the same lightweight viewer-presenc
 ### Usage
 
 - Download and unzip [the latest release](https://github.com/PyRo1121/TwitchDropsMiner/releases) - it's recommended to keep it in the folder it comes in.
-- Run it and login/connect the miner to your Twitch account by using the in-app login form.
+- Run it and authorize the miner from Twitch's device-authorization page; the app never collects account credentials.
 - After a successful login, the app should fetch a list of all available campaigns and games you can mine drops for - you can then select and add games of choice to the Priority List available on the Settings tab, and then press on the `Reload` button to start processing. It will fetch a list of all applicable streams it can watch, and start mining right away. You can also manually switch to a different channel as needed.
 - If you wish to keep the miner occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
 - Make sure to link your Twitch account to game accounts on the [campaigns page](https://www.twitch.tv/drops/campaigns), to enable more games to be mined.
@@ -67,10 +67,10 @@ About once per minute, the application sends the same lightweight viewer-presenc
 > Using the same account to watch other streams during mining is thus discouraged, in order to avoid any problems arising from it.
 
 > [!CAUTION]
-> Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens (when Twitch returns one) are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account, even without the password.
+> Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens (when Twitch returns one) are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account, even without the password. Mutable application data is stored per user in `%LOCALAPPDATA%\\TwitchDropsMiner` on Windows, `${XDG_DATA_HOME:-~/.local/share}/TwitchDropsMiner` on Linux, and `~/Library/Application Support/TwitchDropsMiner` on macOS.
 
 > [!IMPORTANT]
-> Successfully logging into your Twitch account in the application may cause Twitch to send you a "New Login" notification email. This is normal - you can verify that it comes from your own IP address. The detected browser during the login will be "Chrome", as that's what the miner currently presents itself to the Twitch server.
+> Login uses Twitch's device-authorization page. The miner never asks for or stores your Twitch username, password, or two-factor authentication code.
 
 > [!NOTE]
 > The time remaining timer is a presentation estimate for the primary target. Authoritative progress comes from Twitch's PubSub drop events or the assigned target's `CurrentDrop` response; the miner does not fabricate progress when Twitch does not acknowledge it. With two targets, the secondary target is reconciled independently and does not replace the primary hero display.
@@ -81,7 +81,7 @@ About once per minute, the application sends the same lightweight viewer-presenc
 ### Notes about the Windows build
 
 - To achieve a portable-executable format, the application is packaged with PyInstaller into an `EXE`. Some antivirus engines (including Windows Defender) might report the packaged executable as a trojan, because PyInstaller has been used by others to package malicious Python code in the past. These reports can be safely ignored. If you absolutely do not trust the executable, you'll have to install Python yourself and run everything from source.
-- The executable uses the `%TEMP%` directory for temporary runtime storage of files, that don't need to be exposed to the user (like compiled code and translation files). For persistent storage, the directory the executable resides in is used instead.
+- The executable uses the `%TEMP%` directory for temporary bundled resources. Persistent settings, credentials, logs, history, and caches are stored in `%LOCALAPPDATA%\\TwitchDropsMiner`.
 - The autostart feature is implemented as a registry entry to the current user's (`HKCU`) autostart key. It is only altered when toggling the respective option. If you relocate the app to a different directory, the autostart feature will stop working, until you toggle the option off and back on again
 
 ### Notes about the Linux build
@@ -97,8 +97,8 @@ About once per minute, the application sends the same lightweight viewer-presenc
 
 - The macOS version is packaged using PyInstaller into a standalone `.app` bundle, distributed as a ZIP archive.
 - Since this application is not signed with a paid Apple Developer Certificate, **macOS Gatekeeper will block it** on the first run (saying it "The application is damaged and can't be opened").
-  - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr Twitch Drops Miner (by DevilXD).app` or just type `xattr -cr` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
-- Persistent files (like `cookies.jar`, `oauth.json`, `settings.json`, `lock.file` and the `cache` folder) are stored inside the application bundle in `Twitch Drops Miner (by DevilXD).app/Contents/MacOS` (to access them Right-click the application and select `Show Package Contents`)
+  - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr 'Twitch Drops Miner (by DevilXD).app'` or just type `xattr -cr` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
+- Persistent files such as `cookies.jar`, `oauth.json`, `settings.json`, and the `cache` folder are stored in `~/Library/Application Support/TwitchDropsMiner`, outside the read-only application bundle.
 
 ### Advanced Usage
 

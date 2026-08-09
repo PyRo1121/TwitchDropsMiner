@@ -14,6 +14,10 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     name: Validate
@@ -49,11 +53,17 @@ jobs:
           sudo apt update
           sudo apt install xvfb libdbus-1-3 libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0 libtiff5
 
-      - name: Install Qt dependencies
+      - name: Install locked runtime dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Compile Qt sources
-        run: python -m compileall -q main.py qt_main.py gui_qt tests
+      - name: Compile Python sources
+        run: python -m compileall -q *.py gui_qt tests
+
+      - name: Run Pyright
+        run: npx --yes pyright@1.1.409
+
+      - name: Validate locale schemas and placeholders
+        run: python -m unittest -v tests.test_translation_schema
 
       - name: Run Qt regression tests
         env:
@@ -89,10 +99,8 @@ jobs:
         with:
           python-version: ${{env.PYTHON_VERSION}}
 
-      - name: Install project dependencies
-        run: |
-          python -m pip install wheel
-          python -m pip install -r requirements.txt
+      - name: Install locked build dependencies
+        run: python -m pip install -r requirements-build.txt
 
       # TODO: Consider using https://github.com/crazy-max/ghaction-upx
       # or some other way of keeping the download link up to date in the future
@@ -104,18 +112,16 @@ jobs:
           Move-Item -Path (Join-Path $env:Temp upx-*) -Destination (Join-Path $env:Temp upx)
           Add-Content $env:GITHUB_PATH (Join-Path $env:Temp upx)
 
-      - name: Install PyInstaller
-        run: |
-          python -m pip install pyinstaller
-
       - name: Create portable executable
         run: |
-          pyinstaller build.spec
+          pyinstaller --clean --noconfirm build.spec
 
       - name: Smoke test frozen executable
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           $Executable = Get-ChildItem dist\*.exe | Select-Object -First 1
-          & $Executable.FullName --version
+          & $Executable.FullName --self-test
 
       - name: Create release folder
         run: |
@@ -133,8 +139,16 @@ jobs:
           path: Twitch.Drops.Miner.Windows.zip
 
   macos:
-    name: macOS
-    runs-on: macos-latest
+    name: macOS (${{matrix.arch}})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
+    runs-on: ${{matrix.runner}}
     needs:
       - validate
 
@@ -158,24 +172,20 @@ jobs:
         with:
           python-version: ${{env.PYTHON_VERSION}}
 
-      - name: Install project dependencies
-        run: |
-          python3 -m pip install wheel
-          python3 -m pip install -r requirements.txt
-
-      - name: Install PyInstaller
-        run: |
-          python3 -m pip install pyinstaller
+      - name: Install locked build dependencies
+        run: python3 -m pip install -r requirements-build.txt
 
       - name: Create portable executable
         run: |
-          pyinstaller build.spec --noconfirm
+          pyinstaller --clean --noconfirm build.spec
 
       - name: Smoke test frozen application
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          "dist/Twitch Drops Miner (by DevilXD).app/Contents/MacOS/Twitch Drops Miner (by DevilXD)" --version
+          executable="dist/Twitch Drops Miner (by DevilXD).app/Contents/MacOS/Twitch Drops Miner (by DevilXD)"
+          lipo -archs "$executable" | tr ' ' '\n' | grep -qx '${{matrix.arch}}'
+          "$executable" --self-test
 
       - name: Create release folder and Zip
         run: |
@@ -183,14 +193,14 @@ jobs:
           mkdir -p "$FOLDER"
           cp -r "dist/Twitch Drops Miner (by DevilXD).app" "$FOLDER/"
           cp manual.txt "$FOLDER/"
-          zip -r Twitch.Drops.Miner.MacOS.zip "$FOLDER"
+          zip -r 'Twitch.Drops.Miner.MacOS-${{matrix.arch}}.zip' "$FOLDER"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           if-no-files-found: error
-          name: Twitch.Drops.Miner.MacOS
-          path: Twitch.Drops.Miner.MacOS.zip
+          name: Twitch.Drops.Miner.MacOS-${{matrix.arch}}
+          path: Twitch.Drops.Miner.MacOS-${{matrix.arch}}.zip
 
   linux-pyinstaller:
     name: Linux (PyInstaller) (${{matrix.arch}})
@@ -232,22 +242,16 @@ jobs:
           sudo apt update
           sudo apt install xvfb libdbus-1-3 libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0 libtiff5
 
-      - name: Install project dependencies
-        run: |
-          python3 -m pip install wheel
-          python3 -m pip install -r requirements.txt
-
-      - name: Install PyInstaller
-        run: |
-          python3 -m pip install pyinstaller
+      - name: Install locked build dependencies
+        run: python3 -m pip install -r requirements-build.txt
 
       - name: Create portable executable
-        run: xvfb-run --auto-servernum pyinstaller build.spec
+        run: xvfb-run --auto-servernum pyinstaller --clean --noconfirm build.spec
 
       - name: Smoke test frozen executable
         env:
           QT_QPA_PLATFORM: offscreen
-        run: xvfb-run --auto-servernum "dist/Twitch Drops Miner (by DevilXD)" --version
+        run: xvfb-run --auto-servernum "dist/Twitch Drops Miner (by DevilXD)" --self-test
 
       - name: Show PyInstaller warnings
         run: |
@@ -300,15 +304,13 @@ jobs:
       - name: Install Qt system dependencies
         run: |
           sudo apt update
-          sudo apt install libdbus-1-3 libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0 libtiff5
+          sudo apt install libdbus-1-3 libegl1 libfuse2 libgl1 libxcb-cursor0 libxkbcommon-x11-0 libtiff5
 
-      - name: Install appimage-builder
+      - name: Install locked appimage-builder toolchain
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install wheel
-          python3 -m pip install setuptools setuptools_scm
-          # TODO: Switch to a stable release if/when a version newer than 1.1.0 is released.
-          python3 -m pip install git+https://github.com/AppImageCrafters/appimage-builder.git@1a8794d3c89f288fbd82b9accd7c0b74611147d5
+          python3 -m pip install \
+            pip==26.2.1 wheel==0.47.0 setuptools==79.0.1 setuptools_scm==9.2.2
+          python3 -m pip install --no-build-isolation -r requirements-appimage.txt
 
       - name: Create AppImage
         env:
@@ -325,7 +327,11 @@ jobs:
         run: |
           image="$(find . -maxdepth 1 -name '*.AppImage' -print -quit)"
           test -n "$image"
-          "$image" --appimage-extract-and-run --version
+          "$image" --self-test
+          "$image" --appimage-extract >/dev/null
+          plugin="$(find squashfs-root -path '*/platforms/libqxcb.so' -print -quit)"
+          test -n "$plugin"
+          ! ldd "$plugin" | grep -q 'not found'
 
       - name: Create release folder
         run: |
@@ -343,7 +349,10 @@ jobs:
 
   update_releases_page:
     name: Upload builds to Releases
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.repository == 'PyRo1121/TwitchDropsMiner' &&
+      github.ref == 'refs/heads/master' &&
+      github.event_name != 'pull_request'
     needs:
       - windows
       - linux-pyinstaller
@@ -364,23 +373,18 @@ jobs:
         with:
           path: artifacts
 
-      - name: Delete the existing pre-release (if present)
+      - name: Generate artifact checksums
         run: |
-          TAG=dev-build
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY"
-          else
-            echo "No $TAG release; skipping delete"
-          fi
-        env:
-          GITHUB_TOKEN: ${{github.token}}
+          cd artifacts
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          sha256sum --check SHA256SUMS
 
-      - name: Create a new dev build release
+      - name: Create an immutable development release
         uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b
         with:
-          allowUpdates: true
+          allowUpdates: false
           artifactErrorsFailBuild: true
-          artifacts: artifacts/*/*
+          artifacts: artifacts/*/*,artifacts/SHA256SUMS
           body: |
             **This is an automatically generated in-development pre-release version of the application, that includes the latest master branch changes.**
             **⚠️ This build is not stable and may end up terminating with a fatal error. ⚠️**
@@ -388,7 +392,7 @@ jobs:
 
             - Last build date: `${{steps.vars.outputs.date_now}}`
             - Reference commit: ${{github.sha}}
-          name: Development build
+          name: Development build ${{github.sha}}
           prerelease: true
-          removeArtifacts: true
-          tag: dev-build
+          removeArtifacts: false
+          tag: dev-build-${{github.sha}}

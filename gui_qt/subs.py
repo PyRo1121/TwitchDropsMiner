@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Callable, Iterable
-from types import SimpleNamespace
 
 import qtawesome as qta
 from typing import TYPE_CHECKING, Any
@@ -24,9 +22,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from yarl import URL
-
-from constants import PriorityMode, State
+from constants import PROJECT_URL, PriorityMode, State
+from settings import parse_proxy
 from translate import _
 from utils import format_duration, webopen
 from .autostart import AutostartError, AutostartManager
@@ -56,9 +53,6 @@ class QtStatusBar:
         if self._on_update is not None:
             self._on_update(text)
 
-    def clear(self) -> None:
-        self.update("")
-
 
 class QtWebsocketStatus:
     def __init__(self, label: QLabel) -> None:
@@ -81,10 +75,16 @@ class QtWebsocketStatus:
 
     def _refresh(self) -> None:
         values = (
-            f"WS {idx}: {entry['status']} · {entry['topics']} topics"
+            _("gui", "text", "websocket_summary").format(
+                index=idx,
+                status=entry["status"],
+                topics=entry["topics"],
+            )
             for idx, entry in sorted(self._connections.items())
         )
-        self._label.setText("   ".join(values) or "WebSocket: —")
+        self._label.setText(
+            "   ".join(values) or _("gui", "text", "websocket_waiting")
+        )
 
 
 class QtLoginForm:
@@ -97,15 +97,6 @@ class QtLoginForm:
     def _on_submit(self) -> None:
         self._confirm.set()
 
-    def clear(self, login: bool = False, password: bool = False, token: bool = False) -> None:
-        clear_all = not login and not password and not token
-        if clear_all or login:
-            self._card.username.clear()
-        if clear_all or password:
-            self._card.password.clear()
-        if clear_all or token:
-            self._card.token.clear()
-
     async def wait_for_login_press(self) -> None:
         self._confirm.clear()
         self._card.set_busy(False)
@@ -114,34 +105,16 @@ class QtLoginForm:
         finally:
             self._card.set_busy(True)
 
-    async def ask_login(self):
-        self.update(_("gui", "login", "required"), None)
-        self._manager.grab_attention(sound=False)
-        while True:
-            await self.wait_for_login_press()
-            username = self._card.username.text().strip()
-            password = self._card.password.text()
-            token = self._card.token.text().strip()
-            if not (3 <= len(username) <= 25 and re.fullmatch(r"[A-Za-z0-9_]+", username)):
-                self.clear(login=True)
-                self._manager.print("Invalid Twitch username.")
-                continue
-            if len(password) < 8:
-                self.clear(password=True)
-                self._manager.print("Password must contain at least 8 characters.")
-                continue
-            if token and len(token) < 6:
-                self.clear(token=True)
-                self._manager.print("The verification code is too short.")
-                continue
-            return SimpleNamespace(username=username, password=password, token=token)
-
-    async def ask_enter_code(self, page_url, user_code: str) -> None:
-        self._card.set_status(f"Enter device code: {user_code}", None)
+    async def ask_enter_code(self, page_url: Any, user_code: str) -> None:
+        self._card.set_status(
+            _("gui", "text", "enter_device_code").format(code=user_code),
+            None,
+        )
         self._manager.grab_attention(sound=False)
         await self.wait_for_login_press()
-        self._manager.print(f"Device code: {user_code}")
-        await asyncio.sleep(4)
+        self._manager.print(
+            _("gui", "text", "device_code").format(code=user_code)
+        )
         webopen(page_url)
 
     def update(self, status: str, user_id: int | None) -> None:
@@ -260,9 +233,6 @@ class QtChannelList:
     def get_selection(self) -> Channel | None:
         return self._page.selected()
 
-    def clear_selection(self) -> None:
-        self._page.clear_selection()
-
     def clear(self) -> None:
         self._page.clear_all()
         if self._on_cleared is not None:
@@ -287,20 +257,14 @@ class QtInventory:
         self._page = page
         self._cache = cache
 
-    async def add_campaign(self, campaign: DropsCampaign) -> None:
-        await self._page.add_campaign(campaign, self._cache)
-
-    def clear(self) -> None:
-        self._page.clear()
+    async def replace_campaigns(
+        self,
+        campaigns: Iterable[DropsCampaign],
+    ) -> None:
+        await self._page.replace_campaigns(campaigns, self._cache)
 
     def update_drop(self, drop: TimedDrop) -> None:
         self._page.update_drop(drop)
-
-    def update_progress(self, drop: TimedDrop, label: Any = None) -> None:
-        self._page.update_progress(drop, label)
-
-    def get_status(self, campaign: DropsCampaign) -> tuple[str, str]:
-        return self._page.get_status(campaign)
 
     def refresh(self) -> None:
         self._page.refresh()
@@ -323,9 +287,11 @@ class QtHelp:
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
         layout.addWidget(PageIntro(
-            "HELP / FIELD GUIDE",
-            f'{_("gui", "tabs", "help")} & About',
-            "Short answers for keeping the miner on course.",
+            _("gui", "text", "help_kicker"),
+            _("gui", "text", "help_title").format(
+                help=_("gui", "tabs", "help")
+            ),
+            _("gui", "text", "help_subtitle"),
         ))
 
         scroll = QScrollArea()
@@ -337,11 +303,11 @@ class QtHelp:
         content_layout.setSpacing(10)
 
         about = Card()
-        about.body().addWidget(QLabel("Twitch Drops Miner"))
-        about.body().addWidget(QLabel("A background miner for Twitch timed Drops."))
-        repo = QPushButton("Open project repository")
+        about.body().addWidget(QLabel(_("gui", "text", "app_name")))
+        about.body().addWidget(QLabel(_("gui", "text", "app_description")))
+        repo = QPushButton(_("gui", "text", "open_repository"))
         repo.setObjectName("ghost")
-        repo.clicked.connect(lambda: webopen("https://github.com/DevilXD/TwitchDropsMiner"))
+        repo.clicked.connect(lambda: webopen(PROJECT_URL))
         about.body().addWidget(repo, 0, Qt.AlignmentFlag.AlignLeft)
         links = QHBoxLayout()
         for label, url in (
@@ -354,7 +320,7 @@ class QtHelp:
             links.addWidget(button)
         links.addStretch(1)
         about.body().addLayout(links)
-        diagnostics = QPushButton("Open event log")
+        diagnostics = QPushButton(_("gui", "text", "open_event_log"))
         diagnostics.setObjectName("ghost")
         diagnostics.setIcon(qta.icon("ph.activity", color="#b69cff"))
         diagnostics.clicked.connect(lambda: self._manager._navigate("activity"))
@@ -384,30 +350,54 @@ class QtHelp:
         invalidate_row.addStretch(1)
         layout.addLayout(invalidate_row)
         self._invalidate_button = _ButtonAdapter(invalidate)
-        self._invalidate_button.config(state="disabled")
+        self._invalidate_task: asyncio.Task[None] | None = None
+        self.set_authenticated(False)
+
+    def set_authenticated(self, authenticated: bool) -> None:
+        self._invalidate_button.config(
+            state="normal" if authenticated else "disabled"
+        )
 
     def invalidate_token(self) -> None:
-        self._manager._tasks.create(self._invalidate_token())
+        if self._invalidate_task is not None and not self._invalidate_task.done():
+            return
+        self._invalidate_button.config(state="disabled")
+        self._invalidate_task = self._manager._tasks.create(self._invalidate_token())
 
     async def _invalidate_token(self) -> None:
+        auth_state = self._twitch._auth_state
+        token = getattr(auth_state, "_access_token", None)
         try:
-            auth_state = await self._twitch.get_auth()
-            async with self._twitch.request(
-                "POST",
-                "https://id.twitch.tv/oauth2/revoke",
-                data={
-                    "client_id": self._twitch._client_type.CLIENT_ID,
-                    "token": auth_state.access_token,
-                },
-            ) as response:
-                if response.status == 200:
-                    auth_state.invalidate(
-                        delete_cookies=True, delete_refresh_token=True
-                    )
-                else:
-                    self._manager.print(f"Token revoke failed: HTTP {response.status}")
+            if isinstance(token, str) and token:
+                async with self._twitch.transport.request(
+                    "POST",
+                    "https://id.twitch.tv/oauth2/revoke",
+                    data={
+                        "client_id": self._twitch._client_type.CLIENT_ID,
+                        "token": token,
+                    },
+                ) as response:
+                    if response.status != 200:
+                        self._manager.print(
+                            _("gui", "text", "token_revoke_http").format(
+                                status=response.status
+                            )
+                        )
         except Exception as exc:
-            self._manager.print(f"Token revoke failed: {exc}")
+            # Remote revocation is best-effort. Local logout must still erase
+            # credentials and all account-derived state.
+            self._manager.print(
+                _("gui", "text", "token_revoke_error").format(error=exc)
+            )
+        finally:
+            try:
+                auth_state.invalidate(
+                    delete_cookies=True,
+                    delete_refresh_token=True,
+                )
+            finally:
+                self._invalidate_task = None
+                self._invalidate_button.config(state="disabled")
         self._twitch.change_state(State.RESTART)
 
 
@@ -425,9 +415,9 @@ class QtSettings:
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
         layout.addWidget(PageIntro(
-            "SETTINGS / CONTROL SURFACE",
+            _("gui", "text", "settings_kicker"),
             _("gui", "tabs", "settings"),
-            "Tune the miner without leaving the deck.",
+            _("gui", "text", "settings_subtitle"),
         ))
         general = Card()
         form = QFormLayout()
@@ -435,8 +425,9 @@ class QtSettings:
         self.language.addItems(list(_.languages))
         self.language.setCurrentText(_.current)
         self.language.currentTextChanged.connect(self._language_changed)
-        form.addRow("Language (restart required)", self.language)
+        form.addRow(_("gui", "text", "language_restart"), self.language)
         self.proxy = QLineEdit(str(self._settings.proxy))
+        self.proxy.setEchoMode(QLineEdit.EchoMode.Password)
         self.proxy.editingFinished.connect(self._proxy_changed)
         form.addRow(_("gui", "settings", "general", "proxy"), self.proxy)
         self.priority_mode = QComboBox()
@@ -468,12 +459,15 @@ class QtSettings:
         form.addRow(_("gui", "settings", "general", "tray_notifications"), self.notifications)
         self.history_retention = QComboBox()
         for days in (30, 90, 365):
-            self.history_retention.addItem(f"{days} days", days)
+            self.history_retention.addItem(
+                _("gui", "text", "days").format(days=days),
+                days,
+            )
         retention_days = getattr(self._settings, "history_retention_days", 90)
         current_index = self.history_retention.findData(retention_days)
         self.history_retention.setCurrentIndex(current_index if current_index >= 0 else 1)
         self.history_retention.currentIndexChanged.connect(self._history_retention_changed)
-        form.addRow("History retention", self.history_retention)
+        form.addRow(_("gui", "text", "history_retention"), self.history_retention)
         self.dark = QCheckBox()
         self.dark.setChecked(bool(self._settings.dark_mode))
         self.dark.toggled.connect(self._dark_changed)
@@ -491,6 +485,16 @@ class QtSettings:
         self.available_check.setChecked(bool(self._settings.available_drops_check))
         self.available_check.toggled.connect(lambda value: setattr(self._settings, "available_drops_check", value))
         advanced.body().addWidget(self.available_check)
+        self.dual_watch = QCheckBox(
+            _("gui", "settings", "advanced", "experimental_dual_watch")
+        )
+        self.dual_watch.setChecked(
+            bool(getattr(self._settings, "experimental_dual_watch", False))
+        )
+        self.dual_watch.toggled.connect(
+            lambda value: setattr(self._settings, "experimental_dual_watch", value)
+        )
+        advanced.body().addWidget(self.dual_watch)
         self.reload_status = QLabel()
         self.reload_status.setObjectName("muted")
         advanced.body().addWidget(self.reload_status)
@@ -513,7 +517,7 @@ class QtSettings:
         row = QHBoxLayout()
         self.priority_entry = QComboBox()
         self.priority_entry.setEditable(True)
-        add = QPushButton("Add")
+        add = QPushButton(_("gui", "text", "add"))
         add.clicked.connect(self._priority_add)
         row.addWidget(self.priority_entry, 1)
         row.addWidget(add)
@@ -522,7 +526,11 @@ class QtSettings:
         self.priority_list.addItems(self._settings.priority)
         card.body().addWidget(self.priority_list)
         buttons = QHBoxLayout()
-        for label, callback in (("↑", lambda: self._priority_move(-1)), ("↓", lambda: self._priority_move(1)), ("Remove", self._priority_remove)):
+        for label, callback in (
+            ("↑", lambda: self._priority_move(-1)),
+            ("↓", lambda: self._priority_move(1)),
+            (_("gui", "text", "remove"), self._priority_remove),
+        ):
             button = QPushButton(label)
             button.clicked.connect(callback)
             buttons.addWidget(button)
@@ -535,7 +543,7 @@ class QtSettings:
         row = QHBoxLayout()
         self.exclude_entry = QComboBox()
         self.exclude_entry.setEditable(True)
-        add = QPushButton("Add")
+        add = QPushButton(_("gui", "text", "add"))
         add.clicked.connect(self._exclude_add)
         row.addWidget(self.exclude_entry, 1)
         row.addWidget(add)
@@ -543,7 +551,7 @@ class QtSettings:
         self.exclude_list = QListWidget()
         self.exclude_list.addItems(sorted(self._settings.exclude))
         card.body().addWidget(self.exclude_list)
-        remove = QPushButton("Remove selected")
+        remove = QPushButton(_("gui", "text", "remove_selected"))
         remove.clicked.connect(self._exclude_remove)
         card.body().addWidget(remove)
         return card
@@ -552,24 +560,24 @@ class QtSettings:
         self._settings.language = language
 
     def _proxy_changed(self) -> None:
-        value = self.proxy.text().strip()
         try:
-            url = URL(value)
-        except (TypeError, ValueError):
-            url = URL()
-        if value and (url.host is None or url.port is None):
+            proxy = parse_proxy(self.proxy.text().strip())
+            self._settings.proxy = proxy
+        except ValueError:
             self.proxy.setStyleSheet("border:1px solid #ff6f91;")
-            self._settings.proxy = URL()
-        else:
-            self.proxy.setStyleSheet("")
-            self._settings.proxy = url
+            return
+        self.proxy.setStyleSheet("")
 
     def _priority_mode_changed(self, label: str) -> None:
         for mode, name in self._priority_modes.items():
             if name == label:
                 self._settings.priority_mode = mode
-                self._manager.inventory.refresh()
+                self._watch_preferences_changed()
                 return
+
+    def _watch_preferences_changed(self) -> None:
+        self._manager.inventory.refresh()
+        self._twitch.change_state(State.GAMES_UPDATE)
 
     def _history_retention_changed(self, index: int) -> None:
         days = self.history_retention.itemData(index)
@@ -591,16 +599,18 @@ class QtSettings:
     def _autostart_changed(self, value: bool) -> None:
         try:
             self._autostart.set_enabled(value, tray=self.tray.isChecked())
-            self.reload_status.setText("Startup setting saved.")
+            self.reload_status.setText(_("gui", "text", "startup_saved"))
         except AutostartError as exc:
             self.autostart.blockSignals(True)
             self.autostart.setChecked(not value)
             self.autostart.blockSignals(False)
-            self.reload_status.setText(f"Startup setting failed: {exc}")
+            self.reload_status.setText(
+                _("gui", "text", "startup_failed").format(error=exc)
+            )
 
     def _reload(self) -> None:
         self._twitch.change_state(State.INVENTORY_FETCH)
-        self.reload_status.setText("Campaign reload requested.")
+        self.reload_status.setText(_("gui", "text", "reload_requested"))
 
     def set_games(self, games: set[Game]) -> None:
         self._game_names.update(game.name for game in games)
@@ -622,6 +632,7 @@ class QtSettings:
         self._settings.alter()
         self.priority_list.addItem(name)
         self._update_choices()
+        self._watch_preferences_changed()
 
     def _priority_remove(self) -> None:
         row = self.priority_list.currentRow()
@@ -631,6 +642,7 @@ class QtSettings:
         del self._settings.priority[row]
         self._settings.alter()
         self._update_choices()
+        self._watch_preferences_changed()
 
     def _priority_move(self, amount: int) -> None:
         row = self.priority_list.currentRow()
@@ -643,6 +655,7 @@ class QtSettings:
         value = self._settings.priority.pop(row)
         self._settings.priority.insert(target, value)
         self._settings.alter()
+        self._watch_preferences_changed()
 
     def _exclude_add(self) -> None:
         name = self.exclude_entry.currentText().strip()
@@ -654,6 +667,7 @@ class QtSettings:
         self.exclude_list.clear()
         self.exclude_list.addItems(items)
         self._update_choices()
+        self._watch_preferences_changed()
 
     def _exclude_remove(self) -> None:
         item = self.exclude_list.currentItem()
@@ -663,7 +677,4 @@ class QtSettings:
         self._settings.alter()
         self.exclude_list.takeItem(self.exclude_list.row(item))
         self._update_choices()
-
-    def clear_selection(self) -> None:
-        self.priority_list.clearSelection()
-        self.exclude_list.clearSelection()
+        self._watch_preferences_changed()

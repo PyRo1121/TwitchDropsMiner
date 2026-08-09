@@ -1,8 +1,6 @@
 """Qt (PySide6) launcher for TwitchDropsMiner.
 
-Equivalent to ``main.py`` but runs the Qt UI (``gui_qt``) instead of the
-Tkinter one, via the ``gui_factory`` seam on ``Twitch``. The backend is
-shared unchanged.
+Equivalent to ``main.py`` and wires the backend to the Qt presentation layer.
 
 Usage:
     python qt_main.py [--tray] [-v] [--log] [--dump]
@@ -29,12 +27,15 @@ import qasync
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from data_migration import (  # pyright: ignore[reportMissingImports]
+    DataMigrationError,
+    migrate_legacy_data,
+)
 from translate import _
 from twitch import Twitch
+from gui_qt import QtGUIManager
 from settings import Settings
 from version import __version__
-from gui_qt import QtGUIManager
-from exceptions import CaptchaRequired
 from utils import lock_file
 from constants import LOGGING_LEVELS, LOG_PATH, FILE_FORMATTER, LOCK_PATH
 
@@ -70,6 +71,7 @@ class ParsedArgs(argparse.Namespace):
     log: bool
     tray: bool
     dump: bool
+    self_test: bool
 
     @property
     def logging_level(self) -> int:
@@ -102,9 +104,26 @@ def _build_parser():
     parser.add_argument("--tray", action="store_true")
     parser.add_argument("--log", action="store_true")
     parser.add_argument("--dump", action="store_true")
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug-ws", dest="_debug_ws", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug-gql", dest="_debug_gql", action="store_true", help=argparse.SUPPRESS)
     return parser
+
+
+async def _self_test(settings: Settings) -> int:
+    """Exercise the frozen Qt startup and shutdown path without network I/O."""
+    client = Twitch(settings, QtGUIManager)
+    try:
+        client.gui.start()
+        await asyncio.sleep(0)
+        client.gui.close()
+        await client.shutdown()
+        await client.gui.stop()
+        client.gui.close_window()
+    finally:
+        if not client.gui.close_requested:
+            client.gui.close()
+    return 0
 
 
 async def _main(settings: Settings, args: ParsedArgs) -> int:
@@ -118,14 +137,18 @@ async def _main(settings: Settings, args: ParsedArgs) -> int:
     logger = logging.getLogger("TwitchDrops")
     logger.setLevel(settings.logging_level)
     if args.log:
-        handler = logging.FileHandler(LOG_PATH)
-        handler.setFormatter(FILE_FORMATTER)
-        logger.addHandler(handler)
+        try:
+            handler = logging.FileHandler(LOG_PATH)
+        except OSError as exc:
+            logger.warning("File logging unavailable: %s", type(exc).__name__)
+        else:
+            handler.setFormatter(FILE_FORMATTER)
+            logger.addHandler(handler)
     logging.getLogger("TwitchDrops.gql").setLevel(settings.debug_gql)
     logging.getLogger("TwitchDrops.websocket").setLevel(settings.debug_ws)
 
     exit_status = 0
-    client = Twitch(settings, gui_factory=QtGUIManager)
+    client = Twitch(settings, QtGUIManager)
     loop = asyncio.get_running_loop()
     for sig in (__import__("signal").SIGINT, __import__("signal").SIGTERM):
         try:
@@ -134,14 +157,10 @@ async def _main(settings: Settings, args: ParsedArgs) -> int:
             pass  # signal handlers unavailable in this loop/platform
     try:
         await client.run()
-    except CaptchaRequired:
-        exit_status = 1
-        client.prevent_close()
-        client.print(_("error", "captcha"))
     except Exception:
         exit_status = 1
         client.prevent_close()
-        client.print("Fatal error encountered:\n")
+        client.print(_("gui", "text", "fatal_error"))
         client.print(traceback.format_exc())
     finally:
         try:
@@ -149,18 +168,42 @@ async def _main(settings: Settings, args: ParsedArgs) -> int:
                 loop.remove_signal_handler(sig)
         except (NotImplementedError, RuntimeError, ValueError):
             pass
-        client.print(_("gui", "status", "exiting"))
-        await client.shutdown()
+        try:
+            client.print(_("gui", "status", "exiting"))
+        except Exception:
+            logger.exception("Unable to report shutdown status")
+        try:
+            await client.shutdown()
+        except Exception:
+            exit_status = 1
+            logger.exception("Backend shutdown failed")
 
-    if not client.gui.close_requested:
-        client.gui.tray.change_icon("error")
-        client.print(_("status", "terminated"))
-        client.gui.status.update(_("gui", "status", "terminated"))
-        client.gui.grab_attention(sound=True)
-    await client.gui.wait_until_closed()
-    client.save(force=True)
-    client.gui.stop()
-    client.gui.close_window()
+    try:
+        if not client.gui.close_requested:
+            client.gui.tray.change_icon("error")
+            client.print(_("status", "terminated"))
+            client.gui.status.update(_("gui", "status", "terminated"))
+            client.gui.grab_attention(sound=True)
+        await client.gui.wait_until_closed()
+    except Exception:
+        exit_status = 1
+        logger.exception("GUI close wait failed")
+    finally:
+        try:
+            client.save(force=True)
+        except Exception:
+            exit_status = 1
+            logger.exception("Final save failed")
+        try:
+            await client.gui.stop()
+        except Exception:
+            exit_status = 1
+            logger.exception("GUI task shutdown failed")
+        try:
+            client.gui.close_window()
+        except Exception:
+            exit_status = 1
+            logger.exception("GUI window cleanup failed")
     return exit_status
 
 
@@ -171,24 +214,35 @@ def main() -> int:
     args = parser.parse_args(namespace=ParsedArgs())
 
     try:
-        settings = Settings(args)
-    except Exception:
-        _show_error("Settings error", traceback.format_exc())
-        return 4
-
-    success, file = lock_file(LOCK_PATH)
+        success, file = lock_file(LOCK_PATH)
+    except OSError:
+        _show_error(_("gui", "text", "startup_error"), traceback.format_exc())
+        return 1
     if not success:
         file.close()
         return 3
 
     try:
+        try:
+            migrate_legacy_data()
+        except DataMigrationError:
+            _show_error(_("gui", "text", "startup_error"), traceback.format_exc())
+            return 1
+
+        try:
+            settings = Settings(args)
+        except Exception:
+            _show_error(_("gui", "text", "settings_error"), traceback.format_exc())
+            return 4
+
         app = QApplication([sys.argv[0]])
         if settings.dark_mode:
             app.setStyle("Fusion")
         loop = qasync.QEventLoop(app)
         asyncio.set_event_loop(loop)
         with loop:
-            return loop.run_until_complete(_main(settings, args))
+            coroutine = _self_test(settings) if args.self_test else _main(settings, args)
+            return loop.run_until_complete(coroutine)
     finally:
         file.close()
 

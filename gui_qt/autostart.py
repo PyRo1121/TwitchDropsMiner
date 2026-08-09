@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from constants import IS_PACKAGED, LOGGING_LEVELS, SELF_PATH
+from utils import atomic_write
 
 
 class AutostartError(RuntimeError):
@@ -43,10 +44,26 @@ class AutostartManager:
 
     @staticmethod
     def _desktop_quote(value: str) -> str:
-        if not value or any(char.isspace() or char in '\\"`' for char in value):
-            escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        # Desktop Entry Exec values treat percent sequences as field codes and
+        # reserve shell-like punctuation even though no shell is involved.
+        escaped = value.replace("%", "%%")
+        reserved = set(" \t\n\"'\\><~|&;$*?#()`")
+        if not escaped or any(char in reserved for char in escaped):
+            escaped = (
+                escaped.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("`", "\\`")
+                .replace("$", "\\$")
+            )
             return f'"{escaped}"'
-        return value
+        return escaped
+
+    @staticmethod
+    def _desktop_string(value: str) -> str:
+        """Serialize a plain Desktop Entry string, not an Exec argument."""
+        if any(character in value for character in ("\0", "\n", "\r")):
+            raise ValueError("Desktop Entry strings cannot contain control characters")
+        return value.replace("\\", "\\\\")
 
     @classmethod
     def _desktop_command_line(cls, command: list[str]) -> str:
@@ -73,10 +90,27 @@ class AutostartManager:
                 return str(SELF_PATH.resolve()) in str(value)
             if sys.platform.startswith("linux"):
                 path = self.linux_path()
-                return path.exists() and str(SELF_PATH.resolve()) in path.read_text(encoding="utf8")
+                if not path.exists():
+                    return False
+                fields = dict(
+                    line.split("=", 1)
+                    for line in path.read_text(encoding="utf8").splitlines()
+                    if "=" in line
+                )
+                executable = self._desktop_string(self._command(False)[0])
+                return fields.get("TryExec") == executable
             if sys.platform == "darwin":
                 path = self.mac_path()
-                return path.exists() and str(SELF_PATH.resolve()) in path.read_text(encoding="utf8")
+                if not path.exists():
+                    return False
+                with path.open("rb") as file:
+                    payload = plistlib.load(file)
+                arguments = payload.get("ProgramArguments")
+                return (
+                    isinstance(arguments, list)
+                    and bool(arguments)
+                    and arguments[0] == self._command(False)[0]
+                )
         except (OSError, ValueError, TypeError):
             return False
         return False
@@ -103,14 +137,17 @@ class AutostartManager:
                             "Type=Application",
                             f"Name={self.NAME}",
                             "Comment=Mine timed Drops on Twitch",
-                            f"TryExec={self._desktop_quote(command[0])}",
+                            f"TryExec={self._desktop_string(command[0])}",
                             f"Exec={self._desktop_command_line(command)}",
                             "Terminal=false",
                             "X-GNOME-Autostart-enabled=true",
                             "",
                         ]
                     )
-                    path.write_text(desktop, encoding="utf8")
+                    def write_desktop(file: Any) -> None:
+                        file.write(desktop)
+
+                    atomic_write(path, write_desktop)
                 else:
                     path.unlink(missing_ok=True)
                 return

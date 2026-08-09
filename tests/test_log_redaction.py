@@ -43,6 +43,20 @@ class LogRedactionTests(unittest.TestCase):
         self.assertEqual(redacted["json"]["password"], "<redacted>")
         self.assertEqual(redacted["json"]["authy_token"], "<redacted>")
 
+    def test_redacts_scalar_secrets_inside_data_collections(self) -> None:
+        redacted = redact_log_value(
+            {
+                "data": [
+                    ("device_code", "device-secret"),
+                    "raw-secret",
+                ]
+            }
+        )
+
+        rendered = repr(redacted)
+        self.assertNotIn("device-secret", rendered)
+        self.assertNotIn("raw-secret", rendered)
+
     def test_redacts_sensitive_data_strings(self) -> None:
         redacted = redact_log_value({"data": "device-code-secret", "json": b"raw-secret"})
 

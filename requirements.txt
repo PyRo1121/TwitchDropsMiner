@@ -1,10 +1,24 @@
-# TwitchDropsMiner backend
-aiohttp>=3.9,<4.0
-yarl>=1.9
-truststore
+# Reproducible runtime dependency lock.
+# aiohttp 3.14 switched CookieJar persistence to JSON with restricted legacy loading.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+attrs==26.1.0
+frozenlist==1.8.0
+idna==3.18
+multidict==6.7.1
+packaging==26.3
+propcache==0.5.2
+typing_extensions==4.16.0
+yarl==1.24.5
+truststore==0.10.4
 
-# Qt presentation layer; CI validates the latest release within these major bounds.
-PySide6>=6.6,<7.0
-qasync>=0.27,<1.0
-QtAwesome>=1.4,<2.0
-Pillow>=10,<13
+# Qt presentation layer.
+Pillow==12.3.0
+PySide6==6.11.1
+PySide6_Addons==6.11.1
+PySide6_Essentials==6.11.1
+qasync==0.28.0
+QtAwesome==1.4.2
+QtPy==2.4.3
+shiboken6==6.11.1

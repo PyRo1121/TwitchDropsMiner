@@ -10,22 +10,9 @@
         "no_campaign": "Nessuna campagna attiva per ottenere i premi. In attesa di una campagna attiva..."
     },
     "login": {
-        "unexpected_content": "Tipo di contenuto inaspettato restituito, di solito a causa di un reindirizzamento. Hai bisogno di fare il login per accedere a internet?",
-        "chrome": {
-            "startup": "Apertura di Chrome...",
-            "login_to_complete": "Completa la procedura di login manualmente premendo nuovamente il pulsante Login.",
-            "no_token": "Nessun token di autorizzazione trovato.",
-            "closed_window": "La finestra di Chrome è stata chiusa prima che la procedura di login potesse completarsi."
-        },
-        "error_code": "Codice di errore del login: {error_code}",
-        "incorrect_login_pass": "Nome utente o password errati.",
-        "incorrect_email_code": "Codice email errato.",
-        "incorrect_twofa_code": "Codice 2FA errato.",
-        "email_code_required": "Codice email richiesto. Controlla la tua email.",
-        "twofa_code_required": "Token 2FA richiesto."
+        "unexpected_content": "Tipo di contenuto inaspettato restituito, di solito a causa di un reindirizzamento. Hai bisogno di fare il login per accedere a internet?"
     },
     "error": {
-        "captcha": "Il tuo tentativo di login è stato negato da CAPTCHA.\nRiprova tra 12+ ore.",
         "site_down": "Twitch è irraggiungibile, riprovo tra {seconds} secondi...",
         "no_connection": "Impossibile connettersi a Twitch, riprovo tra {seconds} secondi... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Dettagli Login",
-            "labels": "Stato:\nID Utente:",
             "logged_in": "Loggato",
             "logged_out": "Non loggato",
             "logging_in": "Loggando...",
-            "required": "Login richiesto",
-            "request": "Per favore, effettua il login per continuare.",
-            "username": "Nome utente",
-            "password": "Password",
-            "twofa_code": "Codice 2FA (opzionale)",
             "button": "Login"
         },
         "websocket": {
@@ -90,9 +71,9 @@
         "channels": {
             "name": "Canali",
             "switch": "Cambia",
-            "online": "ONLINE  \u2714",
-            "pending": "OFFLINE \u23f3",
-            "offline": "OFFLINE \u274c",
+            "online": "ONLINE  ✔",
+            "pending": "OFFLINE ⏳",
+            "offline": "OFFLINE ❌",
             "headings": {
                 "channel": "Canale",
                 "status": "Stato",
@@ -112,13 +93,13 @@
                 "refresh": "Aggiorna"
             },
             "status": {
-                "linked": "Collegato \u2714",
-                "not_linked": "Non collegato \u274c",
-                "active": "Attivo \u2714",
-                "upcoming": "In arrivo \u23f3",
-                "expired": "Scaduto \u274c",
-                "claimed": "Riscattato \u2714",
-                "ready_to_claim": "Pronto per essere riscattato \u23f3"
+                "linked": "Collegato ✔",
+                "not_linked": "Non collegato ❌",
+                "active": "Attivo ✔",
+                "upcoming": "In arrivo ⏳",
+                "expired": "Scaduto ❌",
+                "claimed": "Riscattato ✔",
+                "ready_to_claim": "Pronto per essere riscattato ⏳"
             },
             "starts": "Inizia: {time}",
             "ends": "Finisce: {time}",
@@ -135,14 +116,16 @@
                 "tray": "Avvio automatico nella barra delle applicazioni: ",
                 "tray_notifications": "Notifiche: ",
                 "dark_mode": "Modalità scura: ",
-                "priority_only": "Solo priorità: ",
                 "proxy": "Proxy (richiede il riavvio):"
             },
             "game_name": "Nome del gioco",
             "priority": "Priorità",
             "exclude": "Escludi",
             "reload": "Ricarica",
-            "reload_text": "La maggior parte delle modifiche richiede una ricarica con il botto nqui di fianco per avere un effetto immediato: "
+            "reload_text": "La maggior parte delle modifiche richiede una ricarica con il botto nqui di fianco per avere un effetto immediato: ",
+            "priority_modes": {
+                "priority_only": "Solo priorità: "
+            }
         },
         "help": {
             "links": {

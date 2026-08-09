@@ -15,12 +15,14 @@ class NotificationCenterTests(unittest.TestCase):
         first = self.event(
             "claim.unconfirmed",
             "2026-01-01T00:00:00.000Z",
+            drop_id="drop-1",
             game="Game",
             reward="Reward",
         )
         second = self.event(
             "claim.unconfirmed",
             "2026-01-01T00:01:00.000Z",
+            drop_id="drop-1",
             game="Game",
             reward="Reward",
         )
@@ -29,8 +31,27 @@ class NotificationCenterTests(unittest.TestCase):
         alert = center.handle(second)
         self.assertIsNotNone(alert)
         assert alert is not None
-        self.assertEqual(alert.key, "claim.unconfirmed:Game:Reward")
+        self.assertEqual(alert.key, "claim.unconfirmed:drop-1")
         self.assertEqual(len(center.active), 1)
+
+    def test_identical_display_names_keep_distinct_claim_keys(self) -> None:
+        center = NotificationCenter()
+        for drop_id in ("drop-1", "drop-2"):
+            for minute in range(2):
+                center.handle(
+                    self.event(
+                        "claim.unconfirmed",
+                        f"2026-01-01T00:0{minute}:00.000Z",
+                        drop_id=drop_id,
+                        game="Game",
+                        reward="Reward",
+                    )
+                )
+
+        self.assertEqual(
+            {alert.key for alert in center.active},
+            {"claim.unconfirmed:drop-1", "claim.unconfirmed:drop-2"},
+        )
 
     def test_cooldown_prevents_repeated_inventory_alerts(self) -> None:
         center = NotificationCenter()
@@ -52,9 +73,27 @@ class NotificationCenterTests(unittest.TestCase):
 
     def test_claim_success_resolves_matching_claim_alert(self) -> None:
         center = NotificationCenter()
-        center.handle(self.event("claim.unconfirmed", "2026-01-01T00:00:00.000Z", game="Game", reward="Reward"))
-        center.handle(self.event("claim.unconfirmed", "2026-01-01T00:01:00.000Z", game="Game", reward="Reward"))
-        center.handle(self.event("claim.succeeded", "2026-01-01T00:02:00.000Z", game="Game", reward="Reward"))
+        center.handle(
+            self.event(
+                "claim.unconfirmed",
+                "2026-01-01T00:00:00.000Z",
+                drop_id="drop-1",
+            )
+        )
+        center.handle(
+            self.event(
+                "claim.unconfirmed",
+                "2026-01-01T00:01:00.000Z",
+                drop_id="drop-1",
+            )
+        )
+        center.handle(
+            self.event(
+                "claim.succeeded",
+                "2026-01-01T00:02:00.000Z",
+                drop_id="drop-1",
+            )
+        )
 
         self.assertEqual(center.active, ())
 

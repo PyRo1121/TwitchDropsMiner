@@ -1,17 +1,20 @@
 """Bounded, structured history for Twitch Drops Miner process sessions."""
 from __future__ import annotations
 
+import io
 import json
 import logging
+import stat
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from constants import HISTORY_PATH
-from utils import atomic_write
+from utils import atomic_write, quarantine_file
 
 logger = logging.getLogger("TwitchDrops.history")
 
@@ -58,14 +61,22 @@ class HistoryEvent:
             or not isinstance(severity, str)
             or severity not in _VALID_SEVERITIES
             or not isinstance(data, Mapping)
+            or _parse_timestamp(at) is None
         ):
             return None
+        safe_severity: Severity
+        if severity == "info":
+            safe_severity = "info"
+        elif severity == "warning":
+            safe_severity = "warning"
+        else:
+            safe_severity = "error"
         safe_data: dict[str, Scalar] = {}
         for key, item in data.items():
             if not isinstance(key, str) or not _is_scalar(item):
                 return None
-            safe_data[key] = item
-        return cls(at, kind, severity, safe_data)  # type: ignore[arg-type]
+            safe_data[key] = cast(Scalar, item)
+        return cls(at, kind, safe_severity, safe_data)
 
 
 @dataclass
@@ -107,8 +118,19 @@ class SessionRecord:
             or status not in _VALID_STATUSES
             or not isinstance(summary, Mapping)
             or not isinstance(events, list)
+            or _parse_timestamp(started_at) is None
+            or (ended_at is not None and _parse_timestamp(ended_at) is None)
         ):
             return None
+        safe_status: SessionStatus
+        if status == "running":
+            safe_status = "running"
+        elif status == "stopped":
+            safe_status = "stopped"
+        elif status == "failed":
+            safe_status = "failed"
+        else:
+            safe_status = "interrupted"
         safe_summary: dict[str, int] = {}
         for key, item in summary.items():
             if not isinstance(key, str) or not isinstance(item, int) or isinstance(item, bool):
@@ -119,7 +141,7 @@ class SessionRecord:
             id=session_id,
             started_at=started_at,
             ended_at=ended_at,
-            status=status,  # type: ignore[arg-type]
+            status=safe_status,
             summary=safe_summary,
             events=safe_events,
         )
@@ -132,7 +154,7 @@ def _is_scalar(value: object) -> bool:
 def _parse_timestamp(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -154,6 +176,7 @@ class SessionHistory:
     VERSION = 1
     DEFAULT_MAX_SESSIONS = 100
     DEFAULT_MAX_EVENTS_PER_SESSION = 200
+    MAX_HISTORY_BYTES = 16 * 1024 * 1024
 
     def __init__(
         self,
@@ -172,6 +195,7 @@ class SessionHistory:
         self.max_events_per_session = max_events_per_session
         self.retention_days = retention_days
         self._loaded = False
+        self._writable = True
         self._sessions: list[SessionRecord] = []
         self._current: SessionRecord | None = None
 
@@ -207,7 +231,6 @@ class SessionHistory:
                 "inventory_syncs": 0,
                 "claims_succeeded": 0,
                 "claims_unconfirmed": 0,
-                "watch_seconds": 0,
             },
         )
         self._sessions.insert(0, session)
@@ -228,6 +251,8 @@ class SessionHistory:
             raise RuntimeError("A session must be started before recording history")
         if not kind:
             raise ValueError("History event kind cannot be empty")
+        if severity not in _VALID_SEVERITIES:
+            raise ValueError(f"Invalid history severity: {severity!r}")
         event = HistoryEvent(
             at=_timestamp(at),
             kind=kind,
@@ -242,14 +267,6 @@ class SessionHistory:
         self._save()
         return event
 
-    def increment(self, key: str, amount: int = 1) -> None:
-        if self._current is None:
-            raise RuntimeError("A session must be started before updating history")
-        if not key or not isinstance(amount, int) or isinstance(amount, bool):
-            raise ValueError("History summary updates must use a key and integer amount")
-        self._current.summary[key] = self._current.summary.get(key, 0) + amount
-        self._save()
-
     def set_retention_days(self, days: int) -> None:
         if not isinstance(days, int) or isinstance(days, bool) or days < 1:
             raise ValueError("History retention must be positive")
@@ -263,7 +280,9 @@ class SessionHistory:
         self._sessions = [
             session for session in self._sessions if current_id is not None and session.id == current_id
         ]
-        self._save()
+        if current_id is None:
+            self._current = None
+        self._save(merge=False)
 
     def finish(
         self,
@@ -272,6 +291,8 @@ class SessionHistory:
         reason: str | None = None,
         at: datetime | None = None,
     ) -> SessionRecord | None:
+        if status not in {"stopped", "failed"}:
+            raise ValueError(f"Invalid history status: {status!r}")
         session = self._current
         if session is None:
             return None
@@ -292,6 +313,9 @@ class SessionHistory:
 
     def _trim(self, *, now: datetime | None = None) -> None:
         del self._sessions[self.max_sessions :]
+        for session in self._sessions:
+            if len(session.events) > self.max_events_per_session:
+                del session.events[: -self.max_events_per_session]
         if self.retention_days is None:
             return
         reference = now or datetime.now(timezone.utc)
@@ -310,41 +334,145 @@ class SessionHistory:
         if self._loaded:
             return
         self._loaded = True
-        candidates = (self.path.with_name(f"{self.path.name}.new"), self.path)
-        for candidate in candidates:
-            if not candidate.exists():
-                continue
-            try:
-                with candidate.open("r", encoding="utf8") as file:
-                    value = json.load(file)
-                if not isinstance(value, Mapping) or value.get("version") != self.VERSION:
-                    raise ValueError("Unsupported history format")
-                raw_sessions = value.get("sessions")
-                if not isinstance(raw_sessions, list):
-                    raise ValueError("History sessions must be a list")
-                self._sessions = [
-                    session
-                    for item in raw_sessions
-                    if (session := SessionRecord.from_json(item)) is not None
-                ]
-                self._trim()
+        if not self.path.exists():
+            return
+        try:
+            info = self.path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("History path must be a regular file")
+            if info.st_size > self.MAX_HISTORY_BYTES:
+                raise ValueError("History file exceeds the input limit")
+            with self.path.open("r", encoding="utf8") as file:
+                value = json.load(file)
+            if not isinstance(value, Mapping):
+                raise ValueError("History root must be an object")
+            if value.get("version") != self.VERSION:
+                self._writable = False
+                logger.warning(
+                    "Session history uses unsupported version %r; preserving it read-only",
+                    value.get("version"),
+                )
                 return
-            except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                logger.warning("Unable to load session history from %s: %s", candidate, type(exc).__name__)
-        self._sessions = []
+            raw_sessions = value.get("sessions")
+            if not isinstance(raw_sessions, list):
+                raise ValueError("History sessions must be a list")
+            self._sessions = [
+                session
+                for item in raw_sessions
+                if (session := SessionRecord.from_json(item)) is not None
+            ]
+            self._trim()
+        except (OSError, UnicodeError, ValueError, TypeError, OverflowError) as exc:
+            try:
+                quarantined = quarantine_file(self.path, reason="invalid")
+            except OSError as quarantine_exc:
+                self._writable = False
+                logger.warning(
+                    "Unable to preserve invalid session history at %s: %s",
+                    self.path,
+                    type(quarantine_exc).__name__,
+                )
+            else:
+                logger.warning(
+                    "Invalid session history was quarantined at %s (%s)",
+                    quarantined,
+                    type(exc).__name__,
+                )
+            self._sessions = []
 
-    def _save(self) -> None:
+    @staticmethod
+    def _event_identity(event: HistoryEvent) -> tuple[object, ...]:
+        return (
+            event.at,
+            event.kind,
+            event.severity,
+            tuple(sorted(event.data.items())),
+        )
+
+    def _merge_external_sessions(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with self.path.open("r", encoding="utf8") as file:
+                value = json.load(file)
+            if not isinstance(value, Mapping):
+                return
+            if value.get("version") != self.VERSION:
+                self._writable = False
+                logger.warning(
+                    "Session history changed to unsupported version %r; "
+                    "preserving it read-only",
+                    value.get("version"),
+                )
+                return
+            raw_sessions = value.get("sessions")
+            if not isinstance(raw_sessions, list):
+                return
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return
+
+        local_by_id = {session.id: session for session in self._sessions}
+        for item in raw_sessions:
+            external = SessionRecord.from_json(item)
+            if external is None:
+                continue
+            local = local_by_id.get(external.id)
+            if local is None:
+                self._sessions.append(external)
+                local_by_id[external.id] = external
+                continue
+
+            external_counts = Counter(
+                self._event_identity(event) for event in external.events
+            )
+            local_counts = Counter(
+                self._event_identity(event) for event in local.events
+            )
+            representatives = {
+                self._event_identity(event): event
+                for event in (*external.events, *local.events)
+            }
+            merged_events: list[HistoryEvent] = []
+            for identity, count in (external_counts | local_counts).items():
+                merged_events.extend([representatives[identity]] * count)
+            local.events = sorted(merged_events, key=lambda event: event.at)[
+                -self.max_events_per_session :
+            ]
+            if external.ended_at is not None and local.ended_at is None:
+                local.ended_at = external.ended_at
+                local.status = external.status
+            for event_kind, summary_key in _SUMMARY_EVENTS.items():
+                retained_count = sum(
+                    event.kind == event_kind for event in local.events
+                )
+                local.summary[summary_key] = max(
+                    local.summary.get(summary_key, 0),
+                    external.summary.get(summary_key, 0),
+                    retained_count,
+                )
+            for key, value in external.summary.items():
+                if key not in _SUMMARY_EVENTS.values():
+                    local.summary[key] = max(local.summary.get(key, 0), value)
+        self._sessions.sort(key=lambda session: session.started_at, reverse=True)
+        self._trim()
+
+    def _save(self, *, merge: bool = True) -> None:
+        if not self._writable:
+            return
+        if merge:
+            self._merge_external_sessions()
+        if not self._writable:
+            return
         payload = {
             "version": self.VERSION,
             "sessions": [session.to_json() for session in self._sessions],
         }
 
-        def writer(path: Path) -> None:
-            with path.open("w", encoding="utf8") as file:
-                json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True)
-                file.write("\n")
+        def writer(file: io.TextIOWrapper) -> None:
+            json.dump(payload, file, ensure_ascii=False, indent=2, sort_keys=True)
+            file.write("\n")
 
         try:
-            atomic_write(self.path, writer, mode=0o600)
+            atomic_write(self.path, writer)
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("Unable to persist session history: %s", type(exc).__name__)

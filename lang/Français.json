@@ -10,22 +10,9 @@
         "no_campaign": "Aucune campagne active pour laquelle miner des drops. En attente d'une campagne active..."
     },
     "login": {
-        "chrome": {
-            "startup": "Ouverture de Chrome",
-            "login_to_complete": "Terminez la procédure de connexion manuellement en appuyant à nouveau sur le bouton Connexion.",
-            "no_token": "Aucun jeton d'autorisation (authorization token) n'a pu être trouvé.",
-            "closed_window": "La fenêtre Chrome a été fermée avant la fin de la procédure de connexion."
-        },
-        "error_code": "Code d'erreur de connexion : {error_code}",
-        "unexpected_content": "Type de contenu inattendu renvoyé, généralement dû à une redirection. Avez-vous besoin de vous connecter pour accéder à Internet ?",
-        "incorrect_login_pass": "Le nom d'utilisateur ou le mot de passe saisi est incorrect.",
-        "incorrect_email_code": "Le code de vérification de l'e-mail est incorrect.",
-        "incorrect_twofa_code": "Le code 2FA est incorrect.",
-        "email_code_required": "Code de vérification par e-mail requis. Merci de consulter vos emails.",
-        "twofa_code_required": "Code 2FA requis."
+        "unexpected_content": "Type de contenu inattendu renvoyé, généralement dû à une redirection. Avez-vous besoin de vous connecter pour accéder à Internet ?"
     },
     "error": {
-        "captcha": "La connexion a été rejetée par CAPTCHA. Veuillez réessayer dans env. 12 heures.",
         "site_down": "Twitch n'est pas disponible. Veuillez réessayer dans {seconds} secondes...",
         "no_connection": "Impossible de se connecter à Twitch. Veuillez réessayer dans {seconds} secondes... ({url})"
     },
@@ -57,15 +44,9 @@
         },
         "login": {
             "name": "Formulaire de connexion",
-            "labels": "Statut :\nIdentifiant utilisateur :",
             "logged_in": "Connecté",
             "logged_out": "Déconnecté",
             "logging_in": "Connexion en cours...",
-            "required": "Connexion requise",
-            "request": "Veuillez vous connecter pour continuer.",
-            "username": "Nom d'utilisateur",
-            "password": "Mot de passe",
-            "twofa_code": "Code 2FA (facultatif)",
             "button": "Se connecter"
         },
         "websocket": {

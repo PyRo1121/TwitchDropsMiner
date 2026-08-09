@@ -8,8 +8,18 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from constants import State
+from inventory_service import InventoryService
+from watch_service import WatchService
 from twitch import Twitch
 from utils import AwaitableValue
+
+
+def _service(miner: Twitch) -> Any:
+    service = getattr(miner, "watch_service", None)
+    if service is None:
+        service = WatchService(miner)
+        miner.watch_service = service
+    return cast(Any, service)
 
 
 class _Game:
@@ -62,8 +72,33 @@ class _Channel:
         self.acl_based = False
         self.name = f"channel-{channel_id}"
 
+    async def send_watch(self) -> bool:
+        return True
+
 
 class DualWatchSelectionTests(unittest.TestCase):
+    def test_watch_reset_cancels_cooldown_callbacks(self) -> None:
+        async def exercise() -> None:
+            miner = cast(Any, Twitch.__new__(Twitch))
+            miner._watch_channel_cooldowns = {}
+            miner._watch_claim_cooldowns = {"drop": 1.0}
+            miner._watch_resync_cooldowns = {"refresh": 1.0}
+            miner._watch_completed_drop_ids = {"drop"}
+            service = WatchService(miner)
+
+            service._block_watch_channel(1, seconds=60)
+            handle = service._cooldown_handles[1]
+            service.reset()
+
+            self.assertTrue(handle.cancelled())
+            self.assertEqual(service._cooldown_handles, {})
+            self.assertEqual(miner._watch_channel_cooldowns, {})
+            self.assertEqual(miner._watch_claim_cooldowns, {})
+            self.assertEqual(miner._watch_resync_cooldowns, {})
+            self.assertEqual(miner._watch_completed_drop_ids, set())
+
+        asyncio.run(exercise())
+
     def test_current_drop_reconciliation_adopts_twitch_assignment(self) -> None:
         async def exercise() -> None:
             channel = _Channel(2, _Game("Game B"), 90)
@@ -75,7 +110,10 @@ class DualWatchSelectionTests(unittest.TestCase):
                 is_claimed=False,
                 campaign=SimpleNamespace(game=_Game("Game B")),
                 can_earn=lambda _channel: True,
-                update_minutes=lambda value: setattr(drop, "current_minutes", value),
+                update_minutes=lambda value, required: (
+                    setattr(drop, "current_minutes", value),
+                    setattr(drop, "required_minutes", required),
+                ),
                 display=lambda: None,
             )
             miner = cast(Any, Twitch.__new__(Twitch))
@@ -97,13 +135,14 @@ class DualWatchSelectionTests(unittest.TestCase):
                                 "channel": {"id": "2"},
                                 "dropID": "drop-b",
                                 "currentMinutesWatched": 3,
+                                "requiredMinutesWatched": 10,
                             }
                         }
                     }
                 }
 
-            miner.gql_request = gql_request
-            await miner._reconcile_watch_progress(channel)
+            miner.transport = SimpleNamespace(gql_request=gql_request)
+            await _service(miner)._reconcile_watch_progress(channel)
 
             self.assertEqual(miner._watch_drop_ids[2], "drop-b")
             self.assertEqual(drop.current_minutes, 3)
@@ -130,7 +169,12 @@ class DualWatchSelectionTests(unittest.TestCase):
                 required_minutes=10,
                 is_claimed=False,
                 campaign=SimpleNamespace(game=_Game("Game B")),
+                current_minutes=0,
                 can_earn=lambda _channel: True,
+                update_minutes=lambda value, required: (
+                    setattr(drop, "current_minutes", value),
+                    setattr(drop, "required_minutes", required),
+                ),
                 generate_claim=generate_claim,
                 claim=claim,
             )
@@ -159,18 +203,80 @@ class DualWatchSelectionTests(unittest.TestCase):
                     }
                 }
 
-            miner.gql_request = gql_request
-            await miner._reconcile_watch_progress(channel)
+            miner.transport = SimpleNamespace(gql_request=gql_request)
+            await _service(miner)._reconcile_watch_progress(channel)
 
             self.assertEqual(calls, ["generate", "claim"])
             self.assertIn("drop-b", miner._watch_completed_drop_ids)
             self.assertEqual(states, [State.INVENTORY_FETCH])
             self.assertGreater(miner._watch_channel_cooldowns[2], 0)
 
-            await miner._reconcile_watch_progress(channel)
+            await _service(miner)._reconcile_watch_progress(channel)
 
             self.assertEqual(calls, ["generate", "claim"])
             self.assertEqual(states, [State.INVENTORY_FETCH, State.CHANNEL_SWITCH])
+
+        asyncio.run(exercise())
+
+    def test_authoritative_requirement_prevents_premature_claim(self) -> None:
+        async def exercise() -> None:
+            channel = _Channel(2, _Game("Game B"), 90)
+            claims = 0
+            drop = SimpleNamespace(
+                id="drop-b",
+                name="Drop B",
+                required_minutes=5,
+                current_minutes=0,
+                is_claimed=False,
+                campaign=SimpleNamespace(game=_Game("Game B")),
+                can_earn=lambda _channel: True,
+                display=lambda: None,
+            )
+
+            def update_minutes(value: int, required: int) -> None:
+                drop.current_minutes = value
+                drop.required_minutes = required
+
+            async def generate_claim() -> None:
+                nonlocal claims
+                claims += 1
+
+            drop.update_minutes = update_minutes
+            drop.generate_claim = generate_claim
+            drop.claim = generate_claim
+
+            miner = cast(Any, Twitch.__new__(Twitch))
+            miner._watch_drop_ids = {2: "drop-b"}
+            miner._watching_channels = OrderedDict(((2, channel),))
+            miner._watch_restart_events = {2: asyncio.Event()}
+            miner._watch_claim_cooldowns = {}
+            miner._watch_completed_drop_ids = set()
+            miner._watch_channel_cooldowns = {}
+            miner._watch_resync_cooldowns = {}
+            miner._drops = {"drop-b": drop}
+            miner.watching_channel = AwaitableValue()
+            miner.watching_channel.set(channel)
+
+            async def gql_request(_operation: object) -> dict[str, object]:
+                return {
+                    "data": {
+                        "currentUser": {
+                            "dropCurrentSession": {
+                                "channel": {"id": "2"},
+                                "dropID": "drop-b",
+                                "currentMinutesWatched": 5,
+                                "requiredMinutesWatched": 10,
+                            }
+                        }
+                    }
+                }
+
+            miner.transport = SimpleNamespace(gql_request=gql_request)
+            await _service(miner)._reconcile_watch_progress(channel)
+
+            self.assertEqual(claims, 0)
+            self.assertEqual(drop.current_minutes, 5)
+            self.assertEqual(drop.required_minutes, 10)
 
         asyncio.run(exercise())
 
@@ -199,13 +305,14 @@ class DualWatchSelectionTests(unittest.TestCase):
                                 "channel": {"id": "999"},
                                 "dropID": "stale-drop",
                                 "currentMinutesWatched": 10,
+                                "requiredMinutesWatched": 10,
                             }
                         }
                     }
                 }
 
-            miner.gql_request = gql_request
-            await miner._reconcile_watch_progress(channel)
+            miner.transport = SimpleNamespace(gql_request=gql_request)
+            await _service(miner)._reconcile_watch_progress(channel)
 
             self.assertEqual(miner._watch_drop_ids, {2: "drop-a"})
             self.assertEqual(miner._watch_channel_cooldowns, {})
@@ -227,7 +334,10 @@ class DualWatchSelectionTests(unittest.TestCase):
                 is_claimed=False,
                 campaign=SimpleNamespace(game=game_b),
                 can_earn=lambda _channel: True,
-                update_minutes=lambda value: setattr(drop_b, "current_minutes", value),
+                update_minutes=lambda value, required: (
+                    setattr(drop_b, "current_minutes", value),
+                    setattr(drop_b, "required_minutes", required),
+                ),
                 display=lambda: None,
             )
             miner = cast(Any, Twitch.__new__(Twitch))
@@ -252,13 +362,16 @@ class DualWatchSelectionTests(unittest.TestCase):
                                 "channel": {"id": "999"},
                                 "dropID": "drop-b",
                                 "currentMinutesWatched": 4,
+                                "requiredMinutesWatched": 10,
                             }
                         }
                     }
                 }
 
-            miner.gql_request = gql_request
-            await miner._reconcile_watch_progress(channel_a)
+            miner.transport = SimpleNamespace(
+                gql_request=gql_request,
+            )
+            await _service(miner)._reconcile_watch_progress(channel_a)
 
             self.assertEqual(drop_b.current_minutes, 4)
             self.assertEqual(miner._watch_drop_ids[2], "drop-b")
@@ -280,8 +393,9 @@ class DualWatchSelectionTests(unittest.TestCase):
                 def can_earn(self, candidate: _Channel) -> bool:
                     return candidate is channel
 
-                def update_minutes(self, value: int) -> None:
+                def update_minutes(self, value: int, required: int) -> None:
                     self.progress.append(value)
+                    self.required = required
 
                 def display(self) -> None:
                     return None
@@ -289,6 +403,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             drop = Drop()
             miner = cast(Any, Twitch.__new__(Twitch))
             miner._drops = {drop.id: drop}
+            miner._inventory_generation = 1
             miner._watching_channels = OrderedDict(((1, channel),))
             miner._watch_drop_ids = {1: "drop-a"}
             miner._watch_restart_events = {1: asyncio.Event()}
@@ -298,6 +413,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner.watching_channel.set(channel)
             states: list[object] = []
             miner.change_state = states.append
+            _service(miner)
 
             await miner.process_drops(
                 42,
@@ -326,8 +442,9 @@ class DualWatchSelectionTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.progress: list[int] = []
 
-            def update_minutes(self, value: int) -> None:
+            def update_minutes(self, value: int, required: int) -> None:
                 self.progress.append(value)
+                self.required = required
 
             def display(self) -> None:
                 return None
@@ -338,10 +455,12 @@ class DualWatchSelectionTests(unittest.TestCase):
             drop = Drop()
             miner = cast(Any, Twitch.__new__(Twitch))
             miner._drops = {drop.id: drop}
+            miner._inventory_generation = 1
             miner._watching_channels = OrderedDict(((1, channel_a), (2, channel_b)))
             miner._watch_drop_ids = {1: "drop-a", 2: "drop-b"}
             miner.watching_channel = AwaitableValue()
             miner.watching_channel.set(channel_a)
+            _service(miner)
 
             await miner.process_drops(
                 42,
@@ -389,14 +508,14 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner._watch_restart_events = {}
             miner._watch_generation = 0
 
-            assignments = miner._select_watch_assignments()
-            miner._apply_watch_assignments(assignments, update_status=False)
+            assignments = _service(miner)._select_watch_assignments()
+            _service(miner)._apply_watch_assignments(assignments, update_status=False)
             await asyncio.sleep(0)
             self.assertEqual(set(miner._watch_tasks), {1, 2})
             self.assertEqual(list(miner._watching_channels), [1, 2])
             self.assertEqual(miner._watch_drop_ids, {1: "drop-a", 2: "drop-b"})
             tasks = tuple(miner._watch_tasks.values())
-            miner.stop_watching()
+            _service(miner).stop_watching()
             await asyncio.gather(*tasks, return_exceptions=True)
 
         asyncio.run(exercise())
@@ -432,25 +551,25 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner._watch_restart_events = {}
             miner._watch_generation = 0
             miner._dual_watch_enabled = True
-            assignments = miner._select_watch_assignments()
+            assignments = _service(miner)._select_watch_assignments()
             self.assertEqual(len(assignments), 2)
 
             miner._dual_watch_enabled = False
-            miner._apply_watch_assignments(assignments, update_status=False)
+            _service(miner)._apply_watch_assignments(assignments, update_status=False)
             await asyncio.sleep(0)
 
             self.assertEqual(set(miner._watch_tasks), {1})
             self.assertEqual(list(miner._watching_channels), [1])
             self.assertEqual(miner._watch_drop_ids, {1: "drop-a"})
             tasks = tuple(miner._watch_tasks.values())
-            miner.stop_watching()
+            _service(miner).stop_watching()
             await asyncio.gather(*tasks, return_exceptions=True)
 
         asyncio.run(exercise())
 
     def test_inventory_detail_merge_preserves_progress_and_adds_rewards(self) -> None:
         miner = cast(Any, Twitch.__new__(Twitch))
-        merged = miner._merge_data(
+        merged = InventoryService._merge_data(
             {
                 "id": "campaign",
                 "timeBasedDrops": [
@@ -488,7 +607,7 @@ class DualWatchSelectionTests(unittest.TestCase):
         miner.inventory = [shared_campaign, campaign_a, campaign_b]
         miner.wanted_games = [game_a, game_b]
 
-        assignments = miner._select_watch_assignments(preferred=first)
+        assignments = _service(miner)._select_watch_assignments(preferred=first)
 
         self.assertEqual([channel.id for channel, _drop in assignments], [1, 2])
         self.assertEqual([drop.id for _channel, drop in assignments], ["shared-drop", "drop-b"])
@@ -503,7 +622,7 @@ class DualWatchSelectionTests(unittest.TestCase):
         miner._watching_channels = OrderedDict((channel.id, channel) for channel in channels)
         miner._dual_watch_enabled = True
 
-        miner._disable_dual_watch_if_secondary(channels[1])
+        _service(miner)._disable_dual_watch_if_secondary(channels[1])
 
         self.assertFalse(miner._dual_watch_enabled)
 
@@ -522,8 +641,8 @@ class DualWatchSelectionTests(unittest.TestCase):
         miner.inventory = [campaign_a, campaign_b, campaign_a_same_game]
         miner.wanted_games = [game_a, game_b]
 
-        assignments = miner._select_watch_assignments(preferred=first)
-        selected = miner._select_watch_channels(preferred=first)
+        assignments = _service(miner)._select_watch_assignments(preferred=first)
+        selected = _service(miner)._select_watch_channels(preferred=first)
 
         self.assertEqual([channel.id for channel in selected], [1, 2])
         self.assertEqual({channel.game for channel in selected}, {game_a, game_b})

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import os
 import sys
-import random
+import secrets
 import logging
 from pathlib import Path
 from copy import deepcopy
 from enum import Enum, auto
 from datetime import timedelta
-from typing import Any, Dict, Iterator, Literal, NewType, TYPE_CHECKING
+from typing import Any, Dict, Literal, Mapping, NewType, TYPE_CHECKING
 
 from yarl import URL
 
@@ -66,6 +66,20 @@ def _merge_vars(base_vars: JsonType, vars: JsonType) -> None:
             raise RuntimeError(f"Unspecified variable: '{k}'")
 
 
+def _user_data_dir(platform: str, environ: Mapping[str, str], home: Path) -> Path:
+    """Return the platform-standard per-user directory for mutable app data."""
+    if platform == "win32":
+        root_value = environ.get("LOCALAPPDATA") or environ.get("APPDATA")
+        root = Path(root_value) if root_value else home / "AppData" / "Local"
+    elif platform == "darwin":
+        root = home / "Library" / "Application Support"
+    else:
+        root_value = environ.get("XDG_DATA_HOME")
+        candidate = Path(root_value).expanduser() if root_value else None
+        root = candidate if candidate is not None and candidate.is_absolute() else home / ".local" / "share"
+    return root / "TwitchDropsMiner"
+
+
 # Base Paths
 _SOURCE_DIR = Path(__file__).resolve().parent
 if IS_APPIMAGE:
@@ -80,23 +94,24 @@ else:
     candidate = Path(sys.argv[0]).resolve()
     SELF_PATH = candidate if (candidate.parent / "lang").is_dir() else _SOURCE_DIR / "main.py"
 WORKING_DIR = SELF_PATH.parent
+DATA_DIR = _user_data_dir(sys.platform, os.environ, Path.home())
 # Translations path
 # NOTE: These don't have to be available to the end-user, so the path points to the internal dir
 LANG_PATH = _resource_path("lang")
-# Other Paths
-LOG_PATH = Path(WORKING_DIR, "log.txt")
-DUMP_PATH = Path(WORKING_DIR, "dump.dat")
-LOCK_PATH = Path(WORKING_DIR, "lock.file")
-CACHE_PATH = Path(WORKING_DIR, "cache")
-CACHE_DB = Path(CACHE_PATH, "mapping.json")
-COOKIES_PATH = Path(WORKING_DIR, "cookies.jar")
-OAUTH_TOKEN_PATH = Path(WORKING_DIR, "oauth.json")
-SETTINGS_PATH = Path(WORKING_DIR, "settings.json")
-HISTORY_PATH = Path(WORKING_DIR, "session_history.json")
+# Mutable per-user data paths
+LOG_PATH = DATA_DIR / "log.txt"
+DUMP_PATH = DATA_DIR / "dump.dat"
+LOCK_PATH = DATA_DIR / "lock.file"
+CACHE_PATH = DATA_DIR / "cache"
+CACHE_DB = CACHE_PATH / "mapping.json"
+COOKIES_PATH = DATA_DIR / "cookies.jar"
+OAUTH_TOKEN_PATH = DATA_DIR / "oauth.json"
+SETTINGS_PATH = DATA_DIR / "settings.json"
+HISTORY_PATH = DATA_DIR / "session_history.json"
 # Typing
 JsonType = Dict[str, Any]
 URLType = NewType("URLType", str)
-GQLOperation: TypeAlias = "GQLQuery | GQLPersistedQuery"
+GQLOperation: TypeAlias = "GQLPersistedQuery"
 TopicProcess: TypeAlias = "abc.Callable[[int, JsonType], Any]"
 # Values
 MAX_INT = sys.maxsize
@@ -108,16 +123,26 @@ MAX_TOPICS = (MAX_WEBSOCKETS * WS_TOPICS_LIMIT) - BASE_TOPICS
 MAX_CHANNELS = MAX_TOPICS // TOPICS_PER_CHANNEL
 MAX_WATCH_CHANNELS = 2
 GQL_BATCH_SIZE = 20
+GQL_RETRY_ATTEMPTS = 6
+INVENTORY_RETRY_BASE = 15.0
+INVENTORY_RETRY_MAX = 5 * 60.0
+HTTP_RETRY_MAX_DELAY = 15 * 60.0
 WS_TOPIC_BATCH_SIZE = 20
+WS_TOPIC_TASK_LIMIT = 32
+WS_TOPIC_PENDING_LIMIT = 128
 # Misc
 DEFAULT_LANG = "English"
+PROJECT_URL = "https://github.com/PyRo1121/TwitchDropsMiner"
 # Intervals and Delays
 PING_INTERVAL = timedelta(minutes=3)
 PING_TIMEOUT = timedelta(seconds=10)
 WS_STOP_TIMEOUT = 2
 WS_BACKOFF_MAX = 3 * 60
+WS_STABLE_SECONDS = 30.0
 WS_RECV_WINDOW = 0.5
+WS_RECV_BATCH_LIMIT = 100
 ONLINE_DELAY = timedelta(seconds=120)
+ONLINE_RETRY_DELAYS = (5.0, 15.0)
 WATCH_INTERVAL = timedelta(seconds=59)
 # Logging
 LOGGING_LEVELS = {
@@ -141,12 +166,10 @@ class ClientInfo:
         self.CLIENT_ID: str = client_id
         self.USER_AGENT: str
         if isinstance(user_agents, list):
-            self.USER_AGENT = random.choice(user_agents)
+            self.USER_AGENT = secrets.choice(user_agents)
         else:
             self.USER_AGENT = user_agents
 
-    def __iter__(self) -> Iterator[URL | str]:
-        return iter((self.CLIENT_URL, self.CLIENT_ID, self.USER_AGENT))
 
 
 class ClientType:
@@ -157,42 +180,6 @@ class ClientType:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         ),
-    )
-    MOBILE_WEB = ClientInfo(
-        URL("https://m.twitch.tv"),
-        "r8s4dac0uhzifbpu9sjdiwzctle17ff",
-        [
-            # Chrome versioning is done fully on android only,
-            # other platforms only use the major version
-            (
-                "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-            (
-                "Mozilla/5.0 (Linux; Android 16; SM-A205U) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-            (
-                "Mozilla/5.0 (Linux; Android 16; SM-A102U) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-            (
-                "Mozilla/5.0 (Linux; Android 16; SM-G960U) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-            (
-                "Mozilla/5.0 (Linux; Android 16; SM-N960U) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-            (
-                "Mozilla/5.0 (Linux; Android 16; LM-Q720) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-            (
-                "Mozilla/5.0 (Linux; Android 16; LM-X420) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.7204.158 Mobile Safari/537.36"
-            ),
-        ]
     )
     ANDROID_APP = ClientInfo(
         URL("https://www.twitch.tv"),
@@ -228,14 +215,6 @@ class ClientType:
             ),
         ]
     )
-    SMARTBOX = ClientInfo(
-        URL("https://android.tv.twitch.tv"),
-        "ue6666qo983tsx6so1t0vnawi233wa",
-        (
-            "Mozilla/5.0 (Linux; Android 7.1; Smart Box C1) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-        ),
-    )
 
 
 class State(Enum):
@@ -253,20 +232,6 @@ class PriorityMode(Enum):
     PRIORITY_ONLY = 0
     ENDING_SOONEST = 1
     LOW_AVBL_FIRST = 2
-
-
-class GQLQuery(JsonType):
-    def __init__(self, query: str, g64data: str):
-        super().__init__(
-            query=query,
-            variables={
-                "input": {
-                    "data": g64data,
-                    "repository": "twilight",
-                    "encoding": "GZIP_B64",
-                }
-            }
-        )
 
 
 class GQLPersistedQuery(JsonType):
@@ -396,7 +361,8 @@ class WebsocketTopic:
         target_id: int,
         process: TopicProcess,
     ):
-        assert isinstance(target_id, int)
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            raise TypeError("Websocket topic target ID must be an integer")
         self._id: str = self.as_str(category, topic_name, target_id)
         self._target_id = target_id
         self._process: TopicProcess = process
@@ -416,11 +382,9 @@ class WebsocketTopic:
     def __repr__(self) -> str:
         return f"Topic({self._id})"
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, WebsocketTopic):
             return self._id == other._id
-        elif isinstance(other, str):
-            return self._id == other
         return NotImplemented
 
     def __hash__(self) -> int:

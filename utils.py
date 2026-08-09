@@ -11,6 +11,9 @@ import string
 import asyncio
 import logging
 import traceback
+from math import isfinite
+import tempfile
+import stat
 import webbrowser
 from copy import deepcopy
 from enum import Enum
@@ -37,7 +40,7 @@ logger = logging.getLogger("TwitchDrops")
 _FRACTION_RE = re.compile(r"\.(\d+)")
 
 
-async def cancel_tasks(tasks: abc.Iterable[asyncio.Task[Any]]) -> None:
+async def cancel_tasks(tasks: abc.Iterable[asyncio.Future[Any]]) -> None:
     """Cancel tasks and consume their completion, including cancellation errors."""
     task_list = list(tasks)
     for task in task_list:
@@ -62,14 +65,37 @@ def format_traceback(exc: BaseException, **kwargs: Any) -> str:
 
 
 def lock_file(path: Path) -> tuple[bool, io.TextIOWrapper]:
-    file = path.open('w', encoding="utf8")
-    file.write('ツ')
-    file.flush()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    elif path.is_symlink():
+        raise OSError(f"Lock path is a symlink: {path}")
+    descriptor = os.open(path, flags, 0o600)
+    file: io.TextIOWrapper | None = None
+    try:
+        descriptor_chmod = getattr(os, "fchmod", None)
+        if descriptor_chmod is not None:
+            descriptor_chmod(descriptor, 0o600)
+        else:
+            path.chmod(0o600)
+        file = os.fdopen(descriptor, "r+", encoding="utf8")
+        descriptor = -1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if file is None:
+        raise RuntimeError("Unable to open lock file")
+    file.seek(0, os.SEEK_END)
+    if file.tell() == 0:
+        file.write("ツ")
+        file.flush()
+    file.seek(0)
     if sys.platform == "win32":
         import msvcrt
         try:
             # we need to lock at least one byte for this to work
-            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, max(path.stat().st_size, 1))
+            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             return False, file
         return True, file
@@ -151,12 +177,18 @@ def _redact_log_url(value: URL) -> str:
     return str(value)
 
 
-def redact_log_value(value: Any, *, key: Any = None) -> Any:
+def redact_log_value(
+    value: Any,
+    *,
+    key: Any = None,
+    _redact_scalars: bool = False,
+) -> Any:
     """Return a log-safe copy of a value without changing the original."""
     normalised_key = _normalise_log_key(key) if key is not None else None
     if key is not None and _is_sensitive_log_key(key):
         return _LOG_REDACTED
-    if normalised_key in {"data", "json"} and not isinstance(
+    redact_scalars = _redact_scalars or normalised_key in {"data", "json"}
+    if redact_scalars and not isinstance(
         value, (abc.Mapping, list, tuple, set)
     ):
         return _LOG_REDACTED
@@ -164,15 +196,28 @@ def redact_log_value(value: Any, *, key: Any = None) -> Any:
         return _redact_log_url(value)
     if isinstance(value, abc.Mapping):
         return {
-            item_key: redact_log_value(item, key=item_key)
+            item_key: redact_log_value(
+                item,
+                key=item_key,
+                _redact_scalars=redact_scalars,
+            )
             for item_key, item in value.items()
         }
     if isinstance(value, list):
-        return [redact_log_value(item) for item in value]
+        return [
+            redact_log_value(item, _redact_scalars=redact_scalars)
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return tuple(redact_log_value(item) for item in value)
+        return tuple(
+            redact_log_value(item, _redact_scalars=redact_scalars)
+            for item in value
+        )
     if isinstance(value, set):
-        return {redact_log_value(item) for item in value}
+        return {
+            redact_log_value(item, _redact_scalars=redact_scalars)
+            for item in value
+        }
     if normalised_key in {"url", "uri"} and isinstance(value, str):
         try:
             parsed = URL(value)
@@ -197,7 +242,7 @@ def timestamp(value: str) -> datetime:
     )
     try:
         parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
+    except (OSError, OverflowError, ValueError) as exc:
         raise ValueError(f"Invalid timestamp: {value!r}") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -240,19 +285,23 @@ def create_nonce(chars: str, length: int) -> str:
 
 
 def safe_int(value: Any) -> int | None:
-    """Parse an int, returning None on missing or non-integer input."""
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+    """Parse an integer without accepting booleans or lossy numeric coercion."""
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 
 
 def require_int(value: Any, message: str) -> int:
-    """Parse an int or raise ``ValueError`` with the caller's context."""
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(message) from exc
+    """Parse a lossless integer or raise with the caller's context."""
+    parsed = safe_int(value)
+    if parsed is None:
+        raise ValueError(message)
+    return parsed
 
 
 def _handle_task_exception(
@@ -325,35 +374,85 @@ def _serialize(obj: Any) -> Any:
 
 
 _MISSING = object()
+
+
+def _deserialize_set(data: Any) -> set[Any]:
+    if not isinstance(data, list):
+        raise ValueError("Serialized set data must be a list")
+    try:
+        return set(data)
+    except TypeError as exc:
+        raise ValueError("Serialized set contains an unhashable value") from exc
+
+
+def _deserialize_url(data: Any) -> URL:
+    if not isinstance(data, str):
+        raise ValueError("Serialized URL data must be a string")
+    return URL(data)
+
+
+def _deserialize_priority_mode(data: Any) -> PriorityMode:
+    if type(data) is not int:
+        raise ValueError("Serialized priority mode must be an integer")
+    return PriorityMode(data)
+
+
+def _deserialize_datetime(data: Any) -> datetime:
+    if isinstance(data, bool) or not isinstance(data, (int, float)):
+        raise ValueError("Serialized datetime must be a finite timestamp")
+    try:
+        numeric_value = float(data)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("Serialized datetime must be a finite timestamp") from exc
+    if not isfinite(numeric_value):
+        raise ValueError("Serialized datetime must be a finite timestamp")
+    try:
+        return datetime.fromtimestamp(numeric_value, timezone.utc)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise ValueError("Serialized datetime is out of range") from exc
+
+
 SERIALIZE_ENV: dict[str, Callable[[Any], object]] = {
-    "set": set,
-    "URL": URL,
-    "PriorityMode": PriorityMode,
-    "datetime": lambda d: datetime.fromtimestamp(d, timezone.utc),
+    "set": _deserialize_set,
+    "URL": _deserialize_url,
+    "PriorityMode": _deserialize_priority_mode,
+    "datetime": _deserialize_datetime,
 }
 
 
-def _remove_missing(obj: JsonType) -> JsonType:
-    # this modifies obj in place, but we return it just in case
-    for key, value in obj.copy().items():
-        if value is _MISSING:
-            del obj[key]
-        elif isinstance(value, dict):
-            _remove_missing(value)
-            if not value:
-                # the dict is empty now, so remove it's key entirely
+def _remove_missing(obj: Any) -> Any:
+    """Remove unknown serialized values recursively from mappings and lists."""
+    if isinstance(obj, dict):
+        for key, value in tuple(obj.items()):
+            cleaned = _remove_missing(value)
+            if cleaned is _MISSING or isinstance(cleaned, dict) and not cleaned:
                 del obj[key]
+            else:
+                obj[key] = cleaned
+    elif isinstance(obj, list):
+        obj[:] = [
+            cleaned
+            for value in obj
+            if (cleaned := _remove_missing(value)) is not _MISSING
+        ]
     return obj
 
 
 def _deserialize(obj: JsonType) -> Any:
-    if "__type" in obj:
-        obj_type = obj["__type"]
-        if obj_type in SERIALIZE_ENV:
-            return SERIALIZE_ENV[obj_type](obj["data"])
-        else:
-            return _MISSING
-    return obj
+    if "__type" not in obj:
+        return obj
+    obj_type = obj.get("__type")
+    if not isinstance(obj_type, str):
+        raise ValueError("Serialized type tag must be a string")
+    decoder = SERIALIZE_ENV.get(obj_type)
+    if decoder is None:
+        return _MISSING
+    if "data" not in obj:
+        raise ValueError(f"Serialized {obj_type} value is missing data")
+    try:
+        return decoder(obj["data"])
+    except (OSError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Serialized {obj_type} value is invalid") from exc
 
 
 def _merge_mappings(
@@ -450,28 +549,21 @@ def extract_available_drops(response: JsonType) -> list[JsonType]:
 
 
 def json_load(path: Path, defaults: _JSON_T, *, merge: bool = True) -> _JSON_T:
-    new_path: Path = path.with_name(f"{path.name}.new")
     combined: JsonType | None = None
-    # try new file first
-    if new_path.exists():
-        try:
-            with new_path.open('r', encoding="utf8") as file:
-                loaded = json.load(file, object_hook=_deserialize)
-            if not isinstance(loaded, dict):
-                raise ValueError("JSON root must be an object")
-            combined = _remove_missing(loaded)
-        except (OSError, UnicodeError, ValueError):
-            # remove invalid file
-            new_path.unlink(missing_ok=True)
-    # try the old file
-    if combined is None and path.exists():
+    if path.exists():
         try:
             with path.open('r', encoding="utf8") as file:
                 loaded = json.load(file, object_hook=_deserialize)
             if not isinstance(loaded, dict):
                 raise ValueError("JSON root must be an object")
             combined = _remove_missing(loaded)
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ) as exc:
             raise ValueError(f"Unable to load JSON from {path}") from exc
     # handle defaults and merging
     defaults_copy: JsonType = deepcopy(dict(defaults))
@@ -485,66 +577,123 @@ def json_load(path: Path, defaults: _JSON_T, *, merge: bool = True) -> _JSON_T:
 
 
 def json_save(path: Path, contents: Mapping[Any, Any], *, sort: bool = False) -> None:
-    def writer(new_path: Path) -> None:
-        with new_path.open("w", encoding="utf8") as file:
-            json.dump(contents, file, default=_serialize, sort_keys=sort, indent=4)
+    def writer(file: io.TextIOWrapper) -> None:
+        json.dump(contents, file, default=_serialize, sort_keys=sort, indent=4)
 
-    atomic_write(path, writer, mode=None)
+    atomic_write(path, writer)
+
+
+def _new_atomic_temp(path: Path) -> tuple[int, Path]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with suppress(OSError):
+        path.with_name(f"{path.name}.new").unlink()
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    return descriptor, Path(temporary_name)
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Durably commit a directory-entry replacement where supported."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write(
-    path: Path, writer: Callable[[Path], None], *, mode: int | None = 0o600
+    path: Path,
+    writer: Callable[[io.TextIOWrapper], None],
 ) -> None:
-    """Write `path` atomically via a `<path>.new` sibling, then `replace()` over it.
-
-    Guards against symlink substitution on the temp path, optionally applies ``mode``
-    to both the temp and final file, and removes the temp even on failure so the last
-    good file survives.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f"{path.name}.new")
+    """Atomically replace ``path`` using an exclusive, mode-0600 temp file."""
+    descriptor, temporary_path = _new_atomic_temp(path)
     try:
-        if temporary_path.is_symlink():
-            raise OSError(f"Temporary path is a symlink: {temporary_path}")
+        with os.fdopen(descriptor, "w", encoding="utf8") as file:
+            descriptor = -1
+            writer(file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, path)
+        _fsync_parent_directory(path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with suppress(OSError):
+            temporary_path.unlink()
+
+
+def atomic_write_path(path: Path, writer: Callable[[Path], None]) -> None:
+    """Atomically replace ``path`` for a trusted API that requires a file path."""
+    descriptor, temporary_path = _new_atomic_temp(path)
+    os.close(descriptor)
+    try:
         writer(temporary_path)
-        if mode is not None:
-            temporary_path.chmod(mode)
-        temporary_path.replace(path)
-        if mode is not None:
-            path.chmod(mode)
+        file_status = temporary_path.lstat()
+        if not stat.S_ISREG(file_status.st_mode):
+            raise OSError("Atomic writer replaced its temporary file")
+        temporary_path.chmod(0o600)
+        with temporary_path.open("rb") as file:
+            os.fsync(file.fileno())
+        os.replace(temporary_path, path)
+        _fsync_parent_directory(path)
     finally:
         with suppress(OSError):
             temporary_path.unlink()
 
 
-def remove_stale_new(path: Path) -> None:
-    """Remove both ``path`` and any stale ``<path>.new`` sibling."""
+def quarantine_file(path: Path, *, reason: str = "invalid") -> Path | None:
+    """Move a malformed regular file aside before a replacement is written."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError(f"Refusing to quarantine non-regular path: {path}")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    destination = path.with_name(f"{path.name}.{reason}-{timestamp}")
+    os.replace(path, destination)
+    _fsync_parent_directory(path)
+    return destination
+
+
+def remove_file(path: Path) -> None:
     path.unlink(missing_ok=True)
-    path.with_name(f"{path.name}.new").unlink(missing_ok=True)
 
 
-def webopen(url: URL | str):
-    url_str = str(url)
+def webopen(url: URL | str) -> None:
+    parsed = URL(url)
+    if parsed.scheme not in {"http", "https"} or parsed.host is None:
+        raise ValueError("Only HTTP(S) browser URLs are allowed")
+    url_str = str(parsed)
     if IS_PACKAGED and sys.platform == "linux":
         # https://pyinstaller.org/en/stable/
         # runtime-information.html#ld-library-path-libpath-considerations
         # NOTE: All 4 cases need to be handled here: either of the two values can be there or not.
         ld_env = "LD_LIBRARY_PATH"
+        had_current = ld_env in os.environ
         ld_path_curr = os.environ.get(ld_env)
         ld_path_orig = os.environ.get(f"{ld_env}_ORIG")
         if ld_path_orig is not None:
             os.environ[ld_env] = ld_path_orig
-        elif ld_path_curr is not None:
-            # pop current
-            os.environ.pop(ld_env)
+        else:
+            os.environ.pop(ld_env, None)
 
-        webbrowser.open_new_tab(url_str)
-
-        if ld_path_curr is not None:
-            os.environ[ld_env] = ld_path_curr
-        elif ld_path_orig is not None:
-            # pop original
-            os.environ.pop(ld_env)
+        try:
+            webbrowser.open_new_tab(url_str)
+        finally:
+            if had_current and ld_path_curr is not None:
+                os.environ[ld_env] = ld_path_curr
+            else:
+                os.environ.pop(ld_env, None)
     else:
         webbrowser.open_new_tab(url_str)
 

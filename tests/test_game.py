@@ -6,6 +6,15 @@ from game import Game
 
 
 class GameSlugTests(unittest.TestCase):
+    def test_decimal_string_id_is_supported(self) -> None:
+        self.assertEqual(Game({"id": "42", "name": "Game"}).id, 42)
+
+    def test_lossy_or_boolean_ids_are_rejected(self) -> None:
+        for value in (True, 1.5, "1.5", -1):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    Game({"id": value, "name": "Game"})
+
     def test_slug_from_data_is_used(self) -> None:
         game = Game({"id": 1, "name": "Counter-Strike", "slug": "csgo"})
 

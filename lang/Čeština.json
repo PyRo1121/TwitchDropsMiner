@@ -10,15 +10,9 @@
         "no_campaign": "Žádné dropy k dispozici, čekání na další dostupné dropy..."
     },
     "login": {
-        "unexpected_content": "Chyba při přesměrování. Nepoužíváte VPN?",
-        "incorrect_login_pass": "Nesprávné přihlašení.",
-        "incorrect_email_code": "Nesprávný E-Mail kód.",
-        "incorrect_twofa_code": "Nesprávný dvoufaktorový token",
-        "email_code_required": "K přihlášení je vyžadován kód který byl zaslán na váš E-Mail.",
-        "twofa_code_required": "K přihlášení je vyžadován dvoufaktorový kód."
+        "unexpected_content": "Chyba při přesměrování. Nepoužíváte VPN?"
     },
     "error": {
-        "captcha": "Vaše připojení bylo zamítnuto službou Twitch, zkuste to znovu za 12 hodin.",
         "site_down": "Služba Twitch je nedostupná，zkuste to znovu za {seconds} sekund...",
         "no_connection": "Nelze se připojit k službe Twitch, zkuste to znovu za {seconds}... ({url})"
     },
@@ -50,15 +44,9 @@
         },
         "login": {
             "name": "Přihlášení k službě Twitch",
-            "labels": "Uživatelské ID:",
             "logged_in": "Přihlášeno",
             "logged_out": "Odhlášeno",
             "logging_in": "Přihlašování...",
-            "required": "Potřebujete se nejdříve přihlásit",
-            "request": "Pro přístup je potřeba přihlášení",
-            "username": "Uživatelské Jméno",
-            "password": "Heslo",
-            "twofa_code": "2FA Kód",
             "button": "Přihlásit se"
         },
         "websocket": {
@@ -83,9 +71,9 @@
         "channels": {
             "name": "Název",
             "switch": "Přepnout",
-            "online": "ONLINE  \u2714",
-            "pending": "PRŮBĚH \u23f3",
-            "offline": "OFFLINE \u274c",
+            "online": "ONLINE  ✔",
+            "pending": "PRŮBĚH ⏳",
+            "offline": "OFFLINE ❌",
             "headings": {
                 "channel": "Kanál",
                 "game": "Hra",
@@ -105,13 +93,13 @@
                 "refresh": "Obnovit"
             },
             "status": {
-                "linked": "ŽIVĚ \u2714",
-                "not_linked": "Zatím nejsou dostupné žádné kanály \u274c",
-                "active": "ŽIVĚ \u2714",
-                "upcoming": "Nadcházející \u23f3",
-                "expired": "Ukončeno \u274c",
-                "claimed": "Vyzvednuto \u2714",
-                "ready_to_claim": "Připraveno k vyzvednutí \u23f3"
+                "linked": "ŽIVĚ ✔",
+                "not_linked": "Zatím nejsou dostupné žádné kanály ❌",
+                "active": "ŽIVĚ ✔",
+                "upcoming": "Nadcházející ⏳",
+                "expired": "Ukončeno ❌",
+                "claimed": "Vyzvednuto ✔",
+                "ready_to_claim": "Připraveno k vyzvednutí ⏳"
             },
             "starts": "Začíná: {time}",
             "ends": "Začíná: {time}",
@@ -126,7 +114,6 @@
                 "name": "Nastavení",
                 "autostart": "Automatické spuštění: ",
                 "tray": "Automaticky spusti minimalizovaně: ",
-                "priority_only": "Pouze prioritní: ",
                 "dark_mode": "Tmavý režim: ",
                 "proxy": "Proxy:"
             },
@@ -134,7 +121,10 @@
             "priority": "Priorita",
             "exclude": "Vynechat",
             "reload": "Obnovit",
-            "reload_text": "Většina změn vyžaduje restart aplikace nebo obnovení: "
+            "reload_text": "Většina změn vyžaduje restart aplikace nebo obnovení: ",
+            "priority_modes": {
+                "priority_only": "Pouze prioritní: "
+            }
         },
         "help": {
             "links": {

@@ -1,28 +1,27 @@
 from __future__ import annotations
 
-import json
 import asyncio
 import logging
-from time import time
-from copy import deepcopy
+from math import floor
+from time import monotonic
 from functools import partial
 from collections import abc, deque, OrderedDict
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from contextlib import suppress, asynccontextmanager
-from email.utils import parsedate_to_datetime
-from typing import Any, Literal, Final, overload, cast, TYPE_CHECKING
+from contextlib import suppress
+from typing import Any, Literal, Final, cast, TYPE_CHECKING
 
 import aiohttp
-from yarl import URL
-
 from translate import _
-from oauth_storage import OAuthTokenStore
+from auth import AuthState
 from channel import Channel
 from websocket import WebsocketPool
+from watch_service import WatchService
 from inventory import DropsCampaign
+from inventory_service import InventoryService
 from session_history import HistoryEvent, Scalar, SessionHistory, Severity
+from http_transport import HttpTransport
 from exceptions import (
     ExitRequest,
     GQLException,
@@ -30,37 +29,29 @@ from exceptions import (
     LoginException,
     MinerException,
     RequestInvalid,
-    CaptchaRequired,
     RequestException,
 )
 from utils import (
-    CHARS_HEX_LOWER,
     chunk,
     timestamp,
     cancel_tasks,
-    create_nonce,
     task_wrapper,
-    RateLimiter,
     AwaitableValue,
-    ExponentialBackoff,
     redact_log_value,
-    atomic_write,
-    remove_stale_new,
-    safe_int,
+    atomic_write_path,
     extract_available_drops,
-    merge_primary_json,
+    require_int,
 )
 from constants import (
     CALL,
     MAX_INT,
     DUMP_PATH,
     COOKIES_PATH,
-    OAUTH_TOKEN_PATH,
     MAX_CHANNELS,
-    MAX_WATCH_CHANNELS,
     GQL_BATCH_SIZE,
     GQL_QUERIES,
-    WATCH_INTERVAL,
+    INVENTORY_RETRY_BASE,
+    INVENTORY_RETRY_MAX,
     State,
     ClientType,
     PriorityMode,
@@ -69,7 +60,7 @@ from constants import (
 
 if TYPE_CHECKING:
     from game import Game
-    from gui_qt.subs import QtLoginForm as LoginForm
+    from gui_port import GuiPort
     from channel import Stream
     from settings import Settings
     from inventory import TimedDrop
@@ -77,57 +68,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("TwitchDrops")
-gql_logger = logging.getLogger("TwitchDrops.gql")
-AUTH_VALIDATION_INTERVAL = timedelta(hours=1)
-
-
-class SkipExtraJsonDecoder(json.JSONDecoder):
-    def decode(self, s: str, _w: Any = None) -> Any:
-        # skip whitespace check
-        obj, end = self.raw_decode(s)
-        return obj
-
-
-def safe_loads(s: str) -> Any:
-    try:
-        return json.loads(s, cls=SkipExtraJsonDecoder)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Invalid JSON response") from exc
-
-
-async def _read_json(
-    response: aiohttp.ClientResponse,
-    exception_type: type[Exception],
-    message: str,
-) -> Any:
-    try:
-        return await response.json(loads=safe_loads)
-    except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError) as exc:
-        raise exception_type(message) from exc
-
-
-def _retry_after_delay(response: aiohttp.ClientResponse, fallback: float) -> float:
-    """Parse server rate-limit hints into a retry delay in seconds."""
-    retry_after = response.headers.get("Retry-After")
-    if retry_after is not None:
-        try:
-            return max(1.0, float(retry_after))
-        except ValueError:
-            try:
-                retry_at = parsedate_to_datetime(retry_after)
-            except (TypeError, ValueError, OverflowError):
-                pass
-            else:
-                if retry_at.tzinfo is None:
-                    retry_at = retry_at.replace(tzinfo=timezone.utc)
-                return max(1.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
-    reset = response.headers.get("Ratelimit-Reset")
-    if reset is not None:
-        try:
-            return max(1.0, int(reset) - time())
-        except (TypeError, ValueError, OverflowError):
-            pass
-    return max(1.0, fallback)
 
 
 def _open_dump(mode: Literal["w", "a"]) -> Any:
@@ -137,586 +77,11 @@ def _open_dump(mode: Literal["w", "a"]) -> Any:
         raise RuntimeError(f"Unable to open dump file: {DUMP_PATH}") from exc
 
 
-class _AuthState:
-    def __init__(self, twitch: Twitch):
-        self._twitch: Twitch = twitch
-        self._lock = asyncio.Lock()
-        self._oauth_tokens = OAuthTokenStore(OAUTH_TOKEN_PATH)
-        self._logged_in = asyncio.Event()
-        self._last_validated: datetime | None = None
-        self.user_id: int
-        self.device_id: str
-        self.session_id: str
-        self.access_token: str
-
-    def _hasattrs(self, *attrs: str) -> bool:
-        return all(hasattr(self, attr) for attr in attrs)
-
-    def _delattrs(self, *attrs: str) -> None:
-        for attr in attrs:
-            with suppress(AttributeError):
-                delattr(self, attr)
-
-    def invalidate(
-        self, *, delete_cookies: bool = False, delete_refresh_token: bool = False
-    ) -> None:
-        self._delattrs("access_token", "user_id")
-        self._last_validated = None
-        self._logged_in.clear()
-        self._twitch.gui.help._invalidate_button.config(state="disabled")
-        if delete_cookies:
-            session = self._twitch._session
-            if session is not None:
-                jar = cast(aiohttp.CookieJar, session.cookie_jar)
-                jar.clear()
-                remove_stale_new(COOKIES_PATH)
-        if delete_refresh_token:
-            self._clear_refresh_token()
-
-    def clear(self) -> None:
-        self._delattrs(
-            "user_id",
-            "device_id",
-            "session_id",
-            "access_token",
-        )
-        self._last_validated = None
-        self._logged_in.clear()
-        self._twitch.gui.help._invalidate_button.config(state="disabled")
-
-    def _clear_refresh_token(self) -> None:
-        try:
-            self._oauth_tokens.clear()
-        except OSError as exc:
-            logger.warning("Unable to clear OAuth refresh token: %s", type(exc).__name__)
-
-    def _save_refresh_token(
-        self, client_id: str, refresh_token: str, *, rotated: bool = False
-    ) -> None:
-        try:
-            self._oauth_tokens.save(client_id, refresh_token)
-        except (OSError, TypeError, ValueError) as exc:
-            description = "rotated OAuth refresh token" if rotated else "OAuth refresh token"
-            logger.warning(
-                "Unable to persist %s: %s", description, type(exc).__name__
-            )
-
-    def _oauth_headers(self, client_info: ClientInfo) -> dict[str, str]:
-        return {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "Accept-Language": "en-US",
-            "Cache-Control": "no-cache",
-            "Client-Id": client_info.CLIENT_ID,
-            "Host": "id.twitch.tv",
-            "Origin": str(client_info.CLIENT_URL),
-            "Pragma": "no-cache",
-            "Referer": str(client_info.CLIENT_URL),
-            "User-Agent": client_info.USER_AGENT,
-            "X-Device-Id": self.device_id,
-        }
-
-    async def _refresh_access_token(
-        self, client_info: ClientInfo, refresh_token: str
-    ) -> str | None:
-        payload = {
-            "client_id": client_info.CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-        async with self._twitch.request(
-            "POST",
-            "https://id.twitch.tv/oauth2/token",
-            headers=self._oauth_headers(client_info),
-            data=payload,
-        ) as response:
-            if response.status in (400, 401):
-                return None
-            if response.status != 200:
-                raise RuntimeError(
-                    f"OAuth refresh failed (HTTP {response.status})"
-                )
-            response_json: JsonType = await _read_json(
-                response, RuntimeError, "OAuth refresh returned invalid data"
-            )
-            if not isinstance(response_json, dict):
-                raise RuntimeError("OAuth refresh returned invalid data")
-            access_token = response_json.get("access_token")
-            if not isinstance(access_token, str) or not access_token:
-                raise LoginException("OAuth refresh response omitted access_token")
-            rotated_token = response_json.get("refresh_token")
-            if isinstance(rotated_token, str) and rotated_token:
-                self._save_refresh_token(
-                    client_info.CLIENT_ID, rotated_token, rotated=True
-                )
-            else:
-                logger.debug("Twitch refresh response did not rotate the refresh token")
-            return access_token
-
-    async def _poll_device_token(
-        self,
-        headers: dict[str, str],
-        payload: JsonType,
-        interval: int,
-        expires_at: datetime,
-        client_info: ClientInfo,
-    ) -> str:
-        while True:
-            # sleep first, not like the user is gonna enter the code *that* fast
-            await asyncio.sleep(interval)
-            async with self._twitch.request(
-                "POST",
-                "https://id.twitch.tv/oauth2/token",
-                headers=headers,
-                data=payload,
-                invalidate_after=expires_at,
-            ) as response:
-                if response.status == 200:
-                    response_json = await _read_json(
-                        response, LoginException, "OAuth token response was not valid JSON"
-                    )
-                    if not isinstance(response_json, dict):
-                        raise LoginException("OAuth token response was malformed")
-                    # {
-                    #     "access_token": "40 chars [A-Za-z0-9]",
-                    #     "refresh_token": "40 chars [A-Za-z0-9]",
-                    #     "scope": [...],
-                    #     "token_type": "bearer"
-                    # }
-                    access_token = response_json.get("access_token")
-                    if not isinstance(access_token, str) or not access_token:
-                        raise LoginException("OAuth token response omitted access_token")
-                    refresh_token = response_json.get("refresh_token")
-                    if isinstance(refresh_token, str) and refresh_token:
-                        self._save_refresh_token(client_info.CLIENT_ID, refresh_token)
-                    else:
-                        logger.debug(
-                            "Twitch device login response did not include a refresh token"
-                        )
-                    self.access_token = access_token
-                    return self.access_token
-                try:
-                    response_json = await response.json(loads=safe_loads)
-                except (aiohttp.ContentTypeError, TypeError, UnicodeError, ValueError):
-                    response_json = {}
-                if not isinstance(response_json, dict):
-                    response_json = {}
-                error = response_json.get("message") or response_json.get("error")
-                if response.status == 429 or error == "slow_down":
-                    retry_delay = _retry_after_delay(response, interval + 5)
-                    interval = int(max(interval + 5, retry_delay))
-                    continue
-                if error == "authorization_pending":
-                    continue
-                if error == "expired_token":
-                    raise RequestInvalid()
-                if error == "access_denied":
-                    raise LoginException("OAuth device authorization was denied")
-                raise LoginException(
-                    "OAuth device authorization failed "
-                    f"(HTTP {response.status}): {redact_log_value(response_json)}"
-                )
-
-    async def _oauth_login(self) -> str:
-        login_form: LoginForm = self._twitch.gui.login
-        client_info: ClientInfo = self._twitch._client_type
-        headers = self._oauth_headers(client_info)
-        payload = {
-            "client_id": client_info.CLIENT_ID,
-            "scopes": "",  # no scopes needed
-        }
-        while True:
-            try:
-                now = datetime.now(timezone.utc)
-                async with self._twitch.request(
-                    "POST", "https://id.twitch.tv/oauth2/device", headers=headers, data=payload
-                ) as response:
-                    # {
-                    #     "device_code": "40 chars [A-Za-z0-9]",
-                    #     "expires_in": 1800,
-                    #     "interval": 5,
-                    #     "user_code": "8 chars [A-Z]",
-                    #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
-                    # }
-                    response_json: Any = await _read_json(
-                        response, LoginException, "OAuth device response was not valid JSON"
-                    )
-                    if not isinstance(response_json, dict):
-                        raise LoginException("OAuth device response was malformed")
-                    device_code = response_json.get("device_code")
-                    user_code = response_json.get("user_code")
-                    verification_uri_value = response_json.get("verification_uri")
-                    if not all(
-                        isinstance(value, str) and value
-                        for value in (device_code, user_code, verification_uri_value)
-                    ):
-                        raise LoginException("OAuth device response was incomplete")
-                    device_code = cast(str, device_code)
-                    user_code = cast(str, user_code)
-                    verification_uri_value = cast(str, verification_uri_value)
-                    try:
-                        interval = max(1, int(response_json["interval"]))
-                        expires_in = int(response_json["expires_in"])
-                        verification_uri = URL(verification_uri_value)
-                    except (KeyError, TypeError, ValueError) as exc:
-                        raise LoginException("OAuth device response had invalid timing") from exc
-                    expires_at = now + timedelta(seconds=expires_in)
-
-                # Print the code to the user, open them the activate page so they can type it in
-                await login_form.ask_enter_code(verification_uri, user_code)
-
-                payload = {
-                    "client_id": client_info.CLIENT_ID,
-                    "scopes": "",
-                    "device_code": device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                }
-                return await self._poll_device_token(
-                    headers, payload, interval, expires_at, client_info
-                )
-            except RequestInvalid:
-                # the device_code has expired, request a new code
-                continue
-
-    async def _request_login(
-        self, headers: dict[str, str], payload: JsonType
-    ) -> JsonType:
-        async with self._twitch.request(
-            "POST", "https://passport.twitch.tv/login", headers=headers, json=payload
-        ) as response:
-            login_response: Any = await _read_json(
-                response, LoginException, "Twitch login response was not valid JSON"
-            )
-        if not isinstance(login_response, dict):
-            raise LoginException("Twitch login response was malformed")
-        return login_response
-
-    def _handle_login_error(
-        self,
-        error_code: int,
-        login_response: JsonType,
-        login_form: LoginForm,
-        gui_print: Callable[[str], Any],
-        token_kind: str,
-    ) -> str:
-        logger.info(f"Login error code: {error_code}")
-        if error_code == 1000:
-            logger.info("1000: CAPTCHA is required")
-            raise CaptchaRequired()
-        if error_code in (2004, 3001):
-            logger.info("3001: Login failed due to incorrect username or password")
-            gui_print(_("login", "incorrect_login_pass"))
-            if error_code == 2004:
-                # invalid username
-                login_form.clear(login=True)
-            login_form.clear(password=True)
-            return token_kind
-        if error_code in (3012, 3023):
-            logger.info("3012/23: Login failed due to incorrect 2FA code")
-            if error_code == 3023:
-                token_kind = "email"
-                gui_print(_("login", "incorrect_email_code"))
-            else:
-                token_kind = "authy"
-                gui_print(_("login", "incorrect_twofa_code"))
-            login_form.clear(token=True)
-            return token_kind
-        if error_code in (3011, 3022):
-            # 2FA handling
-            logger.info("3011/22: 2FA token required")
-            # user didn't provide a token, so ask them for it
-            if error_code == 3022:
-                token_kind = "email"
-                gui_print(_("login", "email_code_required"))
-            else:
-                token_kind = "authy"
-                gui_print(_("login", "twofa_code_required"))
-            return token_kind
-        if error_code >= 5000:
-            # Special errors, usually from Twitch telling the user to "go away"
-            # We print the code out to inform the user, and just use chrome flow instead
-            # {
-            #     "error_code":5023,
-            #     "error":"Please update your app to continue",
-            #     "error_description":"client is not supported for this feature"
-            # }
-            # {
-            #     "error_code":5027,
-            #     "error":"Please update your app to continue",
-            #     "error_description":"client blocked from this operation"
-            # }
-            gui_print(_("login", "error_code").format(error_code=error_code))
-            logger.info("Login response: %s", redact_log_value(login_response))
-            raise CaptchaRequired()
-        ext_msg = str(redact_log_value(login_response))
-        logger.info("Login response: %s", ext_msg)
-        raise LoginException(ext_msg)
-
-    async def _login(self) -> str:
-        logger.info("Login flow started")
-        gui_print = self._twitch.gui.print
-        login_form: LoginForm = self._twitch.gui.login
-        client_info: ClientInfo = self._twitch._client_type
-
-        token_kind: str = ''
-        payload: JsonType = {
-            # username and password are added later
-            # "username": str,
-            # "password": str,
-            # client ID to-be associated with the access token
-            "client_id": client_info.CLIENT_ID,
-            "undelete_user": False,  # purpose unknown
-            "remember_me": True,  # persist the session via the cookie
-            # "authy_token": str,  # 2FA token
-            # "twitchguard_code": str,  # email code
-            # "captcha": str,  # self-fed captcha
-            # 'force_twitchguard': False,  # force email code confirmation
-        }
-
-        while True:
-            login_data = await login_form.ask_login()
-            payload["username"] = login_data.username
-            payload["password"] = login_data.password
-            # reinstate the 2FA token, if present
-            payload.pop("authy_token", None)
-            payload.pop("twitchguard_code", None)
-            if login_data.token:
-                # if there's no token kind set yet, and the user has entered a token,
-                # we can immediately assume it's an authenticator token and not an email one
-                if not token_kind:
-                    token_kind = "authy"
-                if token_kind == "authy":
-                    payload["authy_token"] = login_data.token
-                elif token_kind == "email":
-                    payload["twitchguard_code"] = login_data.token
-
-            # use fancy headers to mimic the twitch android app
-            headers = {
-                "Accept": "application/vnd.twitchtv.v3+json",
-                "Accept-Encoding": "gzip",
-                "Accept-Language": "en-US",
-                "Client-Id": client_info.CLIENT_ID,
-                "Content-Type": "application/json; charset=UTF-8",
-                "Host": "passport.twitch.tv",
-                "User-Agent": client_info.USER_AGENT,
-                "X-Device-Id": self.device_id,
-                # "X-Device-Id": ''.join(random.choices('0123456789abcdef', k=32)),
-            }
-            login_response = await self._request_login(headers, payload)
-
-            # Feed this back in to avoid running into CAPTCHA if possible
-            if "captcha_proof" in login_response:
-                payload["captcha"] = {"proof": login_response["captcha_proof"]}
-
-            if "error_code" in login_response:
-                error_code_value = login_response["error_code"]
-                if not isinstance(error_code_value, int):
-                    raise LoginException("Twitch login response had an invalid error code")
-                token_kind = self._handle_login_error(
-                    error_code_value, login_response, login_form, gui_print, token_kind
-                )
-                continue
-            # Success handling
-            if "access_token" in login_response:
-                access_token = login_response["access_token"]
-                if not isinstance(access_token, str) or not access_token:
-                    raise LoginException("Twitch login response omitted access_token")
-                self.access_token = access_token
-                logger.info("Access token granted")
-                login_form.clear()
-                break
-
-        if hasattr(self, "access_token"):
-            return self.access_token
-        raise LoginException("Login flow finished without setting the access token")
-
-    def headers(self, *, user_agent: str = '', gql: bool = False) -> JsonType:
-        client_info: ClientInfo = self._twitch._client_type
-        headers = {
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip",
-            "Accept-Language": "en-US",
-            "Pragma": "no-cache",
-            "Cache-Control": "no-cache",
-            "Client-Id": client_info.CLIENT_ID,
-        }
-        if user_agent:
-            headers["User-Agent"] = user_agent
-        if hasattr(self, "session_id"):
-            headers["Client-Session-Id"] = self.session_id
-        if hasattr(self, "device_id"):
-            headers["X-Device-Id"] = self.device_id
-        if gql:
-            headers["Origin"] = str(client_info.CLIENT_URL)
-            headers["Referer"] = str(client_info.CLIENT_URL)
-            headers["Authorization"] = f"OAuth {self.access_token}"
-        return headers
-
-    async def validate(self):
-        async with self._lock:
-            await self._validate()
-
-    async def _validate_access_token(self, client_info: ClientInfo) -> bool:
-        async with self._twitch.request(
-            "GET",
-            "https://id.twitch.tv/oauth2/validate",
-            headers={"Authorization": f"OAuth {self.access_token}"},
-        ) as response:
-            if response.status == 401:
-                return False
-            if response.status != 200:
-                raise RuntimeError(
-                    f"Token validation failed (HTTP {response.status})"
-                )
-            payload: JsonType = await _read_json(
-                response, RuntimeError, "Token validation returned invalid data"
-            )
-            try:
-                validated_user_id = int(payload["user_id"])
-                validated_client_id = str(payload["client_id"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise RuntimeError("Token validation returned invalid data") from exc
-            return (
-                validated_client_id == client_info.CLIENT_ID
-                and validated_user_id == self.user_id
-            )
-
-    async def _ensure_device_id(
-        self, client_info: ClientInfo, jar: aiohttp.CookieJar
-    ) -> None:
-        async with self._twitch.request(
-            "GET", client_info.CLIENT_URL, headers=self.headers()
-        ) as response:
-            page_html = await response.text("utf8")
-            assert page_html is not None
-        # doing the request ends up setting the "unique_id" value in the cookie
-        cookie = jar.filter_cookies(client_info.CLIENT_URL)
-        self.device_id = cookie["unique_id"].value
-
-    async def _reuse_valid_session(
-        self, client_info: ClientInfo, now: datetime
-    ) -> bool:
-        if not self._hasattrs("access_token", "user_id"):
-            return False
-        if (
-            self._last_validated is not None
-            and now - self._last_validated < AUTH_VALIDATION_INTERVAL
-        ):
-            self._logged_in.set()
-            return True
-        if await self._validate_access_token(client_info):
-            self._last_validated = now
-            self._logged_in.set()
-            return True
-        self.invalidate(delete_cookies=True)
-        return False
-
-    async def _authenticate_session(
-        self, client_info: ClientInfo, jar: aiohttp.CookieJar
-    ) -> None:
-        # looks like we're missing something
-        login_form: LoginForm = self._twitch.gui.login
-        logger.info("Checking login")
-        login_form.update(_("gui", "login", "logging_in"), None)
-        for client_mismatch_attempt in range(2):
-            for invalid_token_attempt in range(2):
-                cookie = jar.filter_cookies(client_info.CLIENT_URL)
-                if "auth-token" not in cookie:
-                    refresh_token = self._oauth_tokens.load(client_info.CLIENT_ID)
-                    if refresh_token is not None:
-                        logger.info("Refreshing Twitch OAuth session")
-                        refreshed_token = await self._refresh_access_token(
-                            client_info, refresh_token
-                        )
-                    else:
-                        refreshed_token = None
-                    if refreshed_token is None:
-                        if refresh_token is not None:
-                            logger.info("Stored Twitch refresh token is invalid")
-                            self._clear_refresh_token()
-                        self.access_token = await self._oauth_login()
-                    else:
-                        self.access_token = refreshed_token
-                    cookie["auth-token"] = self.access_token
-                elif not hasattr(self, "access_token"):
-                    logger.info("Restoring session from cookie")
-                    self.access_token = cookie["auth-token"].value
-                # validate the auth token, by obtaining user_id
-                async with self._twitch.request(
-                    "GET",
-                    "https://id.twitch.tv/oauth2/validate",
-                    headers={"Authorization": f"OAuth {self.access_token}"}
-                ) as response:
-                    if response.status == 401:
-                        # the access token we have is invalid - clear the cookie and reauth
-                        logger.info("Restored session is invalid")
-                        assert client_info.CLIENT_URL.host is not None
-                        jar.clear_domain(client_info.CLIENT_URL.host)
-                        continue
-                    elif response.status == 200:
-                        validate_response = await _read_json(
-                            response, RuntimeError, "Login validation returned invalid JSON"
-                        )
-                        if not isinstance(validate_response, dict):
-                            raise RuntimeError("Login validation returned malformed data")
-                        break
-            else:
-                raise RuntimeError("Login verification failure (step #2)")
-            # ensure the cookie's client ID matches the currently selected client
-            if validate_response.get("client_id") == client_info.CLIENT_ID:
-                break
-            # otherwise, we need to delete the entire cookie file and clear the jar
-            logger.info("Cookie client ID mismatch")
-            jar.clear()
-            remove_stale_new(COOKIES_PATH)
-            self._clear_refresh_token()
-        else:
-            raise RuntimeError("Login verification failure (step #1)")
-        try:
-            self.user_id = int(validate_response["user_id"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError("Login verification returned an invalid user ID") from exc
-        cookie["persistent"] = str(self.user_id)
-        logger.info(f"Login successful, user ID: {self.user_id}")
-        login_form.update(_("gui", "login", "logged_in"), self.user_id)
-        # update our cookie and save it atomically
-        jar.update_cookies(cookie, client_info.CLIENT_URL)
-        self._twitch._save_cookie_jar(jar, COOKIES_PATH)
-
-    async def _validate(self):
-        if not hasattr(self, "session_id"):
-            self.session_id = create_nonce(CHARS_HEX_LOWER, 16)
-        client_info: ClientInfo = self._twitch._client_type
-        now = datetime.now(timezone.utc)
-        if await self._reuse_valid_session(client_info, now):
-            return
-        jar: aiohttp.CookieJar | None = None
-        if (
-            not self._hasattrs("device_id")
-            or not self._hasattrs("access_token", "user_id")
-        ):
-            session = await self._twitch.get_session()
-            jar = cast(aiohttp.CookieJar, session.cookie_jar)
-        if not self._hasattrs("device_id"):
-            if jar is None:
-                raise RuntimeError("Authentication cookie jar is unavailable")
-            await self._ensure_device_id(client_info, jar)
-        if not self._hasattrs("access_token", "user_id"):
-            if jar is None:
-                raise RuntimeError("Authentication cookie jar is unavailable")
-            await self._authenticate_session(client_info, jar)
-        self._twitch.gui.help._invalidate_button.config(state="normal")
-        self._last_validated = datetime.now(timezone.utc)
-        self._logged_in.set()
-
-
 class Twitch:
     def __init__(
         self,
         settings: Settings,
-        # Optional presentation backend for tests or alternate frontends.
-        # The production default is the Qt presentation layer.
-        gui_factory: Callable[["Twitch"], Any] | None = None,
+        gui_factory: Callable[["Twitch"], GuiPort],
     ):
         self.settings: Settings = settings
         retention_days = getattr(settings, "history_retention_days", 90)
@@ -726,29 +91,23 @@ class Twitch:
         self.history = SessionHistory(retention_days=retention_days)
         # State management
         self._state: State = State.IDLE
+        self._state_generation = 0
         self._state_change = asyncio.Event()
         self.wanted_games: list[Game] = []
         self.inventory: list[DropsCampaign] = []
         self._drops: dict[str, TimedDrop] = {}
         self._campaigns: dict[str, DropsCampaign] = {}
+        self._inventory_generation = 0
+        self._inventory_retry_attempt = 0
+        self._inventory_retry_task: asyncio.Task[None] | None = None
         self._mnt_triggers: deque[datetime] = deque()
-        # NOTE: GQL is pretty volatile and breaks everything if one runs into their rate limit.
-        # Do not modify the default, safe values.
-        self._qgl_limiter = RateLimiter(capacity=5, window=1)
-        # Client type, session and auth
+        # Client type, session, transport, and auth
         self._client_type: ClientInfo = ClientType.ANDROID_APP
-        self._rate_limit_remaining: int | None = None
-        self._rate_limit_reset: datetime | None = None
         self._session: aiohttp.ClientSession | None = None
-        self._auth_state: _AuthState = _AuthState(self)
-        # GUI; import the default presentation only when it is actually used.
-        # Keeping this dependency lazy prevents the backend and Qt packages from
-        # forming an import cycle and lets backend tools use custom GUI seams.
-        if gui_factory is None:
-            from gui_qt import QtGUIManager
-
-            gui_factory = QtGUIManager
-        self.gui: Any = gui_factory(self)
+        self.transport = HttpTransport(self)
+        self._auth_state = AuthState(self)
+        self.inventory_service = InventoryService(self)
+        self.gui: GuiPort = gui_factory(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
         self.watching_channel: AwaitableValue[Channel] = AwaitableValue()
@@ -761,10 +120,13 @@ class Twitch:
         self._watch_channel_cooldowns: dict[int, float] = {}
         self._watch_resync_cooldowns: dict[str, float] = {}
         self._watch_generation = 0
-        self._dual_watch_enabled = True
+        self._dual_watch_enabled = bool(
+            getattr(settings, "experimental_dual_watch", False)
+        )
         self._history_auth_recorded = False
         self._history_watch_signature: tuple[tuple[int, str], ...] | None = None
         self._history_deadline_alerts: set[str] = set()
+        self.watch_service: WatchService = WatchService(self)
         # Websocket
         self.websocket = WebsocketPool(self)
         # Maintenance task
@@ -787,7 +149,7 @@ class Twitch:
             # clear the jar, just in case
             cookie_jar.clear()
         # create timeouts
-        # connection quality mulitiplier determines the magnitude of timeouts
+        # Connection quality multiplier determines the magnitude of timeouts.
         connection_quality = self.settings.connection_quality
         if connection_quality < 1:
             connection_quality = self.settings.connection_quality = 1
@@ -811,17 +173,23 @@ class Twitch:
     def _save_cookie_jar(cookie_jar: aiohttp.CookieJar, path: Path) -> None:
         """Persist cookies atomically without destroying the last good file."""
         try:
-            atomic_write(path, cookie_jar.save)
+            atomic_write_path(path, cookie_jar.save)
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("Unable to persist cookies: %s", type(exc).__name__)
 
     async def shutdown(self) -> None:
-        start_time = time()
+        start_time = monotonic()
+        self._inventory_generation += 1
         background_tasks: list[asyncio.Task[Any]] = list(self._watch_tasks.values())
-        self.stop_watching()
+        self.watch_service.stop_watching()
+        self.watch_service.reset()
         if self._mnt_task is not None:
             background_tasks.append(self._mnt_task)
             self._mnt_task = None
+        if self._inventory_retry_task is not None:
+            background_tasks.append(self._inventory_retry_task)
+            self._inventory_retry_task = None
+        self._inventory_retry_attempt = 0
         pending_channel_tasks = [
             channel._pending_stream_up
             for channel in self.channels.values()
@@ -843,6 +211,11 @@ class Twitch:
             self._save_cookie_jar(cookie_jar, COOKIES_PATH)
             await self._session.close()
             self._session = None
+        try:
+            await self.gui.inv.replace_campaigns(())
+            self.gui.set_games(set())
+        except Exception:
+            logger.exception("Unable to clear account presentation during shutdown")
         self._drops.clear()
         self.channels.clear()
         self.inventory.clear()
@@ -852,15 +225,17 @@ class Twitch:
         self._mnt_triggers.clear()
         # wait at least half a second + whatever it takes to complete the closing
         # this allows aiohttp to safely close the session
-        await asyncio.sleep(start_time + 0.5 - time())
+        await asyncio.sleep(max(0, start_time + 0.5 - monotonic()))
 
     def wait_until_login(self) -> abc.Coroutine[Any, Any, Literal[True]]:
         return self._auth_state._logged_in.wait()
 
     def change_state(self, state: State) -> None:
         if self._state is not State.EXIT:
-            # prevent state changing once we switch to exit state
+            # Prevent state changing once we switch to exit state. Every accepted
+            # request gets a generation even when it requests the same state.
             self._state = state
+            self._state_generation += 1
         self._state_change.set()
 
     def state_change(self, state: State) -> abc.Callable[[], None]:
@@ -909,18 +284,6 @@ class Twitch:
         on_event = getattr(self.gui, "on_history_event", None)
         if event is not None and on_event is not None:
             on_event(event)
-
-    def history_increment(self, key: str, amount: int = 1) -> None:
-        history = getattr(self, "history", None)
-        if history is None:
-            return
-        try:
-            history.increment(key, amount)
-        except (RuntimeError, TypeError, ValueError) as exc:
-            logger.debug("Unable to update history summary %s: %s", key, type(exc).__name__)
-        refresh = getattr(self.gui, "history_changed", None)
-        if refresh is not None:
-            refresh()
 
     def save(self, *, force: bool = False) -> None:
         """
@@ -994,7 +357,8 @@ class Twitch:
                     raise RequestException(_("login", "unexpected_content")) from exc
         except Exception as exc:
             session_status = "failed"
-            failure_reason = failure_reason or type(exc).__name__
+            if failure_reason is None:
+                failure_reason = type(exc).__name__
             raise
         finally:
             finished = self.history.finish(session_status, reason=failure_reason)
@@ -1014,12 +378,14 @@ class Twitch:
         • Changing the stream that's being watched if necessary
         """
         self.gui.start()
-        # Re-enable the optional second slot after a full application reload;
-        # a live reconciliation failure disables it for the current run.
-        self._dual_watch_enabled = True
+        # The second slot is experimental and opt-in until live canary evidence
+        # proves Twitch credits both independent watch sessions reliably.
+        self._dual_watch_enabled = bool(
+            getattr(self.settings, "experimental_dual_watch", False)
+        )
         try:
             auth_state = await self.get_auth()
-        except (CaptchaRequired, LoginException, RequestInvalid) as exc:
+        except (LoginException, RequestInvalid) as exc:
             self.history_event(
                 "auth.required",
                 severity="warning",
@@ -1050,7 +416,7 @@ class Twitch:
             elif self._state is State.GAMES_UPDATE:
                 await self._update_games_state()
                 full_cleanup = True
-                self.restart_watching()
+                self.watch_service.restart_watching()
                 self.change_state(State.CHANNELS_CLEANUP)
             elif self._state is State.CHANNELS_CLEANUP:
                 full_cleanup = self._cleanup_channels_state(channels, full_cleanup)
@@ -1074,7 +440,7 @@ class Twitch:
             if not campaign.upcoming:
                 for drop in campaign.drops:
                     if drop.can_claim and await drop.claim():
-                        self._mark_watch_completed_drop(drop.id)
+                        self.watch_service._mark_watch_completed_drop(drop.id)
         # figure out which games we want
         self.wanted_games.clear()
         exclude = self.settings.exclude
@@ -1113,22 +479,61 @@ class Twitch:
             return True
         self.gui.tray.change_icon("idle")
         self.gui.status.update(_("gui", "status", "idle"))
-        self.stop_watching()
+        self.watch_service.stop_watching()
         # clear the flag and wait until it's set again
         self._state_change.clear()
         return False
 
+    async def _retry_inventory_after(self, generation: int, delay: float) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await self.transport.wait_for_delay(delay)
+        except ExitRequest:
+            return
+        finally:
+            if self._inventory_retry_task is current_task:
+                self._inventory_retry_task = None
+        if (
+            self._state_generation == generation
+            and self._state is State.INVENTORY_FETCH
+        ):
+            self.change_state(State.INVENTORY_FETCH)
+
     async def _fetch_inventory_state(self) -> None:
+        state_generation = self._state_generation
         self.gui.tray.change_icon("maint")
-        # Inventory replacement invalidates every old drop object and
-        # assignment, so no watch task may run against the old indexes.
-        self.stop_watching()
-        # ensure the websocket is running
+        # Keep the last-good snapshot and watch assignments active while a
+        # replacement is fetched. InventoryService quiesces them at commit.
         await self.websocket.start()
         try:
-            await self.fetch_inventory()
-        except ExitRequest:
+            await self.inventory_service.fetch_inventory()
+        except (ExitRequest, LoginException, RequestInvalid):
             raise
+        except RequestException as exc:
+            self._inventory_retry_attempt += 1
+            delay = min(
+                INVENTORY_RETRY_BASE
+                * (2 ** min(self._inventory_retry_attempt - 1, 10)),
+                INVENTORY_RETRY_MAX,
+            )
+            if self._inventory_retry_attempt == 1:
+                self.history_event(
+                    "inventory.sync_failed",
+                    severity="warning",
+                    data={"error_type": type(exc).__name__},
+                )
+            self.gui.status.update(
+                _("gui", "status", "inventory_retry").format(
+                    seconds=max(1, round(delay))
+                )
+            )
+            retry_task = self._inventory_retry_task
+            if retry_task is not None:
+                await cancel_tasks((retry_task,))
+            self._inventory_retry_task = asyncio.create_task(
+                self._retry_inventory_after(state_generation, delay)
+            )
+            return
         except Exception as exc:
             self.history_event(
                 "inventory.sync_failed",
@@ -1136,15 +541,25 @@ class Twitch:
                 data={"error_type": type(exc).__name__},
             )
             raise
+
+        retry_attempts = self._inventory_retry_attempt
+        self._inventory_retry_attempt = 0
+        if retry_attempts:
+            self.history_event(
+                "inventory.sync_recovered",
+                data={"attempts": retry_attempts},
+            )
         self.history_event(
             "inventory.synced",
             data={"campaigns": len(self.inventory), "drops": len(self._drops)},
         )
         self._record_campaign_deadlines()
         self.gui.set_games(set(campaign.game for campaign in self.inventory))
-        # Save state on every inventory fetch
+        # Save state on every inventory fetch. Do not overwrite a newer state
+        # request (including a manual refresh requesting INVENTORY_FETCH again).
         self.save()
-        self.change_state(State.GAMES_UPDATE)
+        if self._state_generation == state_generation:
+            self.change_state(State.GAMES_UPDATE)
 
     def _record_campaign_deadlines(self) -> None:
         now = datetime.now(timezone.utc)
@@ -1159,9 +574,10 @@ class Twitch:
                 "campaign.deadline",
                 severity="warning",
                 data={
+                    "campaign_id": campaign.id,
                     "campaign": campaign.name,
                     "game": campaign.game.name,
-                    "remaining_minutes": max(1, int(remaining // 60)),
+                    "remaining_minutes": max(1, floor(remaining / 60)),
                 },
             )
 
@@ -1174,7 +590,7 @@ class Twitch:
         # or select a new channel that meets the required conditions
         new_watching = None
         selected_channel = self.gui.channels.get_selection()
-        if selected_channel is not None and self.can_watch(selected_channel):
+        if selected_channel is not None and self.watch_service.can_watch(selected_channel):
             # selected channel is checked first, and set as long as we can watch it
             new_watching = selected_channel
         else:
@@ -1183,19 +599,19 @@ class Twitch:
             # NOTE: we need to sort the channels every time because one channel
             # can end up streaming any game - channels aren't game-tied
             for channel in sorted(channels.values(), key=self.get_priority):
-                if self.should_switch(channel):
+                if self.watch_service.should_switch(channel):
                     new_watching = channel
                     break
         watching_channel = self.watching_channel.get_with_default(None)
         if new_watching is not None:
             # if we have a better switch target - do so
-            self.watch(new_watching)
+            self.watch_service.watch(new_watching)
             # break the state change chain by clearing the flag
             self._state_change.clear()
-        elif watching_channel is not None and self.can_watch(watching_channel):
+        elif watching_channel is not None and self.watch_service.can_watch(watching_channel):
             # otherwise, continue watching what we had before and refill
             # the second distinct target if one is available.
-            self.watch(watching_channel, update_status=False)
+            self.watch_service.watch(watching_channel, update_status=False)
             self.gui.status.update(
                 _("status", "watching").format(channel=watching_channel.name)
             )
@@ -1250,12 +666,29 @@ class Twitch:
             self.change_state(State.IDLE)
         return full_cleanup
 
+    async def _fetch_live_streams_for_games(
+        self,
+        games: abc.Iterable[Game],
+    ) -> set[Channel]:
+        channels: set[Channel] = set()
+        for game in games:
+            try:
+                streams = await self.get_live_streams(game, drops_enabled=True)
+            except MinerException:
+                logger.warning(
+                    "Unable to fetch live channels for %s; continuing",
+                    game.name,
+                )
+                continue
+            channels.update(streams)
+        return channels
+
     async def _fetch_channels(
         self, channels: OrderedDict[int, Channel]
     ) -> None:
         # Channel objects are replaced below; cancel watch tasks before
         # clearing the channel map so an old task cannot race a relink.
-        self.stop_watching()
+        self.watch_service.stop_watching()
         self.gui.status.update(_("gui", "status", "gathering"))
         # start with all current channels, clear the memory and GUI
         new_channels: set[Channel] = set(channels.values())
@@ -1282,10 +715,7 @@ class Twitch:
         await self.bulk_check_online(acl_channels)
         # finally, add them as new channels
         new_channels.update(acl_channels)
-        for game in no_acl:
-            # for every campaign without an ACL, for it's game,
-            # add a list of live channels with drops enabled
-            new_channels.update(await self.get_live_streams(game, drops_enabled=True))
+        new_channels.update(await self._fetch_live_streams_for_games(no_acl))
         # sort them descending by viewers, by priority and by game priority
         # NOTE: Viewers sort also ensures ONLINE channels are sorted to the top
         # NOTE: We can drop using the set now, because there's no more channels being added
@@ -1319,22 +749,10 @@ class Twitch:
                 )
             )
         self.websocket.add_topics(to_add_topics)
-        # relink watching channel after cleanup,
-        # or stop watching it if it no longer qualifies
-        # NOTE: this replaces 'self.watching_channel's internal value with the new object
-        watching_channel = self.watching_channel.get_with_default(None)
-        if watching_channel is not None:
-            new_watching: Channel | None = channels.get(watching_channel.id)
-            if new_watching is not None and self.can_watch(new_watching):
-                self.watch(new_watching, update_status=False)
-            else:
-                # we've removed a channel we were watching
-                self.stop_watching()
-            del new_watching
-        # pre-display the active drop with a substracted minute
+        # Pre-display the active drop with a subtracted minute.
         for channel in channels.values():
             # check if there's any channels we can watch first
-            if self.can_watch(channel):
+            if self.watch_service.can_watch(channel):
                 if (
                     (active_campaign := self.get_active_campaign(channel)) is not None
                     and (active_drop := active_campaign.first_drop) is not None
@@ -1348,581 +766,7 @@ class Twitch:
             new_channels,
             to_add_topics,
             ordered_channels,
-            watching_channel,
         )
-
-    async def _watch_sleep(self, event: asyncio.Event, delay: float) -> bool:
-        # Each watched channel owns an event so a restart wakes every watch loop.
-        interrupted = False
-        try:
-            await asyncio.wait_for(event.wait(), timeout=max(delay, 0))
-        except asyncio.TimeoutError:
-            pass
-        else:
-            interrupted = True
-        event.clear()
-        return interrupted
-
-    def _display_primary_drop(self, drop: TimedDrop) -> None:
-        primary = self.watching_channel.get_with_default(None)
-        if primary is not None and self._watch_drop_ids.get(primary.id) == drop.id:
-            drop.display()
-
-    def _mark_watch_completed_drop(self, drop_id: str) -> None:
-        completed_drop_ids = getattr(self, "_watch_completed_drop_ids", None)
-        if completed_drop_ids is None:
-            completed_drop_ids = set()
-            self._watch_completed_drop_ids = completed_drop_ids
-        completed_drop_ids.add(drop_id)
-
-    def _request_watch_resync(self, key: str, seconds: float = 300) -> bool:
-        resync_cooldowns = getattr(self, "_watch_resync_cooldowns", None)
-        if resync_cooldowns is None:
-            resync_cooldowns = {}
-            self._watch_resync_cooldowns = resync_cooldowns
-        now = time()
-        if resync_cooldowns.get(key, 0) > now:
-            return False
-        resync_cooldowns[key] = now + seconds
-        self.change_state(State.INVENTORY_FETCH)
-        return True
-
-    def _disable_dual_watch_if_secondary(self, channel: Channel) -> None:
-        primary = self.watching_channel.get_with_default(None)
-        if (
-            primary is not None
-            and primary.id != channel.id
-            and len(self._watching_channels) > 1
-            and self._dual_watch_enabled
-        ):
-            self._dual_watch_enabled = False
-            logger.warning(
-                "Disabling the second watch target after unscoped progress for %s",
-                channel.name,
-            )
-
-    async def _reconcile_watch_progress(self, channel: Channel) -> None:
-        """Refresh assigned progress from Twitch's authoritative viewer session."""
-        if self._watch_drop_ids.get(channel.id) is None:
-            return
-        try:
-            context = await self.gql_request(
-                GQL_QUERIES["CurrentDrop"].with_variables(
-                    {"channelID": str(channel.id)}
-                )
-            )
-            drop_data: JsonType | None = (
-                context["data"]["currentUser"]["dropCurrentSession"]
-            )
-        except (GQLException, RequestException, KeyError, TypeError):
-            logger.warning("Unable to reconcile drop progress for %s", channel.name)
-            return
-        if not isinstance(drop_data, dict):
-            logger.log(CALL, "Twitch reported no current drop for %s", channel.name)
-            return
-        drop_id = drop_data.get("dropID")
-        if not isinstance(drop_id, str):
-            logger.warning("Twitch returned an invalid current drop for %s", channel.name)
-            return
-
-        reported_channel_id: int | None = None
-        reported_channel = drop_data.get("channel")
-        if isinstance(reported_channel, dict):
-            try:
-                raw_channel_id = reported_channel.get("id")
-                reported_channel_id = (
-                    int(raw_channel_id) if raw_channel_id is not None else None
-                )
-            except (TypeError, ValueError):
-                logger.warning("Twitch returned an invalid channel for %s", channel.name)
-                return
-
-        # DropCurrentSessionContext is account-scoped in practice: Twitch can return
-        # a stale session for a different channel even when channelID was supplied.
-        # The Drop ID is the safest discriminator, followed by the reported channel.
-        # A mismatch is therefore advisory and must not restart the productive target.
-        if drop_id in getattr(self, "_watch_completed_drop_ids", set()):
-            stale_channel: Channel | None = channel
-            if reported_channel_id is not None:
-                stale_channel = self._watching_channels.get(reported_channel_id)
-                if stale_channel is None:
-                    logger.log(
-                        CALL,
-                        "Ignoring stale completed drop %s from channel %s",
-                        drop_id,
-                        reported_channel_id,
-                    )
-                    return
-            logger.info(
-                "Twitch still reports previously completed drop %s for %s; skipping claim",
-                drop_id,
-                stale_channel.name,
-            )
-            self._disable_dual_watch_if_secondary(stale_channel)
-            self._block_watch_channel(stale_channel.id)
-            self.change_state(State.CHANNEL_SWITCH)
-            return
-
-        target = channel
-        if reported_channel_id is not None and reported_channel_id != channel.id:
-            assigned_owner = next(
-                (
-                    candidate
-                    for candidate, assigned in self._watch_drop_ids.items()
-                    if assigned == drop_id and candidate in self._watching_channels
-                ),
-                None,
-            )
-            if assigned_owner is not None:
-                target = self._watching_channels[assigned_owner]
-                logger.log(
-                    CALL,
-                    "Routing current drop %s from %s to assigned channel %s",
-                    drop_id,
-                    channel.name,
-                    target.name,
-                )
-            elif reported_channel_id in self._watching_channels:
-                target = self._watching_channels[reported_channel_id]
-                logger.log(
-                    CALL,
-                    "Routing current drop response from %s to reported channel %s",
-                    channel.name,
-                    target.name,
-                )
-            else:
-                logger.warning(
-                    "Ignoring stale current-drop session for %s: %s",
-                    channel.name,
-                    drop_id,
-                )
-                return
-
-        assigned_drop_id = self._watch_drop_ids.get(target.id)
-        if assigned_drop_id is None:
-            return
-        try:
-            current_minutes = int(drop_data["currentMinutesWatched"])
-        except (KeyError, TypeError, ValueError):
-            logger.warning("Twitch returned invalid progress for %s", target.name)
-            return
-        gql_drop = self._drops.get(drop_id)
-        if gql_drop is None:
-            if self._request_watch_resync(f"unknown-current-drop:{drop_id}"):
-                logger.warning(
-                    "Twitch reported an unknown current drop for %s: %s",
-                    target.name,
-                    drop_id,
-                )
-            self._disable_dual_watch_if_secondary(target)
-            self._block_watch_channel(target.id)
-            return
-        if drop_id != assigned_drop_id:
-            assigned_elsewhere = any(
-                other_id != target.id and assigned == drop_id
-                for other_id, assigned in self._watch_drop_ids.items()
-            )
-            if assigned_elsewhere:
-                logger.log(
-                    CALL,
-                    "Ignoring duplicate current drop %s already assigned elsewhere",
-                    drop_id,
-                )
-                return
-            if not gql_drop.can_earn(target):
-                if self._request_watch_resync(f"ineligible-current-drop:{drop_id}"):
-                    logger.warning(
-                        "Twitch current drop %s is not locally eligible on %s",
-                        drop_id,
-                        target.name,
-                    )
-                self._disable_dual_watch_if_secondary(target)
-                self._block_watch_channel(target.id)
-                return
-            self._watch_drop_ids[target.id] = drop_id
-            restart_event = self._watch_restart_events.get(target.id)
-            if restart_event is not None:
-                restart_event.set()
-            logger.info(
-                "Reconciled watch assignment for %s: %s -> %s",
-                target.name,
-                assigned_drop_id,
-                drop_id,
-            )
-        if gql_drop.is_claimed:
-            logger.info("Twitch reported an already-claimed drop for %s", target.name)
-            self._mark_watch_completed_drop(drop_id)
-            self._disable_dual_watch_if_secondary(target)
-            self._block_watch_channel(target.id)
-            self._request_watch_resync(f"claimed-current-drop:{drop_id}")
-            return
-        if not gql_drop.can_earn(target):
-            if self._request_watch_resync(f"lost-eligibility:{drop_id}"):
-                logger.warning(
-                    "Current drop %s is no longer locally eligible on %s",
-                    drop_id,
-                    target.name,
-                )
-            self._disable_dual_watch_if_secondary(target)
-            self._block_watch_channel(target.id)
-            return
-        if current_minutes >= gql_drop.required_minutes > 0:
-            try:
-                await gql_drop.generate_claim()
-                claimed = await gql_drop.claim()
-            except (GQLException, RequestException):
-                claimed = False
-            self._block_watch_channel(target.id)
-            if claimed:
-                self._mark_watch_completed_drop(drop_id)
-                self._watch_claim_cooldowns.pop(drop_id, None)
-                logger.info("Claimed completed current drop %s", drop_id)
-            else:
-                # Do not let the normal inventory claim pass immediately retry
-                # the same synthetic claim ID; retry it only after a cooldown.
-                gql_drop.claim_id = None
-                self._watch_claim_cooldowns[drop_id] = time() + 300
-                logger.warning("Could not claim completed current drop %s", drop_id)
-            self._request_watch_resync(f"completed-current-drop:{drop_id}")
-            return
-        previous_minutes = gql_drop.current_minutes
-        gql_drop.update_minutes(current_minutes)
-        self._display_primary_drop(gql_drop)
-        if gql_drop.current_minutes > previous_minutes:
-            logger.log(
-                CALL,
-                "Drop progress from GQL: %s (%s, %s/%s) on %s",
-                gql_drop.name,
-                gql_drop.campaign.game,
-                gql_drop.current_minutes,
-                gql_drop.required_minutes,
-                target.name,
-            )
-
-    async def _watch_channel_loop(
-        self, channel: Channel, restart_event: asyncio.Event, generation: int
-    ) -> None:
-        interval = WATCH_INTERVAL.total_seconds()
-        try:
-            while (
-                generation == self._watch_generation
-                and self._watching_channels.get(channel.id) is channel
-                and channel.id in self._watch_drop_ids
-            ):
-                if not channel.online or not self.can_watch(channel):
-                    self.change_state(State.CHANNEL_SWITCH)
-                    return
-                succeeded = await channel.send_watch()
-                last_sent = time()
-                if not succeeded:
-                    logger.log(CALL, "Watch request failed for channel: %s", channel.name)
-                if await self._watch_sleep(restart_event, 20):
-                    continue
-                primary = self.watching_channel.get_with_default(None)
-                if channel is not primary or self.gui.progress.minute_almost_done():
-                    await self._reconcile_watch_progress(channel)
-                await self._watch_sleep(
-                    restart_event, interval - min(time() - last_sent, interval)
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Watch loop failed for channel %s", channel.name)
-            self.change_state(State.CHANNEL_SWITCH)
-
-    def _watch_task_done(self, channel_id: int, task: asyncio.Task[None]) -> None:
-        if self._watch_tasks.get(channel_id) is task:
-            del self._watch_tasks[channel_id]
-        if not task.cancelled() and task.exception() is not None:
-            logger.error("Watch task failed for channel %s", channel_id)
-
-    def _release_watch_channel(self, channel_id: int, blocked_until: float) -> None:
-        channel_cooldowns = getattr(self, "_watch_channel_cooldowns", {})
-        if channel_cooldowns.get(channel_id) != blocked_until:
-            return
-        remaining = blocked_until - time()
-        if remaining > 0:
-            try:
-                asyncio.get_running_loop().call_later(
-                    remaining, self._release_watch_channel, channel_id, blocked_until
-                )
-            except RuntimeError:
-                return
-            return
-        del channel_cooldowns[channel_id]
-        self.change_state(State.CHANNEL_SWITCH)
-
-    def _block_watch_channel(self, channel_id: int, seconds: float = 300) -> None:
-        channel_cooldowns = getattr(self, "_watch_channel_cooldowns", None)
-        if channel_cooldowns is None:
-            channel_cooldowns = {}
-            self._watch_channel_cooldowns = channel_cooldowns
-        blocked_until = max(
-            channel_cooldowns.get(channel_id, 0), time() + seconds
-        )
-        channel_cooldowns[channel_id] = blocked_until
-        try:
-            asyncio.get_running_loop().call_later(
-                max(0, blocked_until - time()),
-                self._release_watch_channel,
-                channel_id,
-                blocked_until,
-            )
-        except RuntimeError:
-            pass
-
-    def _eligible_drops_for_channel(self, channel: Channel) -> list[TimedDrop]:
-        candidates: list[TimedDrop] = []
-        seen: set[str] = set()
-        now = time()
-        claim_cooldowns = getattr(self, "_watch_claim_cooldowns", {})
-        completed_drop_ids = getattr(self, "_watch_completed_drop_ids", set())
-        for campaign in self.inventory:
-            if not campaign.can_earn(channel):
-                continue
-            for drop in campaign.drops:
-                if drop.id in completed_drop_ids:
-                    continue
-                blocked_until = claim_cooldowns.get(drop.id)
-                if blocked_until is not None:
-                    if blocked_until > now:
-                        continue
-                    claim_cooldowns.pop(drop.id, None)
-                if drop.id not in seen and drop.can_earn(channel):
-                    candidates.append(drop)
-                    seen.add(drop.id)
-        candidates.sort(key=lambda drop: (drop.remaining_minutes, drop.ends_at))
-        return candidates
-
-    def _select_watch_assignments(
-        self, preferred: Channel | None = None
-    ) -> list[tuple[Channel, TimedDrop]]:
-        """Select up to two assignments with a unique game and drop per target."""
-        ordered = self._rank_channels(self.channels.values())
-        if preferred is not None and preferred in ordered:
-            ordered.remove(preferred)
-            ordered.insert(0, preferred)
-        now = time()
-        channel_cooldowns = getattr(self, "_watch_channel_cooldowns", {})
-        for candidate in ordered:
-            blocked_until = channel_cooldowns.get(candidate.id)
-            if blocked_until is not None and blocked_until <= now:
-                del channel_cooldowns[candidate.id]
-        options = [
-            (candidate, self._eligible_drops_for_channel(candidate))
-            for candidate in ordered
-            if candidate.game is not None
-            and self.can_watch(candidate)
-            and channel_cooldowns.get(candidate.id, 0) <= now
-        ]
-        for first_index, (first_channel, first_drops) in enumerate(options):
-            for first_drop in first_drops:
-                first_assignment = (first_channel, first_drop)
-                if MAX_WATCH_CHANNELS == 1 or not getattr(self, "_dual_watch_enabled", True):
-                    return [first_assignment]
-                for second_channel, second_drops in options[first_index + 1:]:
-                    if second_channel.game == first_channel.game:
-                        continue
-                    for second_drop in second_drops:
-                        if second_drop.id != first_drop.id:
-                            return [first_assignment, (second_channel, second_drop)]
-        if options:
-            return [(options[0][0], options[0][1][0])]
-        return []
-
-    def _select_watch_channels(self, preferred: Channel | None = None) -> list[Channel]:
-        return [channel for channel, _drop in self._select_watch_assignments(preferred)]
-
-    def _apply_watch_assignments(
-        self,
-        assignments: list[tuple[Channel, TimedDrop]],
-        *,
-        update_status: bool = True,
-    ) -> None:
-        max_targets = (
-            MAX_WATCH_CHANNELS if getattr(self, "_dual_watch_enabled", True) else 1
-        )
-        assignments = assignments[:max_targets]
-        channels = [channel for channel, _drop in assignments]
-        targets = OrderedDict((channel.id, channel) for channel in channels)
-        target_drop_ids = {channel.id: drop.id for channel, drop in assignments}
-        generation = self._bump_watch_generation()
-        for event in self._watch_restart_events.values():
-            event.set()
-        for task in self._watch_tasks.values():
-            task.cancel()
-        self._watch_tasks.clear()
-        self._watch_restart_events.clear()
-        self._watching_channels = targets
-        self._watch_drop_ids = target_drop_ids
-        for channel in channels:
-            event = asyncio.Event()
-            self._watch_restart_events[channel.id] = event
-            task = asyncio.create_task(
-                self._watch_channel_loop(channel, event, generation)
-            )
-            self._watch_tasks[channel.id] = task
-            task.add_done_callback(
-                lambda completed, channel_id=channel.id: self._watch_task_done(
-                    channel_id, completed
-                )
-            )
-        primary = channels[0] if channels else None
-        history_signature = getattr(self, "_history_watch_signature", None)
-        if primary is None:
-            if history_signature is not None:
-                self.history_event(
-                    "watch.stopped",
-                    data={"targets": len(history_signature)},
-                )
-                self._history_watch_signature = None
-            self._watch_drop_ids.clear()
-            self.watching_channel.clear()
-            self.gui.channels.clear_watching()
-            return
-        signature = tuple((channel.id, drop.id) for channel, drop in assignments)
-        if signature != history_signature:
-            self.history_event(
-                "watch.started" if history_signature is None else "watch.changed",
-                data={
-                    "channels": ", ".join(channel.name for channel in channels),
-                    "targets": len(signature),
-                },
-            )
-            self._history_watch_signature = signature
-        self.watching_channel.set(primary)
-        set_watching_channels = getattr(self.gui.channels, "set_watching_channels", None)
-        if set_watching_channels is not None:
-            set_watching_channels(channels)
-        else:
-            self.gui.channels.set_watching(primary)
-        if getattr(self.gui, "display_drop", None) is not None:
-            assignments[0][1].display(countdown=False, subone=True)
-        if update_status:
-            status_text = _("status", "watching").format(channel=primary.name)
-            self.print(status_text)
-            self.gui.status.update(status_text)
-        if len(assignments) > 1:
-            logger.info(
-                "Watching distinct drop targets: %s (%s) and %s (%s)",
-                assignments[0][0].name,
-                assignments[0][1].id,
-                assignments[1][0].name,
-                assignments[1][1].id,
-            )
-
-    @task_wrapper(critical=True)
-    async def _maintenance_task(self) -> None:
-        now = datetime.now(timezone.utc)
-        next_period = now + timedelta(hours=1)
-        while True:
-            # exit if there's no need to repeat the loop
-            now = datetime.now(timezone.utc)
-            if now >= next_period:
-                break
-            next_trigger = next_period
-            while self._mnt_triggers and self._mnt_triggers[0] <= next_trigger:
-                next_trigger = self._mnt_triggers.popleft()
-            trigger_type: str = "Reload" if next_trigger == next_period else "Cleanup"
-            logger.log(
-                CALL,
-                (
-                    "Maintenance task waiting until: "
-                    f"{next_trigger.astimezone().strftime('%X')} ({trigger_type})"
-                )
-            )
-            await asyncio.sleep((next_trigger - now).total_seconds())
-            # exit after waiting, before the actions
-            now = datetime.now(timezone.utc)
-            if now >= next_period:
-                break
-            if next_trigger != next_period:
-                logger.log(CALL, "Maintenance task requests channels cleanup")
-                self.change_state(State.CHANNELS_CLEANUP)
-        # this triggers a restart of this task every (up to) 60 minutes
-        logger.log(CALL, "Maintenance task requests a reload")
-        self.change_state(State.INVENTORY_FETCH)
-
-    def can_watch(self, channel: Channel) -> bool:
-        """
-        Determines if the given channel qualifies as a watching candidate.
-        """
-        # exit early if stream is offline
-        if not channel.online:
-            return False
-        for campaign in self.inventory:
-            if (
-                campaign.can_earn(channel)  # let the campaign do the "special games" check
-                and (
-                    # limit watching to the games the user wants
-                    channel.game is not None
-                    and channel.drops_enabled
-                    and channel.game in self.wanted_games
-                    # let the campaign ignore all channel-related checks
-                    or campaign.game.is_special()
-                )
-            ):
-                return True
-        return False
-
-    def should_switch(self, channel: Channel) -> bool:
-        """Return whether a channel should enter the distinct watch set."""
-        if not self.can_watch(channel) or channel.id in self._watching_channels:
-            return False
-        watching_channel = self.watching_channel.get_with_default(None)
-        if watching_channel is None or not self.can_watch(watching_channel):
-            return True
-        selected = self._select_watch_channels(preferred=channel)
-        if channel.id not in {candidate.id for candidate in selected}:
-            return False
-        if len(self._watching_channels) < MAX_WATCH_CHANNELS:
-            return True
-        current_worst = max(
-            self._watching_channels.values(),
-            key=lambda candidate: (self.get_priority(candidate), not candidate.acl_based),
-        )
-        return (
-            self.get_priority(channel) < self.get_priority(current_worst)
-            or (
-                self.get_priority(channel) == self.get_priority(current_worst)
-                and channel.acl_based > current_worst.acl_based
-            )
-        )
-
-    def watch(self, channel: Channel, *, update_status: bool = True):
-        self.gui.tray.change_icon("active")
-        assignments = self._select_watch_assignments(preferred=channel)
-        self._apply_watch_assignments(assignments, update_status=update_status)
-
-    def _bump_watch_generation(self) -> int:
-        self._watch_generation += 1
-        return self._watch_generation
-
-    def stop_watching(self):
-        history_signature = getattr(self, "_history_watch_signature", None)
-        if history_signature is not None:
-            self.history_event(
-                "watch.stopped",
-                data={"targets": len(history_signature)},
-            )
-            self._history_watch_signature = None
-        self.gui.clear_drop()
-        self._bump_watch_generation()
-        for event in self._watch_restart_events.values():
-            event.set()
-        for task in self._watch_tasks.values():
-            task.cancel()
-        self._watch_tasks.clear()
-        self._watch_restart_events.clear()
-        self._watching_channels.clear()
-        self._watch_drop_ids.clear()
-        self.watching_channel.clear()
-        self.gui.channels.clear_watching()
-
-    def restart_watching(self):
-        self.gui.progress.stop_timer()
-        for event in self._watch_restart_events.values():
-            event.set()
 
     @task_wrapper
     async def process_stream_state(self, channel_id: int, message: JsonType):
@@ -1937,8 +781,14 @@ class Twitch:
                 channel.check_online()
             else:
                 try:
-                    viewers = int(message["viewers"])
-                except (KeyError, TypeError, ValueError):
+                    viewers = require_int(
+                        message["viewers"],
+                        "Invalid viewer count",
+                    )
+                except (KeyError, ValueError):
+                    logger.warning("Ignoring invalid viewer count for %s", channel.name)
+                    return
+                if viewers < 0:
                     logger.warning("Ignoring invalid viewer count for %s", channel.name)
                     return
                 channel.viewers = viewers
@@ -1990,10 +840,10 @@ class Twitch:
         if stream_before is None:
             if stream_after is not None:
                 # Channel going ONLINE
-                if self.should_switch(channel):
+                if self.watch_service.should_switch(channel):
                     # we can watch the channel, and we should
                     self.print(_("status", "goes_online").format(channel=channel.name))
-                    self.watch(channel)
+                    self.watch_service.watch(channel)
                 else:
                     logger.info(f"{channel.name} goes ONLINE")
             else:
@@ -2002,7 +852,7 @@ class Twitch:
         else:
             is_watching = channel.id in self._watching_channels
             if is_watching:
-                if not self.can_watch(channel):
+                if not self.watch_service.can_watch(channel):
                     if stream_after is None:
                         self.print(_("status", "goes_offline").format(channel=channel.name))
                     else:
@@ -2020,19 +870,30 @@ class Twitch:
                     f"(🎁: {self._drops_marker(stream_before)} -> "
                     f"{self._drops_marker(stream_after)})"
                 )
-                if self.should_switch(channel):
-                    self.watch(channel)
+                if self.watch_service.should_switch(channel):
+                    self.watch_service.watch(channel)
         channel.display()
 
     @staticmethod
     def _drops_marker(stream: Stream | None) -> str:
         return "✔" if stream is not None and stream.drops_enabled else "❌"
 
+    def _inventory_drop_is_current(
+        self,
+        generation: int,
+        drop: TimedDrop,
+    ) -> bool:
+        return (
+            generation == self._inventory_generation
+            and self._drops.get(drop.id) is drop
+        )
+
     @task_wrapper
     async def process_drops(self, user_id: int, message: JsonType):
         # Message examples:
         # {"type": "drop-progress", data: {"current_progress_min": 3, "required_progress_min": 10}}
         # {"type": "drop-claim", data: {"drop_instance_id": ...}}
+        inventory_generation = self._inventory_generation
         msg_type: str = message["type"]
         if msg_type not in ("drop-progress", "drop-claim"):
             return
@@ -2078,7 +939,7 @@ class Twitch:
                     drop_id,
                 )
             else:
-                if self._request_watch_resync(f"unassigned-drop:{drop_id}"):
+                if self.watch_service._request_watch_resync(f"unassigned-drop:{drop_id}"):
                     logger.warning("Ignoring an event for an unassigned drop: %s", drop_id)
                 return
         if drop is None:
@@ -2093,16 +954,19 @@ class Twitch:
             drop.update_claim(claim_id)
             campaign = drop.campaign
             claimed = await drop.claim()
+            if not self._inventory_drop_is_current(inventory_generation, drop):
+                logger.info("Ignoring a claim result from a replaced inventory")
+                return
             if claimed:
-                self._mark_watch_completed_drop(drop.id)
-            self._display_primary_drop(drop)
+                self.watch_service._mark_watch_completed_drop(drop.id)
+            self.watch_service._display_primary_drop(drop)
 
             async def wait_for_next_drop(channel: Channel) -> None:
                 # About 4-20s after claiming, Twitch starts the next drop after
                 # another watch payload. Check each assigned channel independently.
                 for _attempt in range(8):
                     try:
-                        context = await self.gql_request(
+                        context = await self.transport.gql_request(
                             GQL_QUERIES["CurrentDrop"].with_variables(
                                 {"channelID": str(channel.id)}
                             )
@@ -2112,6 +976,11 @@ class Twitch:
                         )
                     except (GQLException, RequestException, KeyError, TypeError):
                         return
+                    if not self._inventory_drop_is_current(
+                        inventory_generation,
+                        drop,
+                    ):
+                        return
                     if (
                         not isinstance(current_data, dict)
                         or current_data.get("dropID") != drop.id
@@ -2120,27 +989,38 @@ class Twitch:
                     await asyncio.sleep(2)
 
             await asyncio.sleep(4)
-            await asyncio.gather(*(wait_for_next_drop(channel) for channel in watching_channels))
-            if claimed and any(self.can_watch(channel) for channel in self._watching_channels.values()):
+            if not self._inventory_drop_is_current(inventory_generation, drop):
+                return
+            await asyncio.gather(
+                *(wait_for_next_drop(channel) for channel in watching_channels)
+            )
+            if not self._inventory_drop_is_current(inventory_generation, drop):
+                return
+            if claimed and any(self.watch_service.can_watch(channel) for channel in self._watching_channels.values()):
                 primary = self.watching_channel.get_with_default(None)
                 if primary is not None:
-                    self.watch(primary, update_status=False)
-                    self.restart_watching()
+                    self.watch_service.watch(primary, update_status=False)
+                    self.watch_service.restart_watching()
                     return
             elif not claimed and any(campaign.can_earn(channel) for channel in watching_channels):
-                self.restart_watching()
+                self.watch_service.restart_watching()
                 return
             self.change_state(State.INVENTORY_FETCH)
             return
         assert msg_type == "drop-progress"
         current_progress = data.get("current_progress_min")
         required_progress = data.get("required_progress_min")
-        try:
-            current_progress_int = int(cast(Any, current_progress))
-            required_progress_int = int(cast(Any, required_progress))
-        except (TypeError, ValueError):
+        if (
+            type(current_progress) is not int
+            or type(required_progress) is not int
+            or current_progress < 0
+            or required_progress < 0
+            or current_progress > required_progress
+        ):
             logger.warning("Ignoring a drop event with invalid progress: %s", drop_id)
             return
+        current_progress_int = current_progress
+        required_progress_int = required_progress
         logger.log(
             CALL,
             "Drop update from websocket: %s (%s/%s)",
@@ -2150,8 +1030,8 @@ class Twitch:
         )
         # PubSub does not include a channel ID; the assigned drop ID is the
         # authoritative discriminator when two channels are being farmed.
-        drop.update_minutes(current_progress_int)
-        self._display_primary_drop(drop)
+        drop.update_minutes(current_progress_int, required_progress_int)
+        self.watch_service._display_primary_drop(drop)
 
     @task_wrapper
     async def process_notifications(self, user_id: int, message: JsonType):
@@ -2164,7 +1044,7 @@ class Twitch:
             ):
                 self.change_state(State.INVENTORY_FETCH)
                 try:
-                    await self.gql_request(
+                    await self.transport.gql_request(
                         GQL_QUERIES["NotificationsDelete"].with_variables(
                             {"input": {"id": data["id"]}}
                         )
@@ -2174,448 +1054,9 @@ class Twitch:
                     # after the inventory refresh; the next event can retry it.
                     logger.debug("Unable to delete Twitch notification")
 
-    async def get_auth(self) -> _AuthState:
+    async def get_auth(self) -> AuthState:
         await self._auth_state.validate()
         return self._auth_state
-
-    def _record_rate_limit(self, response: aiohttp.ClientResponse) -> None:
-        remaining = response.headers.get("Ratelimit-Remaining")
-        reset = response.headers.get("Ratelimit-Reset")
-        self._rate_limit_remaining = safe_int(remaining)
-        reset_timestamp = safe_int(reset)
-        self._rate_limit_reset = (
-            datetime.fromtimestamp(reset_timestamp, timezone.utc)
-            if reset_timestamp is not None
-            else None
-        )
-        if remaining is not None or reset is not None:
-            logger.debug(
-                "Twitch rate limit: remaining=%s reset=%s",
-                self._rate_limit_remaining,
-                self._rate_limit_reset.isoformat() if self._rate_limit_reset else None,
-            )
-
-    @asynccontextmanager
-    async def request(
-        self, method: str, url: URL | str, *, invalidate_after: datetime | None = None, **kwargs
-    ) -> abc.AsyncIterator[aiohttp.ClientResponse]:
-        session = await self.get_session()
-        method = method.upper()
-        if self.settings.proxy and "proxy" not in kwargs:
-            kwargs["proxy"] = self.settings.proxy
-        logger.debug(
-            "Request: method=%s url=%s kwargs=%s",
-            method,
-            redact_log_value(url, key="url"),
-            redact_log_value(kwargs),
-        )
-        session_timeout = timedelta(seconds=session.timeout.total or 0)
-        backoff = ExponentialBackoff(maximum=3*60)
-        for delay in backoff:
-            if self.gui.close_requested:
-                raise ExitRequest()
-            elif (
-                invalidate_after is not None
-                # account for the expiration landing during the request
-                and datetime.now(timezone.utc) >= (invalidate_after - session_timeout)
-            ):
-                raise RequestInvalid()
-            response: aiohttp.ClientResponse | None = None
-            sleep_delay = delay
-            try:
-                response = await self.gui.coro_unless_closed(
-                    session.request(method, url, **kwargs)
-                )
-                if response is None:
-                    raise RuntimeError("HTTP request returned no response")
-                self._record_rate_limit(response)
-                logger.debug(
-                    "Response: status=%s url=%s",
-                    response.status,
-                    redact_log_value(response.url, key="url"),
-                )
-                if response.status < 500 and response.status not in (408, 425, 429):
-                    # Pre-read the response to avoid getting errors outside of the
-                    # context manager. aiohttp keeps the bytes available to json().
-                    await response.read()
-                    yield response
-                    return
-                await response.read()
-                if response.status == 429:
-                    sleep_delay = _retry_after_delay(response, delay)
-                    logger.warning(
-                        "Twitch rate limit response; retrying in %.1fs (%s)",
-                        sleep_delay,
-                        redact_log_value(response.url, key="url"),
-                    )
-                else:
-                    self.print(_("error", "site_down").format(seconds=round(delay)))
-            except aiohttp.ClientConnectorCertificateError as exc:
-                # for a case where SSL verification fails
-                raise
-            except (
-                aiohttp.ClientConnectionError, asyncio.TimeoutError, aiohttp.ClientPayloadError
-            ):
-                # connection problems, retry
-                if backoff.steps > 1:
-                    # just so that quick retries that sometimes happen, aren't shown
-                    self.print(
-                        _("error", "no_connection").format(
-                            seconds=round(delay),
-                            url=redact_log_value(url, key="url"),
-                        )
-                    )
-            finally:
-                if response is not None:
-                    response.release()
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self.gui.wait_until_closed(), timeout=sleep_delay)
-
-    @overload
-    async def gql_request(self, ops: GQLOperation) -> JsonType:
-        ...
-
-    @overload
-    async def gql_request(self, ops: list[GQLOperation]) -> list[JsonType]:
-        ...
-
-    async def gql_request(
-        self, ops: GQLOperation | list[GQLOperation]
-    ) -> JsonType | list[JsonType]:
-        gql_logger.debug("GQL Request: %s", redact_log_value(ops))
-        backoff = ExponentialBackoff(maximum=60)
-        # Persisted queries occasionally return transient service errors. Retry
-        # those once immediately, while continuing to back off on outages.
-        single_retry = True
-        for delay in backoff:
-            async with self._qgl_limiter:
-                auth_state = await self.get_auth()
-                async with self.request(
-                    "POST",
-                    "https://gql.twitch.tv/gql",
-                    json=ops,
-                    headers=auth_state.headers(user_agent=self._client_type.USER_AGENT, gql=True),
-                ) as response:
-                    if response.status == 401:
-                        self._auth_state.invalidate()
-                        raise LoginException("Twitch rejected the GraphQL access token")
-                    response_json: Any = await _read_json(
-                        response, RequestException, "Twitch GraphQL returned invalid JSON"
-                    )
-                    if response.status >= 400:
-                        raise GQLException(
-                            f"GraphQL HTTP {response.status}: "
-                            f"{redact_log_value(response_json)}"
-                        )
-            gql_logger.debug("GQL Response: %s", redact_log_value(response_json))
-            orig_response = response_json
-            if isinstance(response_json, list):
-                if not all(isinstance(item, dict) for item in response_json):
-                    raise RequestException("Twitch GraphQL returned an invalid response list")
-                response_list: list[JsonType] = response_json
-            elif isinstance(response_json, dict):
-                response_list = [response_json]
-            else:
-                raise RequestException("Twitch GraphQL returned an invalid response")
-
-            retry_messages = {
-                "service timeout",
-                "service unavailable",
-                "context deadline exceeded",
-            }
-            force_retry = False
-            permanent_errors: list[Any] = []
-            for response_item in response_list:
-                errors = response_item.get("errors")
-                if errors is None:
-                    if "error" in response_item:
-                        raise GQLException(
-                            f"{response_item['error']}: "
-                            f"{response_item.get('message', 'GraphQL request failed')}"
-                        )
-                    continue
-                if not isinstance(errors, list):
-                    raise GQLException("GraphQL returned a malformed errors field")
-                for error_dict in errors:
-                    if not isinstance(error_dict, dict):
-                        permanent_errors.append(error_dict)
-                        continue
-                    message = error_dict.get("message")
-                    if message in ("service error", "PersistedQueryNotFound") and single_retry:
-                        extensions = response_item.get("extensions")
-                        operation = (
-                            extensions.get("operationName", "unknown")
-                            if isinstance(extensions, dict)
-                            else "unknown"
-                        )
-                        logger.warning(
-                            "Retrying GraphQL %s for operation %s",
-                            message,
-                            operation,
-                        )
-                        single_retry = False
-                        force_retry = True
-                        break
-                    if message in retry_messages or message == "server error":
-                        force_retry = True
-                        break
-                    permanent_errors.append(error_dict)
-                if force_retry:
-                    break
-            if force_retry:
-                await asyncio.sleep(max(delay, 5))
-                continue
-            if permanent_errors:
-                raise GQLException(str(redact_log_value(permanent_errors)))
-            return orig_response
-        raise RuntimeError("GraphQL retry loop was broken")
-
-    @staticmethod
-    def _merge_data(primary_data: JsonType, secondary_data: JsonType) -> JsonType:
-        try:
-            return merge_primary_json(primary_data, secondary_data)
-        except TypeError as exc:
-            raise MinerException(str(exc)) from exc
-
-    async def fetch_campaigns(
-        self, campaigns_chunk: list[tuple[str, JsonType]]
-    ) -> dict[str, JsonType]:
-        campaign_ids: dict[str, JsonType] = dict(campaigns_chunk)
-        auth_state = await self.get_auth()
-        response_list: list[JsonType] = await self.gql_request(
-            [
-                GQL_QUERIES["CampaignDetails"].with_variables(
-                    {"channelLogin": str(auth_state.user_id), "dropID": cid}
-                )
-                for cid in campaign_ids
-            ]
-        )
-        fetched_data: dict[str, JsonType] = {}
-        for response_json in response_list:
-            try:
-                campaign_data = response_json["data"]["user"]["dropCampaign"]
-                campaign_id = campaign_data["id"]
-            except (KeyError, TypeError):
-                logger.warning("Campaign detail response did not contain a campaign")
-                continue
-            if (
-                isinstance(campaign_data, dict)
-                and isinstance(campaign_id, str)
-                and campaign_id in campaign_ids
-            ):
-                fetched_data[campaign_id] = campaign_data
-        return self._merge_data(campaign_ids, fetched_data)
-
-    async def _install_inventory(
-        self,
-        campaigns: list[DropsCampaign],
-        status_update: Callable[[str], Any],
-    ) -> None:
-        self._drops.clear()
-        self.gui.inv.clear()
-        self.inventory.clear()
-        self._campaigns.clear()
-        self._mnt_triggers.clear()
-        switch_triggers: set[datetime] = set()
-        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
-        # add the campaigns to the internal inventory
-        for campaign in campaigns:
-            self._drops.update({drop.id: drop for drop in campaign.drops})
-            self._campaigns[campaign.id] = campaign
-            if campaign.can_earn_within(next_hour):
-                switch_triggers.update(campaign.time_triggers)
-            self.inventory.append(campaign)
-        now_timestamp = time()
-        self._watch_claim_cooldowns = {
-            drop_id: blocked_until
-            for drop_id, blocked_until in getattr(self, "_watch_claim_cooldowns", {}).items()
-            if blocked_until > now_timestamp
-            and drop_id in self._drops
-            and not self._drops[drop_id].is_claimed
-        }
-        # concurrently add the campaigns into the GUI
-        # NOTE: this fetches pictures from the CDN, so might be slow without a cache
-        status_update(
-            _("gui", "status", "adding_campaigns").format(counter=f"(0/{len(campaigns)})")
-        )
-        add_campaign_tasks: list[asyncio.Task[None]] = [
-            asyncio.create_task(self.gui.inv.add_campaign(campaign))
-            for campaign in campaigns
-        ]
-        try:
-            for i, coro in enumerate(asyncio.as_completed(add_campaign_tasks), start=1):
-                await coro
-                status_update(
-                    _("gui", "status", "adding_campaigns").format(
-                        counter=f"({i}/{len(campaigns)})"
-                    )
-                )
-                # this is needed here explicitly, because cache reads from disk don't raise this
-                if self.gui.close_requested:
-                    raise ExitRequest()
-        finally:
-            await cancel_tasks(add_campaign_tasks)
-        self._mnt_triggers.extend(sorted(switch_triggers))
-        # trim out all triggers that we're already past
-        now = datetime.now(timezone.utc)
-        while self._mnt_triggers and self._mnt_triggers[0] <= now:
-            self._mnt_triggers.popleft()
-        # NOTE: maintenance task is restarted at the end of each inventory fetch
-        if self._mnt_task is not None and not self._mnt_task.done():
-            await cancel_tasks([self._mnt_task])
-        self._mnt_task = asyncio.create_task(self._maintenance_task())
-
-    def _build_campaigns(
-        self,
-        inventory_data: dict[str, JsonType],
-        claimed_benefits: dict[str, datetime],
-    ) -> list[DropsCampaign]:
-        # Use the merged data to create campaign objects. A single malformed
-        # campaign should not discard the rest of the viewer inventory.
-        campaigns: list[DropsCampaign] = []
-        for campaign_data in inventory_data.values():
-            try:
-                campaigns.append(DropsCampaign(self, campaign_data, claimed_benefits))
-            except (KeyError, TypeError, ValueError) as exc:
-                logger.warning(
-                    "Skipping malformed Twitch campaign: %s",
-                    type(exc).__name__,
-                )
-        campaigns.sort(key=lambda c: c.active, reverse=True)
-        campaigns.sort(key=lambda c: c.upcoming and c.starts_at or c.ends_at)
-        campaigns.sort(key=lambda c: c.eligible, reverse=True)
-        return campaigns
-
-    def _dump_inventory(
-        self, inventory_data: dict[str, JsonType], inventory: JsonType
-    ) -> None:
-        # dump the campaigns data to the dump file
-        with _open_dump("a") as file:
-            # we need to pre-process the inventory dump a little
-            dump_data: JsonType = deepcopy(inventory_data)
-            for campaign_data in dump_data.values():
-                if not isinstance(campaign_data, dict):
-                    continue
-                # replace ACL lists with a simple text description
-                allow = campaign_data.get("allow")
-                if (
-                    isinstance(allow, dict)
-                    and allow.get("isEnabled", True)
-                    and isinstance(allow.get("channels"), list)
-                    and allow["channels"]
-                ):
-                    # simply count the channels included in the ACL
-                    allow["channels"] = f"{len(allow['channels'])} channels"
-                # replace drop instance IDs, so they don't include user IDs
-                drops = campaign_data.get("timeBasedDrops")
-                if not isinstance(drops, list):
-                    continue
-                for drop_data in drops:
-                    if not isinstance(drop_data, dict):
-                        continue
-                    self_data = drop_data.get("self")
-                    if isinstance(self_data, dict) and self_data.get("dropInstanceID"):
-                        self_data["dropInstanceID"] = "..."
-            json.dump(dump_data, file, indent=4, sort_keys=True)
-            file.write("\n\n")  # add 2x new line spacer
-            json.dump(inventory["gameEventDrops"], file, indent=4, sort_keys=True, default=str)
-
-    async def _fetch_campaign_details(
-        self,
-        inventory_data: dict[str, JsonType],
-        available_campaigns: dict[str, JsonType],
-        status_update: Callable[[str], Any],
-    ) -> dict[str, JsonType]:
-        # fetch detailed data for each campaign, in chunks
-        status_update(_("gui", "status", "fetching_campaigns"))
-        fetch_campaigns_tasks: list[asyncio.Task[Any]] = [
-            asyncio.create_task(self.fetch_campaigns(campaigns_chunk))
-            for campaigns_chunk in chunk(available_campaigns.items(), GQL_BATCH_SIZE)
-        ]
-        try:
-            for coro in asyncio.as_completed(fetch_campaigns_tasks):
-                chunk_campaigns_data = await coro
-                # merge the inventory and campaigns datas together
-                inventory_data = self._merge_data(inventory_data, chunk_campaigns_data)
-        finally:
-            await cancel_tasks(fetch_campaigns_tasks)
-        return inventory_data
-
-    @staticmethod
-    def _parse_available_campaigns(response: JsonType) -> dict[str, JsonType]:
-        try:
-            raw_available = response["data"]["currentUser"]["dropCampaigns"]
-        except (KeyError, TypeError) as exc:
-            raise RequestException("Twitch campaign response was malformed") from exc
-        available_list = raw_available if isinstance(raw_available, list) else []
-        applicable_statuses = {"ACTIVE", "UPCOMING"}
-        available_campaigns: dict[str, JsonType] = {}
-        for campaign_data in available_list:
-            if not isinstance(campaign_data, dict):
-                continue
-            campaign_id = campaign_data.get("id")
-            status = campaign_data.get("status")
-            if isinstance(campaign_id, str) and status in applicable_statuses:
-                available_campaigns[campaign_id] = campaign_data
-        return available_campaigns
-
-    @staticmethod
-    def _parse_inventory_snapshot(
-        inventory: JsonType,
-    ) -> tuple[dict[str, JsonType], dict[str, datetime]]:
-        raw_ongoing = inventory.get("dropCampaignsInProgress") or []
-        ongoing_campaigns = raw_ongoing if isinstance(raw_ongoing, list) else []
-        # This contains claimed benefit edge IDs, not drop IDs.
-        claimed_benefits: dict[str, datetime] = {}
-        raw_game_events = inventory.get("gameEventDrops") or []
-        if isinstance(raw_game_events, list):
-            for benefit_data in raw_game_events:
-                if not isinstance(benefit_data, dict):
-                    continue
-                benefit_id = benefit_data.get("id")
-                awarded_at = benefit_data.get("lastAwardedAt")
-                if isinstance(benefit_id, str) and isinstance(awarded_at, str):
-                    try:
-                        claimed_benefits[benefit_id] = timestamp(awarded_at)
-                    except ValueError:
-                        logger.warning("Ignoring malformed claimed benefit timestamp")
-        inventory_data: dict[str, JsonType] = {
-            campaign_data["id"]: campaign_data
-            for campaign_data in ongoing_campaigns
-            if isinstance(campaign_data, dict)
-            and isinstance(campaign_data.get("id"), str)
-        }
-        return inventory_data, claimed_benefits
-
-    async def fetch_inventory(self) -> None:
-        status_update = self.gui.status.update
-        status_update(_("gui", "status", "fetching_inventory"))
-        # fetch in-progress campaigns (inventory)
-        response = await self.gql_request(GQL_QUERIES["Inventory"])
-        try:
-            inventory = response["data"]["currentUser"]["inventory"]
-        except (KeyError, TypeError) as exc:
-            raise RequestException("Twitch inventory response was malformed") from exc
-        if not isinstance(inventory, dict):
-            raise RequestException("Twitch inventory response was malformed")
-        inventory_data, claimed_benefits = self._parse_inventory_snapshot(inventory)
-        # fetch general available campaigns data (campaigns)
-        response = await self.gql_request(GQL_QUERIES["Campaigns"])
-        available_campaigns = self._parse_available_campaigns(response)
-        inventory_data = await self._fetch_campaign_details(
-            inventory_data, available_campaigns, status_update
-        )
-        # filter out invalid campaigns
-        for campaign_id in list(inventory_data.keys()):
-            campaign_data = inventory_data[campaign_id]
-            if not isinstance(campaign_data, dict) or campaign_data.get("game") is None:
-                del inventory_data[campaign_id]
-
-        if self.settings.dump:
-            self._dump_inventory(inventory_data, inventory)
-
-        campaigns = self._build_campaigns(inventory_data, claimed_benefits)
-        await self._install_inventory(campaigns, status_update)
 
     def get_active_campaign(self, channel: Channel | None = None) -> DropsCampaign | None:
         if not self.wanted_games:
@@ -2640,7 +1081,7 @@ class Twitch:
         if drops_enabled:
             filters.append("DROPS_ENABLED")
         try:
-            response = await self.gql_request(
+            response = await self.transport.gql_request(
                 GQL_QUERIES["GameDirectory"].with_variables({
                     "limit": limit,
                     "slug": game.slug,
@@ -2685,7 +1126,7 @@ class Twitch:
             # NOTE: Have to do this here, becase "channels" can be any iterable
             return
         stream_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
-            asyncio.create_task(self.gql_request(stream_gql_chunk))
+            asyncio.create_task(self.transport.gql_request(stream_gql_chunk))
             for stream_gql_chunk in chunk(stream_gql_ops, GQL_BATCH_SIZE)
         ]
         try:
@@ -2694,7 +1135,14 @@ class Twitch:
                 for response_json in response_list:
                     try:
                         channel_data = response_json["data"]["user"]
-                        channel_id = int(channel_data["id"]) if channel_data is not None else None
+                        channel_id = (
+                            require_int(
+                                channel_data["id"],
+                                "Invalid channel ID",
+                            )
+                            if channel_data is not None
+                            else None
+                        )
                     except (KeyError, TypeError, ValueError):
                         logger.warning("Ignoring malformed stream lookup response")
                         continue
@@ -2711,7 +1159,7 @@ class Twitch:
                 if isinstance(channel_data.get("stream"), dict)  # only ONLINE channels
             ]
             available_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
-                asyncio.create_task(self.gql_request(available_gql_chunk))
+                asyncio.create_task(self.transport.gql_request(available_gql_chunk))
                 for available_gql_chunk in chunk(available_gql_ops, GQL_BATCH_SIZE)
             ]
             try:
@@ -2720,7 +1168,10 @@ class Twitch:
                     for response_json in response_list:
                         try:
                             available_info = response_json["data"]["channel"]
-                            channel_id = int(available_info["id"])
+                            channel_id = require_int(
+                                available_info["id"],
+                                "Invalid channel ID",
+                            )
                         except (KeyError, TypeError, ValueError):
                             logger.warning("Ignoring malformed available-drops response")
                             continue

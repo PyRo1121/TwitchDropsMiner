@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import qtawesome as qta
+from typing import Literal
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -62,6 +64,8 @@ class ProgressRing(QWidget):
         self._text_color = "#eef1f8"
         self._caption_color = "#a1a9bd"
         self.setFixedSize(146, 146)
+        self.setAccessibleName(self._caption)
+        self.setAccessibleDescription(self._label)
 
     def set_colors(
         self, *, track: str, progress: str, text: str, caption: str
@@ -76,6 +80,8 @@ class ProgressRing(QWidget):
         self._value = max(0.0, min(1.0, value))
         self._label = label
         self._caption = caption
+        self.setAccessibleName(caption)
+        self.setAccessibleDescription(label)
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -131,16 +137,53 @@ class StatusDot(QWidget):
         self._label.setToolTip(text)
 
 
-class Badge(QLabel):
-    """Uppercase pill with semantic tint."""
+BadgeRole = Literal["accent", "success", "warning", "error", "info", "idle"]
 
-    def __init__(self, text: str, fg: str, bg: str, parent: QWidget | None = None):
+
+class Badge(QLabel):
+    """Uppercase pill driven by a semantic palette role."""
+
+    def __init__(
+        self,
+        text: str,
+        role: BadgeRole,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(text, parent)
+        self._role = role
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._apply_active_palette()
+
+    def _apply_active_palette(self) -> None:
+        from .theme import DARK, LIGHT
+
+        app = QApplication.instance()
+        value = None if app is None else app.property("tdmDarkTheme")
+        dark = True if value is None else bool(value)
+        self.apply_palette(DARK if dark else LIGHT)
+
+    def set_role(self, role: BadgeRole) -> None:
+        self._role = role
+        self._apply_active_palette()
+
+    def apply_palette(self, palette: object) -> None:
+        colors = {
+            "accent": getattr(palette, "accent"),
+            "success": getattr(palette, "green"),
+            "warning": getattr(palette, "amber"),
+            "error": getattr(palette, "error"),
+            "info": getattr(palette, "info"),
+            "idle": getattr(palette, "idle"),
+        }
+        foreground = QColor(colors[self._role])
+        background = (
+            f"rgba({foreground.red()},{foreground.green()},"
+            f"{foreground.blue()},0.14)"
+        )
         self.setStyleSheet(
-            f"background:{bg}; color:{fg}; border-radius:0;"
+            f"background:{background}; color:{foreground.name()}; border-radius:0;"
             " font-size:9px; font-weight:700; letter-spacing:1px; padding:2px 8px;"
         )
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
 
 class Progress(QProgressBar):
@@ -195,6 +238,7 @@ class SegmentedProgress(QWidget):
 
     def set_value(self, value: float) -> None:
         self._value = max(0.0, min(1.0, value))
+        self.setAccessibleDescription(f"{self._value:.0%}")
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -217,6 +261,7 @@ class Metric(QWidget):
 
     def __init__(self, label: str, value: str, parent: QWidget | None = None):
         super().__init__(parent)
+        self.setObjectName("metricTile")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
