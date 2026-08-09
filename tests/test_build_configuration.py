@@ -129,6 +129,7 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("wheel==0.47.0", recipe)
         self.assertIn("python3.10", recipe)
         self.assertIn("python3.10/site-packages", recipe)
+        self.assertIn("pip install --ignore-installed --prefix=/usr", recipe)
         self.assertIn("libxcb-cursor0", recipe)
         self.assertIn("{{APT_REPOSITORY}}", recipe)
         self.assertIn("jammy main universe", recipe)
