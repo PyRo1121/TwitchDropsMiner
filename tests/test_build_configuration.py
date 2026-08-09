@@ -79,6 +79,10 @@ class BuildConfigurationTests(unittest.TestCase):
             workflow.count("actions/checkout@"),
             workflow.count("persist-credentials: false"),
         )
+        self.assertEqual(
+            workflow.count("actions/checkout@"),
+            workflow.count("actions/setup-python@"),
+        )
         self.assertIn("package-ecosystem: pip", dependabot)
         self.assertIn("package-ecosystem: github-actions", dependabot)
         self.assertEqual(dependabot.count("default-days: 7"), 2)
@@ -131,6 +135,7 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertNotIn("[arch=amd64]", recipe)
         self.assertIn("APT_REPOSITORY:", workflow)
         self.assertIn("FUSE_PACKAGE:", workflow)
+        self.assertIn("dependencies=\"$(ldd \"$plugin\")\"", workflow)
         self.assertEqual(workflow.count("runner: ubuntu-24.04-arm"), 2)
         self.assertNotIn("runner: ubuntu-22.04-arm", workflow)
         self.assertIn("PySide6==6.11.1", runtime)
