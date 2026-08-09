@@ -88,8 +88,24 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertEqual(dependabot.count("default-days: 7"), 2)
         self.assertIn("security/advisories/new", security)
         self.assertIn("gh attestation verify", security)
+        self.assertIn(
+            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+            workflow,
+        )
+        self.assertIn(
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            workflow,
+        )
+        self.assertIn(
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            workflow,
+        )
 
         codeql = (ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf8")
+        self.assertIn(
+            "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            workflow + codeql,
+        )
         self.assertEqual(codeql.count("github/codeql-action/"), 2)
         self.assertEqual(
             codeql.count("@c4dd10e44af883a891fe31ced449bcb4a6728b9b"),
