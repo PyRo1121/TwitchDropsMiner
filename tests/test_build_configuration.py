@@ -68,6 +68,9 @@ class BuildConfigurationTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("subject-path: |", workflow)
+        self.assertIn("merge-multiple: true", workflow)
+        self.assertIn("artifacts/*.zip", workflow)
+        self.assertNotIn("artifacts/*/*", workflow)
         self.assertIn("! -name SHA256SUMS", workflow)
         self.assertIn("Twitch.Drops.Miner.spdx.json", workflow)
         self.assertIn("setuptools==83.0.0", workflow)
