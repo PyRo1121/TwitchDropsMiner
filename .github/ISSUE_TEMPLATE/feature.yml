@@ -1,0 +1,42 @@
+name: Feature proposal
+description: Propose a focused improvement consistent with the project goals
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals must remain focused on reliable Twitch Drops operation for one locally controlled account. Multi-account farming, hosted operation, password/manual-token login, unrelated Twitch automation, and increased site load are intentionally out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the concrete problem without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest end-to-end behavior that would solve the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds and why they are insufficient.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope checks
+      options:
+        - label: This proposal supports one locally controlled Twitch account.
+          required: true
+        - label: This proposal does not add unrelated Twitch automation or increase Twitch request volume unnecessarily.
+          required: true
+        - label: I searched existing issues and project goals first.
+          required: true

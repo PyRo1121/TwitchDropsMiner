@@ -42,7 +42,7 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("tests.test_translation_schema", workflow)
         self.assertIn("github.repository == 'PyRo1121/TwitchDropsMiner'", workflow)
         self.assertIn("github.ref == 'refs/heads/master'", workflow)
-        self.assertIn("dev-build-${{github.sha}}", workflow)
+        self.assertIn('gh release create "dev-build-${GITHUB_SHA}"', workflow)
         self.assertIn("SHA256SUMS", workflow)
         self.assertNotIn("gh release delete", workflow)
         self.assertNotIn("--appimage-extract-and-run", workflow)
@@ -50,6 +50,41 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("macos-15-intel", workflow)
         self.assertIn("Twitch.Drops.Miner.MacOS-${{matrix.arch}}", workflow)
         self.assertNotIn("runs-on: macos-latest", workflow)
+
+    def test_release_has_sbom_provenance_and_security_policy(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
+        dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf8")
+
+        self.assertIn("attestations: write", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610", workflow)
+        self.assertIn(
+            "actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f",
+            workflow,
+        )
+        self.assertIn("subject-path: |", workflow)
+        self.assertIn("! -name SHA256SUMS", workflow)
+        self.assertIn("Twitch.Drops.Miner.spdx.json", workflow)
+        self.assertEqual(
+            workflow.count("actions/checkout@"),
+            workflow.count("persist-credentials: false"),
+        )
+        self.assertIn("package-ecosystem: pip", dependabot)
+        self.assertIn("package-ecosystem: github-actions", dependabot)
+        self.assertEqual(dependabot.count("default-days: 7"), 2)
+        self.assertIn("security/advisories/new", security)
+        self.assertIn("gh attestation verify", security)
+
+        codeql = (ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf8")
+        self.assertEqual(codeql.count("github/codeql-action/"), 2)
+        self.assertEqual(
+            codeql.count("@c4dd10e44af883a891fe31ced449bcb4a6728b9b"),
+            2,
+        )
+        self.assertIn("security-events: write", codeql)
+        self.assertIn("build-mode: none", codeql)
+        self.assertIn("persist-credentials: false", codeql)
 
     def test_local_scripts_anchor_outputs_and_share_dot_venv(self) -> None:
         build_sh = (ROOT / "build.sh").read_text(encoding="utf8")

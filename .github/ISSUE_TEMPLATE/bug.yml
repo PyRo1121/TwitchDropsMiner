@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible Twitch Drops Miner defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Twitch Drops Miner. Search existing issues first.
+        **Never paste OAuth tokens, cookies, passwords, or unredacted private logs here.** Report security issues through the private Security form instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Use the release name or the output of `git rev-parse HEAD`.
+      placeholder: dev-build-… or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (AppImage)
+        - Linux (PyInstaller)
+        - Linux (source)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop and display server
+      description: For Linux, include the desktop environment and X11 or Wayland. Otherwise enter N/A.
+      placeholder: KDE Plasma 6 / Wayland
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Explain the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start the application…
+        2. Open…
+        3. Observe…
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include the exception type and relevant lines only. Remove user IDs, channel/account details, cookies, OAuth values, URLs containing tokens, and other private data.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched for an existing issue.
+          required: true
+        - label: I removed credentials, cookies, OAuth tokens, and private account data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

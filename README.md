@@ -2,12 +2,10 @@
 
 **Twitch Drops Miner V2** is a maintained fork of *Twitch Drops Miner* (upstream by [@DevilXD](https://github.com/DevilXD)) rewritten around a modern Qt dashboard. It lets you AFK mine timed Twitch drops without having to worry about switching channels when the one you were watching goes offline, claiming the drops, or even receiving the stream data itself. This helps you save on bandwidth and hassle.
 
-|  |  |
-|--|--|
-| **Maintainers** | [@PyRo1121](https://github.com/PyRo1121) (fork) · upstream by [@DevilXD](https://github.com/DevilXD) |
-| **Source (this fork)** | [github.com/PyRo1121/TwitchDropsMiner](https://github.com/PyRo1121/TwitchDropsMiner) |
+- **Maintainers:** [@PyRo1121](https://github.com/PyRo1121) (fork) · upstream by [@DevilXD](https://github.com/DevilXD)
+- **Source:** [github.com/PyRo1121/TwitchDropsMiner](https://github.com/PyRo1121/TwitchDropsMiner)
 
-### Play
+## Play
 
 Ready to start mining? The quickest path to playing is cloning this repo and running from source:
 
@@ -27,25 +25,25 @@ Then, inside the app:
 
 See **Usage** below for details. Prebuilt releases (when published) will live on the fork's [Releases](https://github.com/PyRo1121/TwitchDropsMiner/releases) page.
 
-### How It Works
+## How It Works
 
-About once per minute, the application sends the same lightweight viewer-presence event that Twitch's player uses, without downloading stream video or sound. Up to two targets can be farmed concurrently when they are eligible for different games and different Drop IDs. A sharded websocket keeps channel state and viewer-drop progress synchronized.
+About once per minute, the application sends the same lightweight viewer-presence event that Twitch's player uses, without downloading stream video or sound. The supported default is one watch target. An opt-in experimental setting can try two independent targets when they are eligible for different games and Drop IDs, but Twitch may credit only one. A sharded websocket keeps channel state and viewer-drop progress synchronized.
 
-### Features
+## Features
 
 - Stream-less drop mining - save on bandwidth.
 - Game priority and exclusion lists, allowing you to focus on mining what you want, in the order you want, and ignore what you don't want.
 - Sharded websocket connection, allowing for tracking up to `199` channels at the same time.
 - Automatic drop campaigns discovery based on linked accounts (requires you to do [account linking](https://www.twitch.tv/drops/campaigns) yourself though).
 - Stream tags and drop campaign validation, to ensure you won't end up mining a stream that can't earn you the drop.
-- Up to two concurrent watch targets, constrained to different eligible games and Drop IDs, with automatic replacement when a target becomes invalid.
+- One reliable watch target by default, with an explicitly experimental dual-target option constrained to different eligible games and Drop IDs.
 - Automatic channel stream switching, when a watched channel goes offline, as well as when a channel streaming a higher priority game goes online.
 - Login session is saved in a cookies file, so you don't need to login every time.
 - Mining is automatically started as new campaigns appear, and stopped when the last available drops have been mined.
 - The Qt dashboard surfaces the active game's artwork, campaign/drop progress, current channel, session metrics, and a plain-language explanation when the miner is idle.
 - Optional Steam enrichment provides current player count, US store pricing when available, and direct Steam/SteamDB links; it is cached and never affects Twitch channel selection.
 
-### Usage
+## Usage
 
 - Download and unzip [the latest release](https://github.com/PyRo1121/TwitchDropsMiner/releases) - it's recommended to keep it in the folder it comes in.
 - Run it and authorize the miner from Twitch's device-authorization page; the app never collects account credentials.
@@ -53,38 +51,53 @@ About once per minute, the application sends the same lightweight viewer-presenc
 - If you wish to keep the miner occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
 - Make sure to link your Twitch account to game accounts on the [campaigns page](https://www.twitch.tv/drops/campaigns), to enable more games to be mined.
 
-### Pictures
+## Pictures
 
 ![Main](https://user-images.githubusercontent.com/4180725/164298155-c0880ad7-6423-4419-8d73-f3c053730a1b.png)
 ![Inventory](https://user-images.githubusercontent.com/4180725/164298315-81cae0d2-24a4-4822-a056-154fd763c284.png)
 ![Settings](https://user-images.githubusercontent.com/4180725/164298391-b13ad40d-3881-436c-8d4c-34e2bbe33a78.png)
 
-### Notes
+## Notes
 
-> [!WARNING]
-> Due to how Twitch handles the drop progression on their side, watching a stream in the browser (or by any other means) on the same account that is actively being used by the miner, will usually cause the miner to misbehave, reporting false progress and getting stuck mining the current drop.
->
-> Using the same account to watch other streams during mining is thus discouraged, in order to avoid any problems arising from it.
+### Concurrent viewing warning
 
-> [!CAUTION]
-> Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens (when Twitch returns one) are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account, even without the password. Mutable application data is stored per user in `%LOCALAPPDATA%\\TwitchDropsMiner` on Windows, `${XDG_DATA_HOME:-~/.local/share}/TwitchDropsMiner` on Linux, and `~/Library/Application Support/TwitchDropsMiner` on macOS.
+Due to how Twitch handles drop progression, watching a stream in the browser or elsewhere on the same account while the miner is active can cause conflicting progress and leave the current Drop stuck. Avoid concurrent viewing on the managed account during mining.
 
-> [!IMPORTANT]
-> Login uses Twitch's device-authorization page. The miner never asks for or stores your Twitch username, password, or two-factor authentication code.
+### Credential safety
 
-> [!NOTE]
-> The time remaining timer is a presentation estimate for the primary target. Authoritative progress comes from Twitch's PubSub drop events or the assigned target's `CurrentDrop` response; the miner does not fabricate progress when Twitch does not acknowledge it. With two targets, the secondary target is reconciled independently and does not replace the primary hero display.
+Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens, when Twitch returns one, are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account without the password. Mutable application data is stored per user in `%LOCALAPPDATA%\\TwitchDropsMiner` on Windows, `${XDG_DATA_HOME:-~/.local/share}/TwitchDropsMiner` on Linux, and `~/Library/Application Support/TwitchDropsMiner` on macOS.
 
-> [!NOTE]
-> The source code requires Python 3.10 or higher to run.
+Login uses Twitch's device-authorization page. The miner never asks for or stores your Twitch username, password, or two-factor authentication code.
 
-### Notes about the Windows build
+### Progress semantics
+
+The time-remaining timer is a presentation estimate for the primary target. Authoritative progress comes from Twitch's PubSub drop events or the assigned target's `CurrentDrop` response; the miner does not fabricate progress when Twitch does not acknowledge it. With two targets, the secondary target is reconciled independently and does not replace the primary hero display.
+
+The source code requires Python 3.10 or higher to run.
+
+## Twitch compatibility and policy
+
+This project is an independent, unofficial client and is not affiliated with or endorsed by Twitch. Viewer-presence, campaign inventory, progress, and claim behavior rely on Twitch web interfaces that are not part of Twitch's documented public developer API. Twitch can change or withdraw those interfaces without notice, and a release may stop working even when its own code has not changed. Users are responsible for deciding whether their use complies with Twitch's current terms and local requirements.
+
+The project deliberately excludes multi-account farming, hosted operation, password/manual-token authentication, channel-points or chat automation, and request-volume-increasing features. Progress shown as authoritative comes only from Twitch responses; the application does not report estimated progress as confirmed credit.
+
+## Verifying a release
+
+Every published development release includes immutable commit-addressed artifacts, `SHA256SUMS`, an SPDX JSON software bill of materials, and GitHub artifact attestations. Verify the checksum before running an artifact. With the GitHub CLI installed, provenance can also be checked with:
+
+```bash
+gh attestation verify <downloaded-artifact> --repo PyRo1121/TwitchDropsMiner
+```
+
+Security vulnerabilities should be submitted through the [private vulnerability-reporting form](https://github.com/PyRo1121/TwitchDropsMiner/security/advisories/new), not a public issue. See [SECURITY.md](SECURITY.md) for the response policy.
+
+## Notes about the Windows build
 
 - To achieve a portable-executable format, the application is packaged with PyInstaller into an `EXE`. Some antivirus engines (including Windows Defender) might report the packaged executable as a trojan, because PyInstaller has been used by others to package malicious Python code in the past. These reports can be safely ignored. If you absolutely do not trust the executable, you'll have to install Python yourself and run everything from source.
 - The executable uses the `%TEMP%` directory for temporary bundled resources. Persistent settings, credentials, logs, history, and caches are stored in `%LOCALAPPDATA%\\TwitchDropsMiner`.
 - The autostart feature is implemented as a registry entry to the current user's (`HKCU`) autostart key. It is only altered when toggling the respective option. If you relocate the app to a different directory, the autostart feature will stop working, until you toggle the option off and back on again
 
-### Notes about the Linux build
+## Notes about the Linux build
 
 - The Linux app is built and distributed using two distinct portable-executable formats: [AppImage](https://appimage.org/) and [PyInstaller](https://pyinstaller.org/).
 - There are no major differences between the two formats, but if you're looking for a recommendation, use the AppImage.
@@ -93,18 +106,18 @@ About once per minute, the application sends the same lightweight viewer-presenc
 - The Qt build uses `QSystemTrayIcon` for native system tray and notification support; it no longer depends on GTK/AppIndicator tray packages.
 - As an alternative to the native Linux app, you can run the Windows app via [Wine](https://www.winehq.org/) instead. It works really well!
 
-### Notes about the macOS build
+## Notes about the macOS build
 
 - The macOS version is packaged using PyInstaller into a standalone `.app` bundle, distributed as a ZIP archive.
 - Since this application is not signed with a paid Apple Developer Certificate, **macOS Gatekeeper will block it** on the first run (saying it "The application is damaged and can't be opened").
   - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr 'Twitch Drops Miner (by DevilXD).app'` or just type `xattr -cr` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
 - Persistent files such as `cookies.jar`, `oauth.json`, `settings.json`, and the `cache` folder are stored in `~/Library/Application Support/TwitchDropsMiner`, outside the read-only application bundle.
 
-### Advanced Usage
+## Advanced Usage
 
 If you'd be interested in running the latest master from source or building your own executable, see the wiki page explaining how to do so: <https://github.com/DevilXD/TwitchDropsMiner/wiki/Setting-up-the-environment,-building-and-running>
 
-### Support
+## Support
 
 If you'd encounter any issues with the miner:
 
@@ -114,18 +127,10 @@ If you'd encounter any issues with the miner:
 
 If you find the application useful, a ⭐ on the fork is appreciated!
 
-<div align="center">
+[![Buy me a coffee](https://i.imgur.com/cL95gzE.png)](https://www.buymeacoffee.com/DevilXD)
+[![Support me on Patreon](https://i.imgur.com/Mdkb9jq.png)](https://www.patreon.com/bePatron?u=26937862)
 
-[![Buy me a coffee](https://i.imgur.com/cL95gzE.png)](
-    https://www.buymeacoffee.com/DevilXD
-)
-[![Support me on Patreon](https://i.imgur.com/Mdkb9jq.png)](
-    https://www.patreon.com/bePatron?u=26937862
-)
-
-</div>
-
-### Project goals
+## Project goals
 
 Twitch Drops Miner (TDM for short) has been designed with a couple of simple goals in mind. These are, specifically:
 
@@ -159,7 +164,7 @@ This means that features such as:
 
 For more context about these goals, please check out these issues: [#161](https://github.com/DevilXD/TwitchDropsMiner/issues/161), [#105](https://github.com/DevilXD/TwitchDropsMiner/issues/105), [#84](https://github.com/DevilXD/TwitchDropsMiner/issues/84)
 
-### Credits
+## Credits
 
 <!---
 Note: The translations credits are sorted alphabetically, based on their English language name.
