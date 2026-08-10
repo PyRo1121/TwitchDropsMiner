@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import unittest
 
-import aiohttp
+import aiohttp  # pyright: ignore[reportMissingImports]
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from constants import ClientType
-from oauth_storage import OAuthTokenStore
+from oauth_storage import CredentialStorageError, OAuthTokenStore
 from auth import (
     AUTH_VALIDATION_INTERVAL,
     AuthState,
@@ -77,6 +77,93 @@ class AuthValidationTests(unittest.TestCase):
             self.assertFalse(cookie_path.exists())
             self.assertFalse(hasattr(auth, "access_token"))
 
+    def test_logout_invalidation_clears_refresh_token_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            transport = SimpleNamespace(clear_cookies=Mock())
+            twitch = SimpleNamespace(
+                transport=transport,
+                gui=SimpleNamespace(set_authenticated=lambda _value: None),
+            )
+            auth = AuthState(cast(Any, twitch))
+            auth._oauth_tokens = OAuthTokenStore(
+                path,
+                use_system_vault=False,
+            )
+            auth._oauth_tokens.save("client-a", "refresh-secret")
+
+            auth.invalidate(delete_refresh_token=True)
+
+            self.assertFalse(path.exists())
+
+    def test_authentication_migrates_refresh_token_with_a_valid_cookie(
+        self,
+    ) -> None:
+        async def exercise() -> None:
+            class LoginForm:
+                def update(self, _status: str, _user_id: int | None) -> None:
+                    return None
+
+            class TwitchStub(_Twitch):
+                def __init__(self) -> None:
+                    super().__init__(
+                        _Response(
+                            200,
+                            {
+                                "client_id": ClientType.WEB.CLIENT_ID,
+                                "user_id": "42",
+                            },
+                        )
+                    )
+                    self.gui = SimpleNamespace(login=LoginForm())
+
+                def save_cookie_jar(
+                    self,
+                    _jar: aiohttp.CookieJar,
+                    _path: Path,
+                ) -> None:
+                    return None
+
+            twitch = TwitchStub()
+            auth = AuthState(cast(Any, twitch))
+            load = Mock(return_value="refresh-secret")
+            auth._oauth_tokens = cast(Any, SimpleNamespace(load=load))
+            jar = aiohttp.CookieJar()
+            jar.update_cookies(
+                {"auth-token": "access-token"},
+                ClientType.WEB.CLIENT_URL,
+            )
+
+            await auth._authenticate_session(ClientType.WEB, jar)
+
+            load.assert_called_once_with(ClientType.WEB.CLIENT_ID)
+            self.assertEqual(auth.access_token, "access-token")
+
+        asyncio.run(exercise())
+
+    def test_refresh_token_persistence_failure_is_controlled_and_redacted(
+        self,
+    ) -> None:
+        twitch = SimpleNamespace(
+            transport=SimpleNamespace(),
+            gui=SimpleNamespace(set_authenticated=lambda _value: None),
+        )
+        auth = AuthState(cast(Any, twitch))
+        save = Mock(
+            side_effect=CredentialStorageError(
+                "backend exposed refresh-secret in its error"
+            )
+        )
+        auth._oauth_tokens = cast(Any, SimpleNamespace(save=save))
+
+        with self.assertLogs("auth", level="WARNING") as captured:
+            with self.assertRaisesRegex(LoginException, "persist.*safely"):
+                auth._save_refresh_token("client-a", "refresh-secret")
+
+        output = "\n".join(captured.output)
+        self.assertNotIn("refresh-secret", output)
+        self.assertIn("CredentialStorageError", output)
+
     def test_missing_device_cookie_is_a_controlled_login_failure(self) -> None:
         class BodyResponse(_Response):
             async def read(self) -> bytes:
@@ -134,7 +221,10 @@ class AuthValidationTests(unittest.TestCase):
             auth = AuthState(cast(Any, twitch))
             auth.device_id = "device-id"
             with tempfile.TemporaryDirectory() as directory:
-                auth._oauth_tokens = OAuthTokenStore(Path(directory) / "oauth.json")
+                auth._oauth_tokens = OAuthTokenStore(
+                    Path(directory) / "oauth.json",
+                    use_system_vault=False,
+                )
                 with patch("twitch.asyncio.sleep", no_sleep):
                     self.assertEqual(await auth._oauth_login(), "access")
                 self.assertEqual(
@@ -257,8 +347,14 @@ class AuthValidationTests(unittest.TestCase):
             auth = AuthState(cast(Any, twitch))
             auth.device_id = "device-id"
             with tempfile.TemporaryDirectory() as directory:
-                auth._oauth_tokens = OAuthTokenStore(Path(directory) / "oauth.json")
-                result = await auth._refresh_access_token(ClientType.WEB, "old-refresh")
+                auth._oauth_tokens = OAuthTokenStore(
+                    Path(directory) / "oauth.json",
+                    use_system_vault=False,
+                )
+                result = await auth._refresh_access_token(
+                    ClientType.WEB,
+                    "old-refresh",
+                )
                 self.assertEqual(result, "new-access")
                 self.assertEqual(
                     auth._oauth_tokens.load(ClientType.WEB.CLIENT_ID), "new-refresh"
@@ -272,8 +368,14 @@ class AuthValidationTests(unittest.TestCase):
             auth = AuthState(cast(Any, twitch))
             auth.device_id = "device-id"
             with tempfile.TemporaryDirectory() as directory:
-                auth._oauth_tokens = OAuthTokenStore(Path(directory) / "oauth.json")
-                auth._oauth_tokens.save(ClientType.WEB.CLIENT_ID, "old-refresh")
+                auth._oauth_tokens = OAuthTokenStore(
+                    Path(directory) / "oauth.json",
+                    use_system_vault=False,
+                )
+                auth._oauth_tokens.save(
+                    ClientType.WEB.CLIENT_ID,
+                    "old-refresh",
+                )
                 result = await auth._refresh_access_token(ClientType.WEB, "old-refresh")
                 self.assertEqual(result, "new-access")
                 self.assertEqual(

@@ -12,7 +12,7 @@ from yarl import URL
 
 from constants import COOKIES_PATH, OAUTH_TOKEN_PATH
 from exceptions import LoginException, RequestInvalid
-from oauth_storage import OAuthTokenStore
+from oauth_storage import CredentialStorageError, OAuthTokenStore
 from translate import _
 from http_transport import (
     read_json,
@@ -112,7 +112,7 @@ class AuthState:
     def _clear_refresh_token(self) -> None:
         try:
             self._oauth_tokens.clear()
-        except OSError as exc:
+        except (CredentialStorageError, OSError) as exc:
             logger.warning(
                 "Local authentication cleanup failed: %s",
                 type(exc).__name__,
@@ -125,19 +125,22 @@ class AuthState:
         *,
         rotated: bool = False,
     ) -> None:
+        description = (
+            "rotated OAuth refresh token"
+            if rotated
+            else "OAuth refresh token"
+        )
         try:
             self._oauth_tokens.save(client_id, refresh_token)
-        except (OSError, TypeError, ValueError) as exc:
-            description = (
-                "rotated OAuth refresh token"
-                if rotated
-                else "OAuth refresh token"
-            )
+        except (CredentialStorageError, OSError, TypeError, ValueError) as exc:
             logger.warning(
                 "Unable to persist %s: %s",
                 description,
                 type(exc).__name__,
             )
+            raise LoginException(
+                f"Unable to persist {description} safely"
+            ) from None
 
     def _oauth_headers(self, client_info: ClientInfo) -> dict[str, str]:
         return {
@@ -490,13 +493,23 @@ class AuthState:
         login_form.update(_("gui", "login", "logging_in"), None)
         validate_response: JsonType = {}
         cookie: Any = None
+        try:
+            stored_refresh_token = self._oauth_tokens.load(
+                client_info.CLIENT_ID
+            )
+        except (CredentialStorageError, OSError) as exc:
+            logger.warning(
+                "Unable to load stored OAuth credentials: %s",
+                type(exc).__name__,
+            )
+            raise LoginException(
+                "Stored OAuth credentials could not be read safely"
+            ) from None
         for _client_mismatch_attempt in range(2):
             for _invalid_token_attempt in range(2):
                 cookie = jar.filter_cookies(client_info.CLIENT_URL)
                 if "auth-token" not in cookie:
-                    refresh_token = self._oauth_tokens.load(
-                        client_info.CLIENT_ID
-                    )
+                    refresh_token = stored_refresh_token
                     refreshed_token = None
                     if refresh_token is not None:
                         logger.info("Refreshing Twitch OAuth session")
@@ -510,6 +523,7 @@ class AuthState:
                                 "Stored Twitch refresh token is invalid"
                             )
                             self._clear_refresh_token()
+                            stored_refresh_token = None
                         self.access_token = await self._oauth_login()
                     else:
                         self.access_token = refreshed_token
@@ -551,6 +565,7 @@ class AuthState:
             jar.clear()
             remove_file(COOKIES_PATH)
             self._clear_refresh_token()
+            stored_refresh_token = None
         else:
             raise RuntimeError("Login verification failure (step #1)")
 

@@ -65,9 +65,11 @@ Due to how Twitch handles drop progression, watching a stream in the browser or 
 
 ### Credential safety
 
-Persistent cookies are stored in `cookies.jar`, and OAuth refresh tokens, when Twitch returns one, are stored separately in `oauth.json`. Keep both files safe: they contain authorization material that can give another person access to your Twitch account without the password. Mutable application data is stored per user in `%LOCALAPPDATA%\\TwitchDropsMiner` on Windows, `${XDG_DATA_HOME:-~/.local/share}/TwitchDropsMiner` on Linux, and `~/Library/Application Support/TwitchDropsMiner` on macOS.
+Persistent web-session cookies remain in `cookies.jar`. OAuth refresh tokens, when Twitch returns one, are stored in the current user's native credential vault: Windows Credential Manager, macOS Keychain, or a Freedesktop Secret Service provider on Linux. Existing `oauth.json` credentials are migrated with a verified, versioned transaction; an existing vault credential wins, and the source file is removed only after the vault write has been read back successfully.
 
-Login uses Twitch's device-authorization page. The miner never asks for or stores your Twitch username, password, or two-factor authentication code.
+If a native vault is genuinely unavailable (for example, a Linux desktop session has no Secret Service provider), the miner retains a versioned, mode-0600 `oauth.json` fallback instead of discarding the credential. Vault access or integrity failures do not silently downgrade to plaintext storage, and records written by an unknown future version are left untouched and rejected. Keep `cookies.jar` and any fallback `oauth.json` safe: either can contain authorization material that gives access without the account password. Mutable application data is stored per user in `%LOCALAPPDATA%\\TwitchDropsMiner` on Windows, `${XDG_DATA_HOME:-~/.local/share}/TwitchDropsMiner` on Linux, and `~/Library/Application Support/TwitchDropsMiner` on macOS.
+
+Login uses Twitch's device-authorization page. The miner never asks for or stores your Twitch username, password, or two-factor authentication code, and credential values are never written to application logs.
 
 ### Progress semantics
 
@@ -115,7 +117,7 @@ Security vulnerabilities should be submitted through the [private vulnerability-
 - The macOS version is packaged using PyInstaller into a standalone `.app` bundle, distributed as a ZIP archive.
 - Since this application has no trusted Developer ID signature and is not notarized, **macOS Gatekeeper will block it** on the first run (saying it "The application is damaged and can't be opened"). Verify the release checksum and GitHub attestation before choosing to remove quarantine metadata.
   - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr 'Twitch Drops Miner (by DevilXD).app'` or just type `xattr -cr` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
-- Persistent files such as `cookies.jar`, `oauth.json`, `settings.json`, and the `cache` folder are stored in `~/Library/Application Support/TwitchDropsMiner`, outside the read-only application bundle.
+- Persistent files such as `cookies.jar`, `settings.json`, the `cache` folder, and any vault-unavailable `oauth.json` fallback are stored in `~/Library/Application Support/TwitchDropsMiner`, outside the read-only application bundle. OAuth refresh tokens normally reside in the user's macOS Keychain.
 
 ## Advanced Usage
 
