@@ -619,6 +619,7 @@ class QtUiTests(unittest.TestCase):
         )
         self.assertTrue(manager.close_inhibited)
 
+        manager.tray.start()
         with patch.object(manager, "grab_attention") as grab_attention:
             self.assertFalse(manager.close())
             self.assertFalse(manager.close_requested)
@@ -630,6 +631,7 @@ class QtUiTests(unittest.TestCase):
             close_event.accept.assert_not_called()
             manager.tray.quit()
             self.assertEqual(grab_attention.call_count, 3)
+        manager.tray.stop()
         self.assertFalse(manager.close_requested)
         self.assertNotIn(State.EXIT, twitch.state_changes)
 

@@ -75,12 +75,20 @@ def _load_catalog(path: Path) -> Mapping[str, Any]:
     return value
 
 
+def _catalog_paths(project_root: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in (project_root / "lang").glob("*.json")
+        if path.stem != "English"
+    )
+
+
 class TranslationCatalogTests(unittest.TestCase):
     project_root = Path(__file__).resolve().parents[1]
     default_strings = dict(_string_leaves(default_translation))
 
     def test_catalogs_exactly_match_english_schema_and_placeholders(self) -> None:
-        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+        for language_path in _catalog_paths(self.project_root):
             translation = _load_catalog(language_path)
             with self.subTest(language=language_path.stem):
                 translated_strings = dict(_string_leaves(translation))
@@ -158,7 +166,7 @@ class TranslationCatalogTests(unittest.TestCase):
 
     def test_every_catalog_loads_without_english_fallback(self) -> None:
         try:
-            for language_path in sorted((self.project_root / "lang").glob("*.json")):
+            for language_path in _catalog_paths(self.project_root):
                 expected = dict(_string_leaves(_load_catalog(language_path)))
                 with self.subTest(language=language_path.stem):
                     _.set_language(language_path.stem)
@@ -199,7 +207,7 @@ class TranslationCatalogTests(unittest.TestCase):
                 return "Arabic"
             return None
 
-        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+        for language_path in _catalog_paths(self.project_root):
             strings = dict(_string_leaves(_load_catalog(language_path)))
             with self.subTest(language=language_path.stem):
                 controls = [
@@ -271,7 +279,7 @@ class TranslationCatalogTests(unittest.TestCase):
                     self.assertNotIn(bad_value, text)
 
     def test_help_catalogs_match_current_five_step_contract(self) -> None:
-        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+        for language_path in _catalog_paths(self.project_root):
             catalog = _load_catalog(language_path)
             gui = catalog["gui"]
             assert isinstance(gui, Mapping)
@@ -297,7 +305,7 @@ class TranslationCatalogTests(unittest.TestCase):
         )
         self.assertIn("Catalog schema version: `2`", documentation)
         self.assertIn("Help source revision: `2`", documentation)
-        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+        for language_path in _catalog_paths(self.project_root):
             with self.subTest(language=language_path.stem):
                 self.assertIn(
                     f"| {language_path.stem} | Machine-assisted | Pending | — |",
