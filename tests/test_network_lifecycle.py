@@ -375,7 +375,9 @@ class WebsocketLifecycleTests(unittest.TestCase):
             websocket._idx = 0
             websocket.topics = {str(topic): topic}
             websocket._topic_tasks = set()
+            websocket._replay_tasks = set()
             websocket._pending_topic_messages = deque()
+            websocket._replay_topic_messages = deque()
             websocket._topic_generation = 0
             websocket._topic_dispatch_paused = False
 
@@ -428,7 +430,9 @@ class WebsocketLifecycleTests(unittest.TestCase):
             websocket._idx = 0
             websocket.topics = {str(topic): topic}
             websocket._topic_tasks = set()
+            websocket._replay_tasks = set()
             websocket._pending_topic_messages = deque()
+            websocket._replay_topic_messages = deque()
             websocket._topic_generation = 0
             websocket._topic_dispatch_paused = False
             websocket._topic_dispatch_policy = None
@@ -479,6 +483,71 @@ class WebsocketLifecycleTests(unittest.TestCase):
                     "after-progress",
                 ],
             )
+
+        asyncio.run(exercise())
+
+    def test_disconnect_owns_and_invalidates_blocked_replay_batch(self) -> None:
+        async def exercise() -> None:
+            batch_entered = asyncio.Event()
+            release = asyncio.Event()
+            entered = 0
+            applied: list[int] = []
+
+            async def process(_target: int, payload: dict[str, Any]) -> None:
+                nonlocal entered
+                entered += 1
+                if entered == 32:
+                    batch_entered.set()
+                await release.wait()
+                applied.append(cast(int, payload["sequence"]))
+
+            topic = WebsocketTopic("User", "Drops", 1, process)
+
+            def message(sequence: int) -> dict[str, Any]:
+                return {
+                    "data": {
+                        "topic": str(topic),
+                        "message": json.dumps({"sequence": sequence}),
+                    }
+                }
+
+            websocket = Websocket.__new__(Websocket)
+            websocket._idx = 0
+            websocket.topics = {str(topic): topic}
+            websocket._topic_tasks = set()
+            websocket._replay_tasks = set()
+            websocket._pending_topic_messages = deque()
+            websocket._replay_topic_messages = deque()
+            websocket._topic_generation = 0
+            websocket._topic_dispatch_paused = False
+            websocket._topic_dispatch_policy = None
+            websocket._topic_replay_overflow = False
+            pool = WebsocketPool(cast(Any, SimpleNamespace()))
+            pool.websockets.append(websocket)
+
+            async def pause_and_replay() -> None:
+                async with pool.topic_dispatch_lease(
+                    TopicDispatchPolicy.REPLAY
+                ):
+                    for sequence in range(33):
+                        await websocket._handle_message(message(sequence))
+
+            replay = asyncio.create_task(pause_and_replay())
+            await asyncio.wait_for(batch_entered.wait(), timeout=1)
+            self.assertEqual(len(websocket._replay_tasks), 32)
+            self.assertEqual(len(websocket._replay_topic_messages), 1)
+
+            await websocket.cancel_topic_tasks()
+            self.assertEqual(websocket._topic_generation, 1)
+            self.assertEqual(applied, [])
+            self.assertEqual(websocket._replay_tasks, set())
+            self.assertEqual(websocket._replay_topic_messages, deque())
+
+            release.set()
+            await asyncio.wait_for(replay, timeout=1)
+            await asyncio.sleep(0)
+            self.assertEqual(applied, [])
+            self.assertTrue(pool.consume_topic_replay_overflow())
 
         asyncio.run(exercise())
 

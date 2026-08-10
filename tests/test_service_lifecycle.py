@@ -68,6 +68,9 @@ class _NoopTopicLease:
 
 
 class _Websocket:
+    def __init__(self, *, replay_overflow: bool = False) -> None:
+        self._replay_overflow = replay_overflow
+
     async def start(self) -> None:
         return None
 
@@ -78,7 +81,9 @@ class _Websocket:
         return _NoopTopicLease()
 
     def consume_topic_replay_overflow(self) -> bool:
-        return False
+        overflow = self._replay_overflow
+        self._replay_overflow = False
+        return overflow
 
 
 class _Gui:
@@ -301,6 +306,29 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await miner._state_intents.get(), State.GAMES_UPDATE)
         self.assertIs(await miner._state_intents.get(), State.INVENTORY_FETCH)
         self.assertIs(await miner._state_intents.get(), State.CHANNEL_SWITCH)
+
+    async def test_replay_disconnect_reconciliation_follows_continuation(
+        self,
+    ) -> None:
+        miner = cast(Any, Twitch.__new__(Twitch))
+        miner._state_intents = _StateIntentMailbox()
+        miner.inventory = []
+        miner._drops = {}
+        miner.gui = SimpleNamespace(
+            tray=SimpleNamespace(change_icon=lambda _icon: None),
+            set_games=lambda _games: None,
+        )
+        miner.websocket = _Websocket(replay_overflow=True)
+        miner.history_event = lambda *_args, **_kwargs: None
+        miner.save = lambda: None
+        service = cast(Any, InventoryService(miner))
+        service.fetch_inventory = AsyncMock(return_value=None)
+
+        await service.sync_state()
+
+        self.assertIs(await miner._state_intents.get(), State.GAMES_UPDATE)
+        self.assertIs(await miner._state_intents.get(), State.INVENTORY_FETCH)
+        self.assertEqual(miner._state_intents.pending, set())
 
     async def test_transient_inventory_failure_preserves_snapshot_and_retries(self) -> None:
         miner = cast(Any, Twitch.__new__(Twitch))

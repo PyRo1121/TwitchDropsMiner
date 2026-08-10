@@ -78,7 +78,11 @@ class Websocket:
         # main task, responsible for receiving messages, sending them, and websocket ping
         self._handle_task: asyncio.Task[None] | None = None
         self._topic_tasks: set[asyncio.Task[Any]] = set()
+        self._replay_tasks: set[asyncio.Task[Any]] = set()
         self._pending_topic_messages: deque[
+            tuple[WebsocketTopic, JsonType, int]
+        ] = deque()
+        self._replay_topic_messages: deque[
             tuple[WebsocketTopic, JsonType, int]
         ] = deque()
         self._topic_generation = 0
@@ -189,18 +193,44 @@ class Websocket:
                     self._topics_changed.set()
                     self._twitch.gui.websockets.remove(self._idx)
 
-    async def cancel_topic_tasks(self) -> None:
+    def _invalidate_topic_work(self) -> tuple[asyncio.Task[Any], ...]:
         self._topic_generation += 1
-        if (
+        replay_policy = (
             self._topic_dispatch_paused
             and self._topic_dispatch_policy is TopicDispatchPolicy.REPLAY
-            and self._pending_topic_messages
+        )
+        if (
+            self._pending_topic_messages
+            or self._replay_topic_messages
+            or self._replay_tasks
+            or (replay_policy and self._topic_tasks)
         ):
             self._topic_replay_overflow = True
         self._pending_topic_messages.clear()
-        tasks = tuple(self._topic_tasks)
-        self._topic_tasks.clear()
-        await cancel_tasks(tasks)
+        self._replay_topic_messages.clear()
+        tasks = tuple(self._topic_tasks | self._replay_tasks)
+        for task in tasks:
+            if task is not asyncio.current_task() and not task.done():
+                task.cancel()
+        return tasks
+
+    async def cancel_topic_tasks(self) -> None:
+        tasks = self._invalidate_topic_work()
+        current_task = asyncio.current_task()
+        owned = tuple(task for task in tasks if task is not current_task)
+        cancelled = False
+        if owned:
+            barrier = asyncio.gather(*owned, return_exceptions=True)
+            while not barrier.done():
+                try:
+                    await asyncio.shield(barrier)
+                except (asyncio.CancelledError,):
+                    cancelled = True
+            barrier.result()
+        self._topic_tasks.difference_update(owned)
+        self._replay_tasks.difference_update(owned)
+        if cancelled:
+            raise asyncio.CancelledError()
 
     async def pause_topic_dispatch(
         self,
@@ -230,19 +260,34 @@ class Websocket:
         """Replay a bounded pause queue, then allow live topic dispatch."""
         policy = self._topic_dispatch_policy
         if policy is TopicDispatchPolicy.REPLAY:
-            queued = tuple(self._pending_topic_messages)
+            self._replay_topic_messages.extend(self._pending_topic_messages)
             self._pending_topic_messages.clear()
-            for offset in range(0, len(queued), WS_TOPIC_TASK_LIMIT):
-                batch = queued[offset : offset + WS_TOPIC_TASK_LIMIT]
-                await asyncio.gather(
-                    *(
-                        self._dispatch_replayed_topic(topic, payload, generation)
-                        for topic, payload, generation in batch
-                    ),
-                    return_exceptions=True,
+            while self._replay_topic_messages:
+                batch = tuple(
+                    self._replay_topic_messages.popleft()
+                    for _ in range(
+                        min(
+                            WS_TOPIC_TASK_LIMIT,
+                            len(self._replay_topic_messages),
+                        )
+                    )
                 )
+                tasks = tuple(
+                    asyncio.create_task(
+                        self._dispatch_replayed_topic(topic, payload, generation)
+                    )
+                    for topic, payload, generation in batch
+                )
+                self._replay_tasks.update(tasks)
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                finally:
+                    self._replay_tasks.difference_update(tasks)
         else:
+            if self._pending_topic_messages or self._replay_topic_messages:
+                self._topic_replay_overflow = True
             self._pending_topic_messages.clear()
+            self._replay_topic_messages.clear()
         self._topic_dispatch_paused = False
         self._topic_dispatch_policy = None
         self._drain_pending_topic_messages()
@@ -257,15 +302,23 @@ class Websocket:
             generation != self._topic_generation
             or self.topics.get(str(topic)) is not topic
         ):
+            self._topic_replay_overflow = True
             return
         try:
             await topic(payload)
+        except (asyncio.CancelledError,):
+            self._topic_replay_overflow = True
+            raise
         except Exception as exc:
+            self._topic_replay_overflow = True
             ws_logger.error(
                 "Websocket[%s] replayed topic handler failed: %s",
                 self._idx,
                 type(exc).__name__,
             )
+        finally:
+            if generation != self._topic_generation:
+                self._topic_replay_overflow = True
 
     def consume_topic_replay_overflow(self) -> bool:
         overflow = self._topic_replay_overflow
@@ -277,10 +330,7 @@ class Websocket:
         # owned asynchronous cleanup task.
         self._closed.set()
         self._reconnect_requested.set()
-        self._topic_generation += 1
-        self._pending_topic_messages.clear()
-        for task in tuple(self._topic_tasks):
-            task.cancel()
+        self._invalidate_topic_work()
         return asyncio.create_task(task_wrapper(self.stop)(remove=remove))
 
     async def _wait_for_backoff(self, delay: float) -> bool:
