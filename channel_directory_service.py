@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import abc, OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from channel import Channel
 from constants import (
@@ -35,6 +35,103 @@ class ChannelDirectoryService:
 
     def __init__(self, twitch: Twitch) -> None:
         self._twitch = twitch
+        self._probe_tasks: dict[
+            int, tuple[Channel, asyncio.Task[Any]]
+        ] = {}
+        self._probe_restart: dict[int, Channel] = {}
+        self._probes_quiesced = False
+
+    @property
+    def probes_quiesced(self) -> bool:
+        return self._probes_quiesced
+
+    @property
+    def pending_probe_count(self) -> int:
+        return len(self._probe_tasks)
+
+    def start_session(self) -> None:
+        self._probes_quiesced = False
+        self._probe_restart.clear()
+
+    def start_online_probe(self, channel: Channel) -> None:
+        if self._probes_quiesced or channel.id in self._probe_tasks:
+            return
+        task = asyncio.create_task(channel._online_delay())
+        self._probe_tasks[channel.id] = (channel, task)
+        channel._pending_stream_up = task
+        task.add_done_callback(
+            lambda completed, owner=channel: self._probe_done(owner, completed)
+        )
+        channel.display()
+
+    def _probe_done(
+        self,
+        channel: Channel,
+        task: asyncio.Task[Any],
+    ) -> None:
+        if self._probe_tasks.get(channel.id) == (channel, task):
+            del self._probe_tasks[channel.id]
+        if channel._pending_stream_up is task:
+            channel._pending_stream_up = None
+            channel.display()
+        if not task.cancelled():
+            task.exception()
+
+    @staticmethod
+    async def _cancel_probe_tasks(
+        tasks: abc.Iterable[asyncio.Task[Any]],
+    ) -> None:
+        owned = tuple(tasks)
+        for task in owned:
+            if not task.done():
+                task.cancel()
+        if not owned:
+            return
+        barrier = asyncio.gather(*owned, return_exceptions=True)
+        cancelled = False
+        while not barrier.done():
+            try:
+                await asyncio.shield(barrier)
+            except (asyncio.CancelledError,):
+                cancelled = True
+        barrier.result()
+        if cancelled:
+            raise asyncio.CancelledError()
+
+    async def cancel_probes(
+        self,
+        channels: abc.Iterable[Channel],
+    ) -> None:
+        selected = tuple(channels)
+        tasks: list[asyncio.Task[Any]] = []
+        for channel in selected:
+            owned = self._probe_tasks.get(channel.id)
+            if owned is not None and owned[0] is channel:
+                tasks.append(owned[1])
+            self._probe_restart.pop(channel.id, None)
+        await self._cancel_probe_tasks(tasks)
+
+    async def quiesce_probes(self, *, restart: bool) -> None:
+        """Block new probes, then cancel and await every detached probe."""
+        self._probes_quiesced = True
+        active = tuple(self._probe_tasks.values())
+        if restart:
+            self._probe_restart.update(
+                (channel.id, channel) for channel, _task in active
+            )
+        else:
+            self._probe_restart.clear()
+        await self._cancel_probe_tasks(
+            task for _channel, task in active
+        )
+
+    def resume_probes(self, *, restart: bool) -> None:
+        candidates = tuple(self._probe_restart.values()) if restart else ()
+        self._probe_restart.clear()
+        self._probes_quiesced = False
+        for channel in candidates:
+            if self._twitch.channels.get(channel.id) is channel:
+                self.start_online_probe(channel)
 
     def get_priority(self, channel: Channel) -> int:
         """Return a channel's selected-game priority; zero is highest."""
@@ -97,6 +194,7 @@ class ChannelDirectoryService:
                 )
             ]
         if to_remove:
+            await self.cancel_probes(to_remove)
             await self._twitch.watch_service.stop_watching_and_wait()
             self._twitch.websocket.remove_topics(
                 self.channel_state_topics(to_remove)
@@ -114,7 +212,8 @@ class ChannelDirectoryService:
         self,
         channels: OrderedDict[int, Channel],
     ) -> None:
-        # Quiesce old watch tasks before replacing their Channel objects.
+        # Quiesce detached probes before watch tasks and Channel replacement.
+        await self.cancel_probes(tuple(channels.values()))
         await self._twitch.watch_service.stop_watching_and_wait()
         self._twitch.gui.status.update(_("gui", "status", "gathering"))
         new_channels = set(channels.values())

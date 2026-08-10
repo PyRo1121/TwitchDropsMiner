@@ -40,6 +40,12 @@ class ReloadRequest(MinerException):
         super().__init__("Application was requested to reload entirely")
 
 
+class InventoryPresentationError(MinerException):
+    """Inventory UI transaction failed and the session cannot safely continue."""
+
+    _default_message = "Inventory presentation transaction failed"
+
+
 class RequestException(MinerException):
     """
     Raised for cases where a web request doesn't return what we wanted it to.

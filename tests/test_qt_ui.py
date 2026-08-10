@@ -16,12 +16,13 @@ from types import SimpleNamespace
 import aiohttp
 from PIL import Image
 from typing import Any, cast
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on test environment
@@ -267,6 +268,59 @@ class QtUiTests(unittest.TestCase):
         self.assertIn("allowed-channel", card.allowed.text())
         self.assertFalse(card.allowed.isHidden())
         card.deleteLater()
+
+    def test_inventory_presentation_stages_before_atomic_publish(self) -> None:
+        async def exercise() -> None:
+            settings = FakeSettings(priority=["Example Game"])
+            page = InventoryPage(settings)
+            cache = SimpleNamespace(get=AsyncMock(return_value=QPixmap()))
+
+            def campaign(campaign_id: str) -> SimpleNamespace:
+                starts_at = datetime.now(timezone.utc)
+                return SimpleNamespace(
+                    id=campaign_id,
+                    game=SimpleNamespace(name="Example Game"),
+                    name=campaign_id,
+                    drops=[],
+                    image_url="",
+                    linked=True,
+                    link_url="https://www.twitch.tv/drops/campaigns",
+                    active=True,
+                    upcoming=False,
+                    expired=False,
+                    allowed_channels=[],
+                    progress=0.0,
+                    claimed_drops=0,
+                    total_drops=1,
+                    starts_at=starts_at,
+                    ends_at=starts_at + timedelta(days=1),
+                    required_minutes=60,
+                    eligible=True,
+                    finished=False,
+                )
+
+            first = await page.stage_campaigns(
+                [cast(Any, campaign("first"))],
+                cast(Any, cache),
+            )
+            first.commit()
+            first.finalize()
+
+            second = await page.stage_campaigns(
+                [cast(Any, campaign("second"))],
+                cast(Any, cache),
+            )
+            self.assertEqual(set(page._campaigns), {"first"})
+            second.commit()
+            self.assertEqual(set(page._campaigns), {"second"})
+            second.rollback()
+            self.assertEqual(set(page._campaigns), {"first"})
+
+            page._clear_campaigns()
+            page.stop()
+            page.deleteLater()
+
+        asyncio.run(exercise())
 
     def test_inventory_timer_refreshes_temporal_campaign_state(self) -> None:
         settings = FakeSettings(priority=["Example Game"])

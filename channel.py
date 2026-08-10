@@ -256,8 +256,7 @@ class Channel:
 
     def remove(self):
         if self._pending_stream_up is not None:
-            self._pending_stream_up.cancel()
-            self._pending_stream_up = None
+            raise RuntimeError("Channel probe must be awaited before removal")
         self._gui_channels.remove(self)
 
     async def get_spade_url(self) -> URLType:
@@ -389,30 +388,24 @@ class Channel:
         The 'stream-up' event is sent before the stream actually goes online,
         so just wait a bit and check if it's actually online by then.
         """
-        current_task = asyncio.current_task()
         delays = (ONLINE_DELAY.total_seconds(), *ONLINE_RETRY_DELAYS)
-        try:
-            for attempt, delay in enumerate(delays, start=1):
-                await asyncio.sleep(delay)
-                try:
-                    await self.update_stream()
-                except Exception as exc:
-                    if isinstance(exc, (ExitRequest, ReloadRequest)):
-                        # Detached probes treat shutdown and reload requests as
-                        # normal cancellation signals.
-                        return
-                    logger.exception(
-                        "Delayed online check %s/%s failed for channel %s",
-                        attempt,
-                        len(delays),
-                        self._login,
-                    )
-                    continue
-                return
-        finally:
-            if self._pending_stream_up is current_task:
-                self._pending_stream_up = None
-                self.display()
+        for attempt, delay in enumerate(delays, start=1):
+            await asyncio.sleep(delay)
+            try:
+                await self.update_stream()
+            except Exception as exc:
+                if isinstance(exc, (ExitRequest, ReloadRequest)):
+                    # Detached probes treat shutdown and reload requests as
+                    # normal cancellation signals.
+                    return
+                logger.exception(
+                    "Delayed online check %s/%s failed for channel %s",
+                    attempt,
+                    len(delays),
+                    self._login,
+                )
+                continue
+            return
 
     def check_online(self):
         """
@@ -427,21 +420,17 @@ class Channel:
         This is called externally, if we receive an event about the status possibly being ONLINE
         or having to be updated.
         """
-        if self._pending_stream_up is None:
-            self._pending_stream_up = asyncio.create_task(self._online_delay())
-            self.display()
+        self._twitch.channel_directory_service.start_online_probe(self)
 
-    def set_offline(self):
+    async def set_offline(self):
         """
         Sets the channel status to OFFLINE. Cancels PENDING_ONLINE if applicable.
 
         This is called externally, if we receive an event indicating the channel is now OFFLINE.
         """
-        needs_display: bool = False
-        if self._pending_stream_up is not None:
-            self._pending_stream_up.cancel()
-            self._pending_stream_up = None
-            needs_display = True
+        had_pending = self._pending_stream_up is not None
+        if had_pending:
+            await self._twitch.channel_directory_service.cancel_probes((self,))
         if self.online:
             old_stream = self._stream
             self._stream = None
@@ -451,9 +440,8 @@ class Channel:
                 self._stream,
             )
             # The channel event service always displays after a transition.
-            needs_display = False
-        if needs_display:
-            self.display()
+        elif had_pending and self._pending_stream_up is not None:
+            raise RuntimeError("Channel probe was not drained")
 
     async def send_watch(self) -> bool:
         stream = self._stream

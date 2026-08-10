@@ -33,6 +33,7 @@ class WatchService:
         self._generation = 0
         self._history_signature: tuple[tuple[int, str], ...] | None = None
         self._dual_watch_enabled = False
+        self._accepting_assignments = False
         self._cooldown_handles: dict[int, asyncio.TimerHandle] = {}
         self.progress = WatchProgressService(twitch, self)
         self.start_session()
@@ -40,13 +41,22 @@ class WatchService:
     def start_session(self) -> None:
         self._history_signature = None
         self._dual_watch_enabled = self._twitch.settings.experimental_dual_watch
+        self._accepting_assignments = True
 
     def _target_limit(self) -> int:
         return MAX_WATCH_CHANNELS if self._dual_watch_enabled else 1
 
     async def close(self) -> None:
+        self._accepting_assignments = False
         await self.stop_watching_and_wait()
         self.reset()
+
+    async def quiesce(self) -> None:
+        self._accepting_assignments = False
+        await self.stop_watching_and_wait()
+
+    def resume(self) -> None:
+        self._accepting_assignments = True
 
     def reset(self) -> None:
         for handle in self._cooldown_handles.values():
@@ -202,6 +212,8 @@ class WatchService:
         *,
         update_status: bool = True,
     ) -> None:
+        if not self._accepting_assignments:
+            return
         assignments = assignments[:self._target_limit()]
         channels = [channel for channel, _drop in assignments]
         targets = OrderedDict((channel.id, channel) for channel in channels)
@@ -357,6 +369,9 @@ class WatchService:
         return False
 
     def watch(self, channel: Channel, *, update_status: bool = True) -> None:
+        if not self._accepting_assignments:
+            logger.debug("Ignoring watch request while assignments are quiesced")
+            return
         self._twitch.gui.tray.change_icon("active")
         assignments = self._select_watch_assignments(preferred=channel)
         self._apply_watch_assignments(assignments, update_status=update_status)
@@ -396,6 +411,8 @@ class WatchService:
         self._twitch.gui.channels.clear_watching()
 
     def restart_watching(self) -> None:
+        if not self._accepting_assignments:
+            return
         self._twitch.gui.progress.stop_timer()
         for event in self._restart_events.values():
             event.set()

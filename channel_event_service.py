@@ -63,7 +63,7 @@ class ChannelEventService:
             channel.viewers = viewers
             channel.display()
         elif msg_type == "stream-down":
-            channel.set_offline()
+            await channel.set_offline()
         elif msg_type == "stream-up":
             channel.check_online()
         elif msg_type != "commercial":
@@ -132,7 +132,7 @@ class ChannelEventService:
                     self._twitch.print(
                         _("status", "goes_online").format(channel=channel.name)
                     )
-                    self._twitch.watch_service.watch(channel)
+                    self._twitch.change_state(State.CHANNEL_SWITCH)
                 else:
                     logger.info("%s goes ONLINE", channel.name)
             else:
@@ -166,7 +166,7 @@ class ChannelEventService:
                     self._drops_marker(stream_after),
                 )
                 if self._twitch.watch_service.should_switch(channel):
-                    self._twitch.watch_service.watch(channel)
+                    self._twitch.change_state(State.CHANNEL_SWITCH)
         channel.display()
 
     @staticmethod

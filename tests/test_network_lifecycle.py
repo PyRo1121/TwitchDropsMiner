@@ -4,7 +4,9 @@ import asyncio
 import json
 import unittest
 from collections import deque
+from collections.abc import AsyncIterator
 from datetime import timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -12,10 +14,19 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 
 from channel import Channel
+from channel_directory_service import ChannelDirectoryService
 from constants import WebsocketTopic
 from exceptions import ExitRequest, MinerException, WebsocketClosed
 from translate import _
-from websocket import Websocket, WebsocketPool
+from websocket import TopicDispatchPolicy, Websocket, WebsocketPool
+
+
+async def _single_connection(
+    connection: Any,
+    *_args: object,
+    **_kwargs: object,
+) -> AsyncIterator[Any]:
+    yield connection
 
 
 class _ChannelRows:
@@ -49,6 +60,9 @@ class ChannelOnlineProbeTests(unittest.TestCase):
         async def exercise() -> None:
             rows = _ChannelRows()
             twitch = SimpleNamespace(gui=SimpleNamespace(channels=rows))
+            twitch.channel_directory_service = ChannelDirectoryService(
+                cast(Any, twitch)
+            )
             channel = Channel(cast(Any, twitch), id=1, login="channel")
             update_stream = AsyncMock(
                 side_effect=(MinerException("temporary"), True)
@@ -78,6 +92,9 @@ class ChannelOnlineProbeTests(unittest.TestCase):
         async def exercise() -> None:
             rows = _ChannelRows()
             twitch = SimpleNamespace(gui=SimpleNamespace(channels=rows))
+            twitch.channel_directory_service = ChannelDirectoryService(
+                cast(Any, twitch)
+            )
             channel = Channel(cast(Any, twitch), id=1, login="channel")
 
             with patch.object(
@@ -126,6 +143,8 @@ class ChannelOnlineProbeTests(unittest.TestCase):
     def test_cancelled_probe_cannot_clear_its_replacement(self) -> None:
         async def exercise() -> None:
             twitch = SimpleNamespace(gui=SimpleNamespace(channels=_ChannelRows()))
+            directory = ChannelDirectoryService(cast(Any, twitch))
+            twitch.channel_directory_service = directory
             channel = Channel(cast(Any, twitch), id=1, login="channel")
 
             channel.check_online()
@@ -133,7 +152,8 @@ class ChannelOnlineProbeTests(unittest.TestCase):
             self.assertIsNotNone(first)
             await asyncio.sleep(0)
 
-            channel.set_offline()
+            await channel.set_offline()
+            self.assertTrue(cast(asyncio.Task[Any], first).cancelled())
             channel.check_online()
             replacement = channel._pending_stream_up
             self.assertIsNotNone(replacement)
@@ -142,9 +162,9 @@ class ChannelOnlineProbeTests(unittest.TestCase):
             await asyncio.sleep(0)
             self.assertIs(channel._pending_stream_up, replacement)
 
+            await directory.cancel_probes((channel,))
             channel.remove()
             if replacement is not None:
-                await asyncio.gather(replacement, return_exceptions=True)
                 self.assertTrue(replacement.cancelled())
 
         asyncio.run(exercise())
@@ -227,22 +247,23 @@ class WebsocketLifecycleTests(unittest.TestCase):
                 cast(
                     Any,
                     SimpleNamespace(
-                        _twitch=twitch,
-                        topic_dispatch_paused=False,
-                    ),
+                    _twitch=twitch,
+                    topic_dispatch_paused=False,
+                    topic_dispatch_policy=None,
+                ),
                 ),
                 0,
             )
             socket = SimpleNamespace(close_code=1000)
 
-            async def connections(*_args: object, **_kwargs: object):
-                yield socket
-
             async def close_during_ping() -> None:
                 websocket._closed.set()
                 raise WebsocketClosed(received=True)
 
-            websocket._backoff_connect = connections  # type: ignore[method-assign]
+            websocket._backoff_connect = partial(  # type: ignore[method-assign]
+                _single_connection,
+                socket,
+            )
             websocket._handle_ping = close_during_ping  # type: ignore[method-assign]
 
             await websocket._handle()
@@ -378,27 +399,31 @@ class WebsocketLifecycleTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_topic_pause_drains_handlers_and_blocks_resurrection_until_resume(self) -> None:
+    def test_inventory_pause_replays_progress_and_claim_boundaries(self) -> None:
         async def exercise() -> None:
             first_started = asyncio.Event()
-            second_completed = asyncio.Event()
-            calls = 0
+            release_first = asyncio.Event()
+            lease_entered = asyncio.Event()
+            release_lease = asyncio.Event()
+            calls: list[str] = []
 
-            async def process(_target_id: int, _payload: dict[str, Any]) -> None:
-                nonlocal calls
-                calls += 1
-                if calls == 1:
+            async def process(_target_id: int, payload: dict[str, Any]) -> None:
+                event_type = cast(str, payload["type"])
+                calls.append(event_type)
+                if event_type == "before-progress":
                     first_started.set()
-                    await asyncio.Event().wait()
-                second_completed.set()
+                    await release_first.wait()
 
             topic = WebsocketTopic("User", "Drops", 1, process)
-            message = {
-                "data": {
-                    "topic": str(topic),
-                    "message": json.dumps({"type": "drop-progress"}),
+
+            def message(event_type: str) -> dict[str, Any]:
+                return {
+                    "data": {
+                        "topic": str(topic),
+                        "message": json.dumps({"type": event_type}),
+                    }
                 }
-            }
+
             websocket = Websocket.__new__(Websocket)
             websocket._idx = 0
             websocket.topics = {str(topic): topic}
@@ -406,25 +431,251 @@ class WebsocketLifecycleTests(unittest.TestCase):
             websocket._pending_topic_messages = deque()
             websocket._topic_generation = 0
             websocket._topic_dispatch_paused = False
+            websocket._topic_dispatch_policy = None
+            websocket._topic_replay_overflow = False
             pool = WebsocketPool(cast(Any, SimpleNamespace()))
             pool.websockets.append(websocket)
 
-            await websocket._handle_message(message)
+            await websocket._handle_message(message("before-progress"))
             await asyncio.wait_for(first_started.wait(), timeout=1)
-            await pool.pause_topic_dispatch()
 
-            self.assertTrue(pool.topic_dispatch_paused)
-            self.assertEqual(websocket._topic_tasks, set())
-            await websocket._handle_message(message)
+            async def hold_lease() -> None:
+                async with pool.topic_dispatch_lease(
+                    TopicDispatchPolicy.REPLAY
+                ):
+                    lease_entered.set()
+                    await release_lease.wait()
+
+            lease_task = asyncio.create_task(hold_lease())
             await asyncio.sleep(0)
-            self.assertEqual(calls, 1)
+            self.assertFalse(lease_entered.is_set())
+            release_first.set()
+            await asyncio.wait_for(lease_entered.wait(), timeout=1)
 
-            await pool.resume_topic_dispatch()
+            await websocket._handle_message(message("during-progress"))
+            await websocket._handle_message(message("during-claim"))
+            self.assertEqual(calls, ["before-progress"])
+
+            release_lease.set()
+            await asyncio.wait_for(lease_task, timeout=1)
             self.assertFalse(pool.topic_dispatch_paused)
-            await websocket._handle_message(message)
-            await asyncio.wait_for(second_completed.wait(), timeout=1)
+            self.assertEqual(
+                calls,
+                ["before-progress", "during-progress", "during-claim"],
+            )
+
+            await websocket._handle_message(message("after-progress"))
+            for _ in range(10):
+                if calls[-1:] == ["after-progress"]:
+                    break
+                await asyncio.sleep(0)
             await websocket.cancel_topic_tasks()
-            self.assertEqual(calls, 2)
+            self.assertEqual(
+                calls,
+                [
+                    "before-progress",
+                    "during-progress",
+                    "during-claim",
+                    "after-progress",
+                ],
+            )
+
+        asyncio.run(exercise())
+
+    def test_cancelled_first_topic_lease_rolls_back_pause(self) -> None:
+        async def exercise() -> None:
+            pause_started = asyncio.Event()
+            release_pause = asyncio.Event()
+
+            class Socket:
+                def __init__(self) -> None:
+                    self.paused = False
+
+                async def pause_topic_dispatch(
+                    self,
+                    _policy: TopicDispatchPolicy,
+                ) -> None:
+                    self.paused = True
+                    pause_started.set()
+                    await release_pause.wait()
+
+                async def apply_topic_dispatch_policy(
+                    self,
+                    _policy: TopicDispatchPolicy,
+                ) -> None:
+                    return None
+
+                async def resume_topic_dispatch(self) -> None:
+                    self.paused = False
+
+            socket = Socket()
+            pool = WebsocketPool(cast(Any, SimpleNamespace()))
+            pool.websockets.append(cast(Any, socket))
+
+            async def acquire() -> None:
+                async with pool.topic_dispatch_lease(
+                    TopicDispatchPolicy.REPLAY
+                ):
+                    raise AssertionError("canceled acquisition entered the lease")
+
+            task = asyncio.create_task(acquire())
+            await asyncio.wait_for(pause_started.wait(), timeout=1)
+            task.cancel()
+            release_pause.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            self.assertFalse(pool.topic_dispatch_paused)
+            self.assertIsNone(pool.topic_dispatch_policy)
+            self.assertFalse(socket.paused)
+
+        asyncio.run(exercise())
+
+    def test_cancelled_nested_topic_lease_preserves_outer_lease(self) -> None:
+        async def exercise() -> None:
+            apply_started = asyncio.Event()
+            release_apply = asyncio.Event()
+
+            class Socket:
+                def __init__(self) -> None:
+                    self.paused = False
+                    self.policy: TopicDispatchPolicy | None = None
+                    self.apply_calls = 0
+
+                async def pause_topic_dispatch(
+                    self,
+                    policy: TopicDispatchPolicy,
+                ) -> None:
+                    self.paused = True
+                    self.policy = policy
+
+                async def apply_topic_dispatch_policy(
+                    self,
+                    policy: TopicDispatchPolicy,
+                ) -> None:
+                    self.apply_calls += 1
+                    self.policy = policy
+                    if self.apply_calls == 1:
+                        apply_started.set()
+                        await release_apply.wait()
+
+                async def resume_topic_dispatch(self) -> None:
+                    self.paused = False
+                    self.policy = None
+
+            socket = Socket()
+            pool = WebsocketPool(cast(Any, SimpleNamespace()))
+            pool.websockets.append(cast(Any, socket))
+
+            async with pool.topic_dispatch_lease(TopicDispatchPolicy.REPLAY):
+                async def acquire_nested() -> None:
+                    async with pool.topic_dispatch_lease(
+                        TopicDispatchPolicy.DISCARD
+                    ):
+                        raise AssertionError("canceled nested lease was entered")
+
+                task = asyncio.create_task(acquire_nested())
+                await asyncio.wait_for(apply_started.wait(), timeout=1)
+                task.cancel()
+                release_apply.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(pool.topic_dispatch_paused)
+                self.assertIs(
+                    pool.topic_dispatch_policy,
+                    TopicDispatchPolicy.REPLAY,
+                )
+                self.assertTrue(socket.paused)
+                self.assertIs(socket.policy, TopicDispatchPolicy.REPLAY)
+
+            self.assertFalse(pool.topic_dispatch_paused)
+            self.assertFalse(socket.paused)
+
+        asyncio.run(exercise())
+
+    def test_topic_lease_barrier_failure_does_not_leak_pause(self) -> None:
+        async def exercise() -> None:
+            class Socket:
+                def __init__(self) -> None:
+                    self.paused = False
+
+                async def pause_topic_dispatch(
+                    self,
+                    _policy: TopicDispatchPolicy,
+                ) -> None:
+                    self.paused = True
+                    raise RuntimeError("injected pause failure")
+
+                async def apply_topic_dispatch_policy(
+                    self,
+                    _policy: TopicDispatchPolicy,
+                ) -> None:
+                    return None
+
+                async def resume_topic_dispatch(self) -> None:
+                    self.paused = False
+
+            socket = Socket()
+            pool = WebsocketPool(cast(Any, SimpleNamespace()))
+            pool.websockets.append(cast(Any, socket))
+
+            with self.assertRaisesRegex(RuntimeError, "injected pause failure"):
+                async with pool.topic_dispatch_lease(
+                    TopicDispatchPolicy.REPLAY
+                ):
+                    raise AssertionError("failed lease was entered")
+
+            self.assertFalse(pool.topic_dispatch_paused)
+            self.assertFalse(socket.paused)
+
+        asyncio.run(exercise())
+
+    def test_cancelled_final_resume_completes_before_propagation(self) -> None:
+        async def exercise() -> None:
+            resume_started = asyncio.Event()
+            release_resume = asyncio.Event()
+
+            class Socket:
+                def __init__(self) -> None:
+                    self.paused = False
+
+                async def pause_topic_dispatch(
+                    self,
+                    _policy: TopicDispatchPolicy,
+                ) -> None:
+                    self.paused = True
+
+                async def apply_topic_dispatch_policy(
+                    self,
+                    _policy: TopicDispatchPolicy,
+                ) -> None:
+                    return None
+
+                async def resume_topic_dispatch(self) -> None:
+                    resume_started.set()
+                    await release_resume.wait()
+                    self.paused = False
+
+            socket = Socket()
+            pool = WebsocketPool(cast(Any, SimpleNamespace()))
+            pool.websockets.append(cast(Any, socket))
+
+            async def use_lease() -> None:
+                async with pool.topic_dispatch_lease(
+                    TopicDispatchPolicy.REPLAY
+                ):
+                    return None
+
+            task = asyncio.create_task(use_lease())
+            await asyncio.wait_for(resume_started.wait(), timeout=1)
+            task.cancel()
+            release_resume.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            self.assertFalse(pool.topic_dispatch_paused)
+            self.assertIsNone(pool.topic_dispatch_policy)
+            self.assertFalse(socket.paused)
 
         asyncio.run(exercise())
 
@@ -443,6 +694,7 @@ class WebsocketLifecycleTests(unittest.TestCase):
                     SimpleNamespace(
                         _twitch=SimpleNamespace(gui=gui),
                         topic_dispatch_paused=False,
+                        topic_dispatch_policy=None,
                     ),
                 ),
                 0,
@@ -469,6 +721,7 @@ class WebsocketLifecycleTests(unittest.TestCase):
                     SimpleNamespace(
                         _twitch=SimpleNamespace(gui=gui),
                         topic_dispatch_paused=False,
+                        topic_dispatch_policy=None,
                     ),
                 ),
                 0,
@@ -521,6 +774,7 @@ class WebsocketLifecycleTests(unittest.TestCase):
             pool = SimpleNamespace(
                 _twitch=twitch,
                 topic_dispatch_paused=False,
+                topic_dispatch_policy=None,
             )
             websocket = Websocket(cast(Any, pool), 0)
 

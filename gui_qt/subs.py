@@ -39,6 +39,7 @@ from .widgets import Card, PageIntro, SectionTitle
 
 if TYPE_CHECKING:
     from channel import Channel
+    from gui_port import InventoryPresentationPort
     from inventory import DropsCampaign, TimedDrop
     from game import Game
 
@@ -256,6 +257,12 @@ class QtInventory:
     def __init__(self, page: InventoryPage, cache: ImageCache) -> None:
         self._page = page
         self._cache = cache
+
+    async def stage_campaigns(
+        self,
+        campaigns: Iterable[DropsCampaign],
+    ) -> InventoryPresentationPort:
+        return await self._page.stage_campaigns(campaigns, self._cache)
 
     async def replace_campaigns(
         self,

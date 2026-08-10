@@ -14,7 +14,7 @@ from auth import AuthState
 from channel import Channel
 from channel_directory_service import ChannelDirectoryService
 from channel_event_service import ChannelEventService
-from websocket import WebsocketPool
+from websocket import TopicDispatchPolicy, WebsocketPool
 from watch_service import WatchService
 from inventory import DropsCampaign
 from inventory_service import InventoryService
@@ -28,10 +28,7 @@ from exceptions import (
     RequestInvalid,
     RequestException,
 )
-from utils import (
-    cancel_tasks,
-    open_dump,
-)
+from utils import open_dump
 from constants import (
     State,
     ClientType,
@@ -49,6 +46,65 @@ if TYPE_CHECKING:
 logger = logging.getLogger("TwitchDrops")
 
 
+_STATE_PRIORITIES: Final[dict[State, int]] = {
+    State.EXIT: 0,
+    State.RESTART: 1,
+    State.GAMES_UPDATE: 2,
+    State.INVENTORY_FETCH: 3,
+    State.CHANNELS_CLEANUP: 4,
+    State.CHANNELS_FETCH: 5,
+    State.CHANNEL_SWITCH: 6,
+    State.IDLE: 7,
+}
+
+
+class _StateIntentMailbox:
+    """Bounded, priority-ordered coordinator intents with pending deduplication."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.PriorityQueue[tuple[int, int, State]] = (
+            asyncio.PriorityQueue()
+        )
+        self._pending: set[State] = set()
+        self._sequence = 0
+        self._terminal: State | None = None
+
+    @property
+    def terminal(self) -> State | None:
+        return self._terminal
+
+    @property
+    def pending(self) -> frozenset[State]:
+        return frozenset(self._pending)
+
+    def put(self, state: State) -> None:
+        if self._terminal is State.EXIT:
+            return
+        if self._terminal is State.RESTART and state is not State.EXIT:
+            return
+        if state is State.EXIT:
+            self._terminal = state
+        elif state is State.RESTART:
+            self._terminal = state
+        if state in self._pending:
+            return
+        self._sequence += 1
+        self._pending.add(state)
+        self._queue.put_nowait((_STATE_PRIORITIES[state], self._sequence, state))
+
+    async def get(self) -> State:
+        _, _, state = await self._queue.get()
+        self._queue.task_done()
+        self._pending.remove(state)
+        return state
+
+    def reset(self) -> None:
+        self._queue = asyncio.PriorityQueue()
+        self._pending.clear()
+        self._sequence = 0
+        self._terminal = None
+
+
 class Twitch:
     def __init__(
         self,
@@ -62,9 +118,7 @@ class Twitch:
         retention_days = max(1, min(retention_days, 3650))
         self.history = SessionHistory(retention_days=retention_days)
         # State management
-        self._state: State = State.IDLE
-        self._state_generation = 0
-        self._state_change = asyncio.Event()
+        self._state_intents = _StateIntentMailbox()
         self.wanted_games: list[Game] = []
         self.inventory: list[DropsCampaign] = []
         self._drops: dict[str, TimedDrop] = {}
@@ -89,21 +143,17 @@ class Twitch:
     async def shutdown(self) -> None:
         start_time = monotonic()
         self._inventory_generation += 1
-        await self.websocket.pause_topic_dispatch()
-        try:
-            # Stop event production before canceling any work that topic handlers
-            # can recreate. The pool remains reusable after a reload.
+        async with self.websocket.topic_dispatch_lease(
+            TopicDispatchPolicy.DISCARD
+        ):
+            # Stop socket production, then detached probes, before stopping any
+            # watch consumer they could otherwise recreate.
             await self.websocket.stop(clear_topics=True)
+            await self.channel_directory_service.quiesce_probes(restart=False)
             await self.inventory_service.close()
             await self.watch_service.close()
-            pending_channel_tasks = [
-                channel._pending_stream_up
-                for channel in self.channels.values()
-                if channel._pending_stream_up is not None
-            ]
             for channel in self.channels.values():
                 channel.remove()
-            await cancel_tasks(pending_channel_tasks)
             await self.transport.close()
             try:
                 await self.gui.inv.replace_campaigns(())
@@ -116,8 +166,6 @@ class Twitch:
             self._campaigns.clear()
             self._auth_state.clear()
             self.wanted_games.clear()
-        finally:
-            await self.websocket.resume_topic_dispatch()
         # wait at least half a second + whatever it takes to complete the closing
         # this allows aiohttp to safely close the session
         await asyncio.sleep(max(0, start_time + 0.5 - monotonic()))
@@ -126,12 +174,7 @@ class Twitch:
         return self._auth_state._logged_in.wait()
 
     def change_state(self, state: State) -> None:
-        if self._state is not State.EXIT:
-            # Prevent state changing once we switch to exit state. Every accepted
-            # request gets a generation even when it requests the same state.
-            self._state = state
-            self._state_generation += 1
-        self._state_change.set()
+        self._state_intents.put(state)
 
     def state_change(self, state: State) -> abc.Callable[[], None]:
         # this is identical to change_state, but defers the call
@@ -190,7 +233,7 @@ class Twitch:
     async def run(self):
         self.history.start()
         self._history_auth_recorded = False
-        self.inventory_service.start_session()
+        self._state_intents.reset()
         refresh_history = getattr(self.gui, "history_changed", None)
         if refresh_history is not None:
             refresh_history()
@@ -212,6 +255,9 @@ class Twitch:
                             data={"reason": "maintenance"},
                         )
                         await self.shutdown()
+                        if self._state_intents.terminal is State.EXIT:
+                            break
+                        self._state_intents.reset()
                     elif isinstance(exc, ExitRequest):
                         break
                     elif isinstance(exc, aiohttp.ContentTypeError):
@@ -245,6 +291,8 @@ class Twitch:
         • Changing the stream that's being watched if necessary
         """
         self.gui.start()
+        self.inventory_service.start_session()
+        self.channel_directory_service.start_session()
         self.watch_service.start_session()
         try:
             auth_state = await self.get_auth()
@@ -279,12 +327,7 @@ class Twitch:
         channels: Final[OrderedDict[int, Channel]] = self.channels
         self.change_state(State.INVENTORY_FETCH)
         while True:
-            # Consume exactly one coalesced transition before dispatch. Any
-            # transition requested while a handler awaits sets the event again
-            # and is therefore preserved for the next iteration.
-            await self._state_change.wait()
-            self._state_change.clear()
-            state = self._state
+            state = await self._state_intents.get()
             if state is State.IDLE:
                 if self.watch_service.handle_idle_state():
                     continue

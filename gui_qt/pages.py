@@ -967,6 +967,68 @@ class CampaignCard(Card):
         return _("gui", "inventory", key).format(time=local_time)
 
 
+class _StagedCampaignPresentation:
+    def __init__(
+        self,
+        page: InventoryPage,
+        staged: dict[str, CampaignCard],
+    ) -> None:
+        self._page = page
+        self._staged = staged
+        self._previous = page._campaigns
+        self._committed = False
+        self._finished = False
+
+    def commit(self) -> None:
+        if self._finished or self._committed:
+            raise RuntimeError("Campaign presentation is not staged")
+        layout = self._page._cards_layout
+        for card in self._previous.values():
+            layout.removeWidget(card)
+        inserted: list[CampaignCard] = []
+        try:
+            for card in self._staged.values():
+                layout.insertWidget(layout.count() - 1, card)
+                inserted.append(card)
+            self._page._campaigns = self._staged
+            self._page.empty.setVisible(not self._staged)
+            self._page.refresh()
+        except Exception:
+            for card in inserted:
+                layout.removeWidget(card)
+            self._page._campaigns = self._previous
+            for card in self._previous.values():
+                layout.insertWidget(layout.count() - 1, card)
+            self._page.empty.setVisible(not self._previous)
+            self._page.refresh()
+            raise
+        self._committed = True
+
+    def rollback(self) -> None:
+        if self._finished:
+            return
+        layout = self._page._cards_layout
+        if self._committed:
+            for card in self._staged.values():
+                layout.removeWidget(card)
+            self._page._campaigns = self._previous
+            for card in self._previous.values():
+                layout.insertWidget(layout.count() - 1, card)
+            self._page.empty.setVisible(not self._previous)
+            self._page.refresh()
+        for card in self._staged.values():
+            card.deleteLater()
+        self._finished = True
+
+    def finalize(self) -> None:
+        if self._finished or not self._committed:
+            raise RuntimeError("Campaign presentation was not committed")
+        for card in self._previous.values():
+            card.deleteLater()
+        self._previous = {}
+        self._finished = True
+
+
 class InventoryPage(QWidget):
     def __init__(self, settings: Any) -> None:
         super().__init__()
@@ -1029,11 +1091,11 @@ class InventoryPage(QWidget):
     def stop(self) -> None:
         self._refresh_timer.stop()
 
-    async def replace_campaigns(
+    async def stage_campaigns(
         self,
         campaigns: Iterable[DropsCampaign],
         cache: ImageCache,
-    ) -> None:
+    ) -> _StagedCampaignPresentation:
         staged: dict[str, CampaignCard] = {}
         for campaign in campaigns:
             if campaign.id in staged:
@@ -1053,16 +1115,20 @@ class InventoryPage(QWidget):
             if not loaded:
                 for card in staged.values():
                     card.deleteLater()
+        return _StagedCampaignPresentation(self, staged)
 
-        self._clear_campaigns()
-        self._campaigns = staged
-        for card in staged.values():
-            self._cards_layout.insertWidget(
-                self._cards_layout.count() - 1,
-                card,
-            )
-        self.empty.setVisible(not staged)
-        self.refresh()
+    async def replace_campaigns(
+        self,
+        campaigns: Iterable[DropsCampaign],
+        cache: ImageCache,
+    ) -> None:
+        presentation = await self.stage_campaigns(campaigns, cache)
+        try:
+            presentation.commit()
+        except BaseException:
+            presentation.rollback()
+            raise
+        presentation.finalize()
 
     def _clear_campaigns(self) -> None:
         for card in self._campaigns.values():

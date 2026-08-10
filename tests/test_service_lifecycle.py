@@ -10,24 +10,75 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from auth import AuthState
+from channel import Channel
 from channel_directory_service import ChannelDirectoryService
 from channel_event_service import ChannelEventService
 from constants import PriorityMode, State
 from drop_event_service import DropEventService
-from exceptions import MinerException, RequestException
+from exceptions import MinerException, ReloadRequest, RequestException
 from gui_port import ChannelsPort
 from http_transport import HttpTransport
 from inventory_service import InventoryService
-from twitch import Twitch
+from twitch import Twitch, _StateIntentMailbox
 from watch_service import WatchService
+
+
+class _Presentation:
+    def __init__(self, inventory: _Inventory, campaigns: list[Any]) -> None:
+        self._inventory = inventory
+        self._campaigns = campaigns
+        self._previous: list[Any] | tuple[Any, ...] | None = None
+        self._committed = False
+
+    def commit(self) -> None:
+        self._previous = self._inventory.current
+        self._inventory.current = self._campaigns
+        self._inventory.snapshots.append(self._campaigns)
+        self._committed = True
+
+    def rollback(self) -> None:
+        if self._committed and self._previous is not None:
+            self._inventory.current = self._previous
+            self._inventory.snapshots.append(self._previous)
+
+    def finalize(self) -> None:
+        return None
 
 
 class _Inventory:
     def __init__(self) -> None:
-        self.snapshots: list[list[Any]] = []
+        self.snapshots: list[list[Any] | tuple[Any, ...]] = []
+        self.current: list[Any] | tuple[Any, ...] = []
+
+    async def stage_campaigns(self, campaigns: list[Any]) -> _Presentation:
+        return _Presentation(self, list(campaigns))
 
     async def replace_campaigns(self, campaigns: list[Any]) -> None:
-        self.snapshots.append(campaigns)
+        presentation = await self.stage_campaigns(campaigns)
+        presentation.commit()
+        presentation.finalize()
+
+
+class _NoopTopicLease:
+    async def __aenter__(self) -> _NoopTopicLease:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class _Websocket:
+    async def start(self) -> None:
+        return None
+
+    def add_topics(self, _topics: object) -> None:
+        return None
+
+    def topic_dispatch_lease(self, _policy: object) -> _NoopTopicLease:
+        return _NoopTopicLease()
+
+    def consume_topic_replay_overflow(self) -> bool:
+        return False
 
 
 class _Gui:
@@ -66,9 +117,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
     ) -> Twitch:
         miner = cast(Any, Twitch.__new__(Twitch))
         miner.settings = SimpleNamespace(dump=False)
-        miner._state = State.IDLE
-        miner._state_generation = 0
-        miner._state_change = asyncio.Event()
+        miner._state_intents = _StateIntentMailbox()
         miner._history_auth_recorded = True
         miner.channels = OrderedDict()
         miner.gui = SimpleNamespace(
@@ -76,22 +125,34 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             tray=SimpleNamespace(change_icon=lambda _icon: None),
             status=SimpleNamespace(update=lambda _status: None),
         )
-        miner.watch_service = SimpleNamespace(start_session=lambda: None)
-        miner.websocket = SimpleNamespace(
-            start=AsyncMock(return_value=None),
-            add_topics=lambda _topics: None,
+        miner.watch_service = SimpleNamespace(
+            start_session=lambda: None,
+            handle_idle_state=lambda: False,
+            switch_channel=lambda _channels: False,
+            restart_watching=lambda: None,
         )
+        miner.websocket = _Websocket()
         miner.drop_event_service = SimpleNamespace(
             process_drops=AsyncMock(return_value=None),
             process_notifications=AsyncMock(return_value=None),
         )
-        miner.inventory_service = SimpleNamespace(sync_state=sync_state)
+        miner.inventory_service = SimpleNamespace(
+            start_session=lambda: None,
+            sync_state=sync_state,
+            update_wanted_games=AsyncMock(return_value=None),
+        )
+        miner.channel_directory_service = SimpleNamespace(
+            start_session=lambda: None,
+            cleanup_channels=AsyncMock(return_value=None),
+            fetch_channels=AsyncMock(return_value=None),
+        )
         miner.get_auth = AsyncMock(return_value=SimpleNamespace(user_id=1))
         return cast(Twitch, miner)
 
     async def test_state_loop_obeys_inventory_retry_backoff(self) -> None:
         delay_started = asyncio.Event()
         release_delay = asyncio.Event()
+        switch_seen = asyncio.Event()
         attempts = 0
 
         async def unused_sync_state() -> None:
@@ -114,13 +175,16 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             raise RequestException("temporary Twitch outage")
 
         miner.transport = SimpleNamespace(wait_for_delay=wait_for_delay)
+        miner.watch_service.switch_channel = (
+            lambda _channels: switch_seen.set() or False
+        )
         service = cast(Any, InventoryService(miner))
         service.fetch_inventory = fail_inventory
         miner.inventory_service = service
         run_task = asyncio.create_task(miner._run())
         await asyncio.wait_for(delay_started.wait(), timeout=1)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        miner.change_state(State.CHANNEL_SWITCH)
+        await asyncio.wait_for(switch_seen.wait(), timeout=1)
         self.assertEqual(attempts, 1)
 
         release_delay.set()
@@ -128,29 +192,55 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 2)
         await service.close()
 
-    async def test_state_loop_preserves_a_transition_requested_during_await(self) -> None:
-        first_started = asyncio.Event()
-        release_first = asyncio.Event()
-        attempts = 0
-        miner: Twitch
+    async def test_state_mailbox_preserves_distinct_intents_in_both_orders(
+        self,
+    ) -> None:
+        for requested in (
+            (State.RESTART, State.CHANNEL_SWITCH),
+            (State.CHANNEL_SWITCH, State.RESTART),
+        ):
+            with self.subTest(requested=requested):
+                first_started = asyncio.Event()
+                release_first = asyncio.Event()
 
-        async def sync_state() -> None:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                first_started.set()
-                await release_first.wait()
-            else:
-                miner.change_state(State.EXIT)
+                async def sync_state() -> None:
+                    first_started.set()
+                    await release_first.wait()
 
-        miner = self._state_loop_miner(sync_state)
-        run_task = asyncio.create_task(miner._run())
-        await asyncio.wait_for(first_started.wait(), timeout=1)
-        miner.change_state(State.INVENTORY_FETCH)
-        release_first.set()
+                miner = self._state_loop_miner(sync_state)
+                switch_channel = Mock(return_value=False)
+                cast(Any, miner.watch_service).switch_channel = switch_channel
+                run_task = asyncio.create_task(miner._run())
+                await asyncio.wait_for(first_started.wait(), timeout=1)
+                for state in requested:
+                    miner.change_state(state)
+                release_first.set()
 
-        await asyncio.wait_for(run_task, timeout=1)
-        self.assertEqual(attempts, 2)
+                with self.assertRaises(ReloadRequest):
+                    await asyncio.wait_for(run_task, timeout=1)
+                switch_channel.assert_not_called()
+                self.assertIs(miner._state_intents.terminal, State.RESTART)
+
+    async def test_state_mailbox_deduplicates_equivalent_pending_intents(
+        self,
+    ) -> None:
+        mailbox = _StateIntentMailbox()
+        mailbox.put(State.CHANNEL_SWITCH)
+        mailbox.put(State.CHANNEL_SWITCH)
+
+        self.assertEqual(mailbox.pending, {State.CHANNEL_SWITCH})
+        self.assertIs(await mailbox.get(), State.CHANNEL_SWITCH)
+        self.assertEqual(mailbox.pending, set())
+
+    async def test_exit_supersedes_restart_and_rejects_later_intents(self) -> None:
+        mailbox = _StateIntentMailbox()
+        mailbox.put(State.RESTART)
+        mailbox.put(State.EXIT)
+        mailbox.put(State.CHANNEL_SWITCH)
+
+        self.assertIs(await mailbox.get(), State.EXIT)
+        self.assertIs(mailbox.terminal, State.EXIT)
+        self.assertNotIn(State.CHANNEL_SWITCH, mailbox.pending)
 
     async def test_failed_game_directory_does_not_abort_other_games(self) -> None:
         class GameStub:
@@ -181,23 +271,21 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(channels, {expected_channel})
 
-    async def test_manual_refresh_is_not_overwritten_by_fetch_completion(self) -> None:
+    async def test_inventory_success_prioritizes_mandatory_continuation(self) -> None:
         miner = cast(Any, Twitch.__new__(Twitch))
-        miner._state = State.INVENTORY_FETCH
-        miner._state_generation = 1
-        miner._state_change = asyncio.Event()
+        miner._state_intents = _StateIntentMailbox()
         miner.inventory = []
         miner._drops = {}
         miner.gui = SimpleNamespace(
             tray=SimpleNamespace(change_icon=lambda _icon: None),
             set_games=lambda _games: None,
         )
-        miner.watch_service = SimpleNamespace(stop_watching=lambda: None)
-        miner.websocket = SimpleNamespace(start=AsyncMock(return_value=None))
+        miner.websocket = _Websocket()
         miner.history_event = lambda *_args, **_kwargs: None
         miner.save = lambda: None
 
         async def fetch_inventory() -> None:
+            miner.change_state(State.CHANNEL_SWITCH)
             miner.change_state(State.INVENTORY_FETCH)
 
         service = cast(Any, InventoryService(miner))
@@ -208,16 +296,15 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         await service.sync_state()
 
-        self.assertIs(miner._state, State.INVENTORY_FETCH)
-        self.assertEqual(miner._state_generation, 2)
         self.assertTrue(stale_retry.done())
         self.assertIsNone(service._retry_task)
+        self.assertIs(await miner._state_intents.get(), State.GAMES_UPDATE)
+        self.assertIs(await miner._state_intents.get(), State.INVENTORY_FETCH)
+        self.assertIs(await miner._state_intents.get(), State.CHANNEL_SWITCH)
 
     async def test_transient_inventory_failure_preserves_snapshot_and_retries(self) -> None:
         miner = cast(Any, Twitch.__new__(Twitch))
-        miner._state = State.INVENTORY_FETCH
-        miner._state_generation = 1
-        miner._state_change = asyncio.Event()
+        miner._state_intents = _StateIntentMailbox()
         old_inventory = [object()]
         old_drops = {"old": object()}
         miner.inventory = old_inventory
@@ -237,7 +324,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             tray=SimpleNamespace(change_icon=lambda _icon: None),
             status=SimpleNamespace(update=statuses.append),
         )
-        miner.websocket = SimpleNamespace(start=AsyncMock(return_value=None))
+        miner.websocket = _Websocket()
         miner.transport = SimpleNamespace(wait_for_delay=wait_for_delay)
         service = cast(Any, InventoryService(miner))
         service.fetch_inventory = fail_inventory
@@ -260,8 +347,6 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     def test_watch_service_owns_idle_and_channel_switch_policy(self) -> None:
         selected_channel = SimpleNamespace(id=7, name="selected")
-        state_change = asyncio.Event()
-        state_change.set()
         gui = SimpleNamespace(
             close=Mock(),
             clear_drop=Mock(),
@@ -280,7 +365,6 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     experimental_dual_watch=False,
                 ),
                 gui=gui,
-                _state_change=state_change,
                 channel_directory_service=SimpleNamespace(
                     get_priority=Mock(return_value=0),
                 ),
@@ -299,12 +383,10 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         service.watch.assert_called_once_with(selected_channel)
-        self.assertTrue(state_change.is_set())
 
         self.assertFalse(service.handle_idle_state())
         gui.tray.change_icon.assert_called_with("idle")
         gui.clear_drop.assert_called_once_with()
-        self.assertTrue(state_change.is_set())
         self.assertFalse(hasattr(Twitch, "_handle_idle_state"))
         self.assertFalse(hasattr(Twitch, "_switch_channel"))
         self.assertFalse(hasattr(service, "_reconcile_watch_progress"))
@@ -461,11 +543,103 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(retry_task.done())
             self.assertIsNone(miner.inventory_service._retry_task)
             self.assertFalse(miner.inventory_service.maintenance_running)
-            self.assertEqual(inventory.snapshots, [[], ()])
+            self.assertEqual(inventory.snapshots, [[], []])
             self.assertEqual(loop_errors, [])
             self.assertEqual(gui.authenticated, [False])
         finally:
             loop.set_exception_handler(previous_handler)
+
+    async def test_real_detached_probe_cannot_resurrect_watch_on_shutdown(
+        self,
+    ) -> None:
+        probe_started = asyncio.Event()
+        probe_cancelled = asyncio.Event()
+        watch_closed = asyncio.Event()
+
+        class Lease:
+            async def __aenter__(self) -> Lease:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class WebsocketStub:
+            def topic_dispatch_lease(self, _policy: object) -> Lease:
+                return Lease()
+
+            async def stop(self, *, clear_topics: bool) -> None:
+                self.assert_clear_topics(clear_topics)
+
+            @staticmethod
+            def assert_clear_topics(clear_topics: bool) -> None:
+                if not clear_topics:
+                    raise AssertionError("shutdown must clear topics")
+
+        watch_direct = Mock(
+            side_effect=AssertionError("probe directly resurrected watch")
+        )
+        miner = cast(Any, Twitch.__new__(Twitch))
+        miner._state_intents = _StateIntentMailbox()
+        miner.change_state(State.EXIT)
+        rows = SimpleNamespace(display=Mock(), remove=Mock())
+        miner.gui = SimpleNamespace(
+            channels=rows,
+            inv=SimpleNamespace(
+                replace_campaigns=AsyncMock(return_value=None),
+            ),
+            set_games=lambda _games: None,
+        )
+        miner.channels = OrderedDict()
+        miner.channel_directory_service = ChannelDirectoryService(miner)
+        miner.channel_event_service = ChannelEventService(miner)
+        miner.watch_service = SimpleNamespace(
+            should_switch=Mock(return_value=True),
+            watch=watch_direct,
+        )
+        channel = Channel(miner, id=1, login="detached")
+        miner.channels[channel.id] = channel
+
+        async def adversarial_probe(_channel: Channel) -> None:
+            probe_started.set()
+            try:
+                await asyncio.Event().wait()
+            except (asyncio.CancelledError,):
+                probe_cancelled.set()
+                miner.channel_event_service.on_channel_update(
+                    channel,
+                    None,
+                    cast(Any, object()),
+                )
+                raise
+
+        with patch.object(Channel, "_online_delay", adversarial_probe):
+            channel.check_online()
+        await asyncio.wait_for(probe_started.wait(), timeout=1)
+
+        async def watch_close() -> None:
+            self.assertTrue(probe_cancelled.is_set())
+            self.assertEqual(miner.channel_directory_service.pending_probe_count, 0)
+            watch_closed.set()
+
+        miner.websocket = WebsocketStub()
+        miner.inventory_service = SimpleNamespace(close=AsyncMock(return_value=None))
+        miner.watch_service.close = watch_close
+        miner.transport = SimpleNamespace(close=AsyncMock(return_value=None))
+        miner._inventory_generation = 0
+        miner._drops = {}
+        miner.inventory = []
+        miner._campaigns = {}
+        miner._auth_state = SimpleNamespace(clear=lambda: None)
+        miner.wanted_games = []
+        miner.print = Mock()
+
+        with patch("twitch.asyncio.sleep", new=AsyncMock(return_value=None)):
+            await miner.shutdown()
+
+        self.assertTrue(watch_closed.is_set())
+        self.assertIsNone(channel._pending_stream_up)
+        self.assertEqual(miner.channel_directory_service.pending_probe_count, 0)
+        watch_direct.assert_not_called()
 
     async def test_shutdown_pauses_and_stops_producers_before_consumers(self) -> None:
         events: list[str] = []
@@ -475,47 +649,58 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self._pending_stream_up: asyncio.Task[None] | None = None
 
             def remove(self) -> None:
-                events.append("channel.remove")
                 if self._pending_stream_up is not None:
-                    self._pending_stream_up.cancel()
-                    self._pending_stream_up = None
+                    raise AssertionError("probe was not awaited before channel removal")
+                events.append("channel.remove")
 
         channel = ChannelStub()
 
         async def wait_forever() -> None:
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                channel._pending_stream_up = None
 
         class WebsocketStub:
             def __init__(self) -> None:
                 self.paused = False
-                self.resurrection_attempts = 0
 
-            async def pause_topic_dispatch(self) -> None:
-                events.append("websocket.pause")
-                self.paused = True
-                await asyncio.sleep(0)
+            def topic_dispatch_lease(self, _policy: object) -> object:
+                owner = self
+
+                class Lease:
+                    async def __aenter__(self) -> object:
+                        events.append("websocket.pause")
+                        owner.paused = True
+                        return self
+
+                    async def __aexit__(self, *_args: object) -> None:
+                        events.append("websocket.resume")
+                        owner.paused = False
+
+                return Lease()
 
             async def stop(self, *, clear_topics: bool) -> None:
-                self.assert_clear_topics(clear_topics)
-                events.append("websocket.stop")
-                await asyncio.sleep(0)
-                self.resurrection_attempts += 1
-                if not self.paused:
-                    channel._pending_stream_up = asyncio.create_task(wait_forever())
-
-            async def resume_topic_dispatch(self) -> None:
-                events.append("websocket.resume")
-                self.paused = False
-
-            @staticmethod
-            def assert_clear_topics(clear_topics: bool) -> None:
                 if not clear_topics:
                     raise AssertionError("shutdown must clear websocket topics")
+                if not self.paused:
+                    raise AssertionError("shutdown lease was not acquired")
+                events.append("websocket.stop")
+
+        async def quiesce_probes(*, restart: bool) -> None:
+            self.assertFalse(restart)
+            events.append("probes.quiesce")
+            task = channel._pending_stream_up
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                channel._pending_stream_up = None
 
         async def inventory_close() -> None:
             events.append("inventory.close")
 
         async def watch_close() -> None:
+            self.assertIsNone(channel._pending_stream_up)
             events.append("watch.close")
 
         async def transport_close() -> None:
@@ -526,9 +711,13 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         miner = cast(Any, Twitch.__new__(Twitch))
         websocket = WebsocketStub()
+        channel._pending_stream_up = asyncio.create_task(wait_forever())
         miner._inventory_generation = 1
         miner.websocket = websocket
         miner.inventory_service = SimpleNamespace(close=inventory_close)
+        miner.channel_directory_service = SimpleNamespace(
+            quiesce_probes=quiesce_probes
+        )
         miner.watch_service = SimpleNamespace(close=watch_close)
         miner.channels = OrderedDict(((1, channel),))
         miner.transport = SimpleNamespace(close=transport_close)
@@ -545,13 +734,13 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with patch("twitch.asyncio.sleep", new=AsyncMock(return_value=None)):
             await miner.shutdown()
 
-        self.assertEqual(websocket.resurrection_attempts, 1)
         self.assertIsNone(channel._pending_stream_up)
         self.assertEqual(
             events,
             [
                 "websocket.pause",
                 "websocket.stop",
+                "probes.quiesce",
                 "inventory.close",
                 "watch.close",
                 "channel.remove",

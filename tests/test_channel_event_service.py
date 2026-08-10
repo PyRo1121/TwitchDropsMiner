@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from channel_event_service import ChannelEventService
 from constants import State
@@ -17,7 +17,7 @@ class _Channel:
         self.online = True
         self.viewers = 10
         self.check_online = Mock()
-        self.set_offline = Mock()
+        self.set_offline = AsyncMock()
         self.display = Mock()
 
 
@@ -58,7 +58,7 @@ class ChannelEventServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.process_stream_state(channel.id, {"type": "stream-down"})
         await service.process_stream_state(channel.id, {"type": "stream-up"})
 
-        channel.set_offline.assert_called_once_with()
+        channel.set_offline.assert_awaited_once_with()
         channel.check_online.assert_called_once_with()
 
     async def test_broadcast_updates_require_matching_channel_identity(self) -> None:

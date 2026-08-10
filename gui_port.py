@@ -59,7 +59,20 @@ class WebsocketsPort(Protocol):
     def remove(self, idx: int) -> None: ...
 
 
+class InventoryPresentationPort(Protocol):
+    def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
+
+    def finalize(self) -> None: ...
+
+
 class InventoryPort(Protocol):
+    async def stage_campaigns(
+        self,
+        campaigns: abc.Iterable[DropsCampaign],
+    ) -> InventoryPresentationPort: ...
+
     async def replace_campaigns(
         self,
         campaigns: abc.Iterable[DropsCampaign],
