@@ -416,7 +416,9 @@ class WatchService:
         self, preferred: Channel | None = None
     ) -> list[tuple[Channel, TimedDrop]]:
         """Select up to two assignments with a unique game and drop per target."""
-        ordered = self._twitch._rank_channels(self._twitch.channels.values())
+        ordered = self._twitch.channel_directory_service.rank_channels(
+            self._twitch.channels.values()
+        )
         if preferred is not None and preferred in ordered:
             ordered.remove(preferred)
             ordered.insert(0, preferred)
@@ -465,12 +467,7 @@ class WatchService:
         targets = OrderedDict((channel.id, channel) for channel in channels)
         target_drop_ids = {channel.id: drop.id for channel, drop in assignments}
         generation = self._bump_watch_generation()
-        for event in self._twitch._watch_restart_events.values():
-            event.set()
-        for task in self._twitch._watch_tasks.values():
-            task.cancel()
-        self._twitch._watch_tasks.clear()
-        self._twitch._watch_restart_events.clear()
+        self._cancel_watch_tasks()
         self._twitch._watching_channels = targets
         self._twitch._watch_drop_ids = target_drop_ids
         for channel in channels:
@@ -595,16 +592,16 @@ class WatchService:
             return False
         if len(self._twitch._watching_channels) < MAX_WATCH_CHANNELS:
             return True
+        get_priority = self._twitch.channel_directory_service.get_priority
         current_worst = max(
             self._twitch._watching_channels.values(),
-            key=lambda candidate: (self._twitch.get_priority(candidate), not candidate.acl_based),
+            key=lambda candidate: (get_priority(candidate), not candidate.acl_based),
         )
-        return (
-            self._twitch.get_priority(channel) < self._twitch.get_priority(current_worst)
-            or (
-                self._twitch.get_priority(channel) == self._twitch.get_priority(current_worst)
-                and channel.acl_based > current_worst.acl_based
-            )
+        candidate_priority = get_priority(channel)
+        current_priority = get_priority(current_worst)
+        return candidate_priority < current_priority or (
+            candidate_priority == current_priority
+            and channel.acl_based > current_worst.acl_based
         )
 
     def watch(self, channel: Channel, *, update_status: bool = True):
@@ -615,6 +612,14 @@ class WatchService:
     def _bump_watch_generation(self) -> int:
         self._twitch._watch_generation += 1
         return self._twitch._watch_generation
+
+    def _cancel_watch_tasks(self) -> None:
+        for event in self._twitch._watch_restart_events.values():
+            event.set()
+        for task in self._twitch._watch_tasks.values():
+            task.cancel()
+        self._twitch._watch_tasks.clear()
+        self._twitch._watch_restart_events.clear()
 
     async def stop_watching_and_wait(self) -> None:
         """Stop every watch loop and consume cancellation before returning."""
@@ -632,12 +637,7 @@ class WatchService:
             self._twitch._history_watch_signature = None
         self._twitch.gui.clear_drop()
         self._bump_watch_generation()
-        for event in self._twitch._watch_restart_events.values():
-            event.set()
-        for task in self._twitch._watch_tasks.values():
-            task.cancel()
-        self._twitch._watch_tasks.clear()
-        self._twitch._watch_restart_events.clear()
+        self._cancel_watch_tasks()
         self._twitch._watching_channels.clear()
         self._twitch._watch_drop_ids.clear()
         self._twitch.watching_channel.clear()

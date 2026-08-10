@@ -7,6 +7,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from auth import AuthState
+from channel_directory_service import ChannelDirectoryService
 from channel_event_service import ChannelEventService
 from constants import State
 from drop_event_service import DropEventService
@@ -47,7 +48,10 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, name: str) -> None:
                 self.name = name
 
-        miner = cast(Any, Twitch.__new__(Twitch))
+        directory = cast(
+            Any,
+            ChannelDirectoryService(cast(Any, SimpleNamespace())),
+        )
         expected_channel = cast(Any, object())
 
         async def get_live_streams(
@@ -60,9 +64,9 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 raise MinerException("temporary directory failure")
             return [expected_channel]
 
-        miner.get_live_streams = get_live_streams
+        directory.get_live_streams = get_live_streams
 
-        channels = await miner._fetch_live_streams_for_games(
+        channels = await directory.fetch_live_streams_for_games(
             [GameStub("failed"), GameStub("working")]
         )
 
@@ -160,6 +164,10 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(miner._auth_state, AuthState)
             self.assertIsInstance(miner.drop_event_service, DropEventService)
             self.assertIsInstance(miner.channel_event_service, ChannelEventService)
+            self.assertIsInstance(
+                miner.channel_directory_service,
+                ChannelDirectoryService,
+            )
             gui = cast(_Gui, miner.gui)
 
             statuses: list[str] = []

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
-from constants import State
+from constants import MAX_INT, State
 from drop_event_service import DropEventService
 from inventory_service import InventoryService
 from watch_service import WatchService
@@ -15,7 +15,30 @@ from twitch import Twitch
 from utils import AwaitableValue
 
 
+class _Directory:
+    def __init__(self, miner: Twitch) -> None:
+        self._miner = miner
+
+    def get_priority(self, channel: Any) -> int:
+        if channel.game not in self._miner.wanted_games:
+            return MAX_INT
+        return self._miner.wanted_games.index(channel.game)
+
+    def rank_channels(self, channels: Any) -> list[Any]:
+        ordered = sorted(
+            channels,
+            key=lambda channel: channel.viewers,
+            reverse=True,
+        )
+        ordered.sort(key=lambda channel: channel.acl_based, reverse=True)
+        ordered.sort(key=self.get_priority)
+        return ordered
+
+
 def _service(miner: Twitch) -> Any:
+    directory_service = getattr(miner, "channel_directory_service", None)
+    if directory_service is None:
+        cast(Any, miner).channel_directory_service = _Directory(miner)
     service = getattr(miner, "watch_service", None)
     if service is None:
         service = WatchService(miner)

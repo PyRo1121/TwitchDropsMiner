@@ -14,6 +14,7 @@ import aiohttp
 from translate import _
 from auth import AuthState
 from channel import Channel
+from channel_directory_service import ChannelDirectoryService
 from channel_event_service import ChannelEventService
 from websocket import WebsocketPool
 from watch_service import WatchService
@@ -24,28 +25,21 @@ from session_history import HistoryEvent, Scalar, SessionHistory, Severity
 from http_transport import HttpTransport
 from exceptions import (
     ExitRequest,
-    GQLException,
     ReloadRequest,
     LoginException,
-    MinerException,
     RequestInvalid,
     RequestException,
 )
 from utils import (
-    chunk,
     timestamp,
     cancel_tasks,
     AwaitableValue,
     redact_log_value,
-    extract_available_drops,
-    require_int,
 )
 from constants import (
     MAX_INT,
     DUMP_PATH,
     MAX_CHANNELS,
-    GQL_BATCH_SIZE,
-    GQL_QUERIES,
     INVENTORY_RETRY_BASE,
     INVENTORY_RETRY_MAX,
     State,
@@ -59,7 +53,7 @@ if TYPE_CHECKING:
     from gui_port import GuiPort
     from settings import Settings
     from inventory import TimedDrop
-    from constants import ClientInfo, JsonType, GQLOperation
+    from constants import ClientInfo
 
 
 logger = logging.getLogger("TwitchDrops")
@@ -103,6 +97,7 @@ class Twitch:
         self.inventory_service = InventoryService(self)
         self.drop_event_service = DropEventService(self)
         self.channel_event_service = ChannelEventService(self)
+        self.channel_directory_service = ChannelDirectoryService(self)
         self.gui: GuiPort = gui_factory(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
@@ -232,41 +227,6 @@ class Twitch:
         """
         self.gui.save(force=force)
         self.settings.save(force=force)
-
-    def get_priority(self, channel: Channel) -> int:
-        """
-        Return a priority number for a given channel.
-
-        0 has the highest priority.
-        Higher numbers -> lower priority.
-        MAX_INT (a really big number) signifies the lowest possible priority.
-        """
-        if (
-            (game := channel.game) is None  # None when OFFLINE or no game set
-            or game not in self.wanted_games  # we don't care about the played game
-        ):
-            return MAX_INT
-        return self.wanted_games.index(game)
-
-    @staticmethod
-    def _viewers_key(channel: Channel) -> int:
-        if (viewers := channel.viewers) is not None:
-            return viewers
-        return -1
-
-    @staticmethod
-    def _channel_state_topics(channels: abc.Iterable[Channel]) -> list[str]:
-        topics: list[str] = []
-        for channel in channels:
-            topics.append(WebsocketTopic.as_str("Channel", "StreamState", channel.id))
-            topics.append(WebsocketTopic.as_str("Channel", "StreamUpdate", channel.id))
-        return topics
-
-    def _rank_channels(self, channels: abc.Iterable[Channel]) -> list[Channel]:
-        ordered = sorted(channels, key=self._viewers_key, reverse=True)
-        ordered.sort(key=lambda channel: channel.acl_based, reverse=True)
-        ordered.sort(key=self.get_priority)
-        return ordered
 
     async def run(self):
         self.history.start()
@@ -555,7 +515,10 @@ class Twitch:
             # for a switch (including the watching one)
             # NOTE: we need to sort the channels every time because one channel
             # can end up streaming any game - channels aren't game-tied
-            for channel in sorted(channels.values(), key=self.get_priority):
+            for channel in sorted(
+                channels.values(),
+                key=self.channel_directory_service.get_priority,
+            ):
                 if self.watch_service.should_switch(channel):
                     new_watching = channel
                     break
@@ -609,7 +572,9 @@ class Twitch:
             ]
         full_cleanup = False
         if to_remove_channels:
-            to_remove_topics = self._channel_state_topics(to_remove_channels)
+            to_remove_topics = self.channel_directory_service.channel_state_topics(
+                to_remove_channels
+            )
             self.websocket.remove_topics(to_remove_topics)
             for channel in to_remove_channels:
                 del channels[channel.id]
@@ -622,23 +587,6 @@ class Twitch:
             self.print(_("status", "no_campaign"))
             self.change_state(State.IDLE)
         return full_cleanup
-
-    async def _fetch_live_streams_for_games(
-        self,
-        games: abc.Iterable[Game],
-    ) -> set[Channel]:
-        channels: set[Channel] = set()
-        for game in games:
-            try:
-                streams = await self.get_live_streams(game, drops_enabled=True)
-            except MinerException:
-                logger.warning(
-                    "Unable to fetch live channels for %s; continuing",
-                    game.name,
-                )
-                continue
-            channels.update(streams)
-        return channels
 
     async def _fetch_channels(
         self, channels: OrderedDict[int, Channel]
@@ -669,14 +617,18 @@ class Twitch:
         # remove all ACL channels that already exist from the other set
         acl_channels.difference_update(new_channels)
         # use the other set to set them online if possible
-        await self.bulk_check_online(acl_channels)
+        await self.channel_directory_service.bulk_check_online(acl_channels)
         # finally, add them as new channels
         new_channels.update(acl_channels)
-        new_channels.update(await self._fetch_live_streams_for_games(no_acl))
+        new_channels.update(
+            await self.channel_directory_service.fetch_live_streams_for_games(no_acl)
+        )
         # sort them descending by viewers, by priority and by game priority
         # NOTE: Viewers sort also ensures ONLINE channels are sorted to the top
         # NOTE: We can drop using the set now, because there's no more channels being added
-        ordered_channels = self._rank_channels(new_channels)
+        ordered_channels = self.channel_directory_service.rank_channels(
+            new_channels
+        )
         # ensure that we won't end up with more channels than we can handle
         # NOTE: we trim from the end because that's where the non-priority,
         # offline (or online but low viewers) channels end up
@@ -685,7 +637,9 @@ class Twitch:
         if to_remove_channels:
             # tracked channels and gui were cleared earlier, so no need to do it here
             # just make sure to unsubscribe from their topics
-            to_remove_topics = self._channel_state_topics(to_remove_channels)
+            to_remove_topics = self.channel_directory_service.channel_state_topics(
+                to_remove_channels
+            )
             self.websocket.remove_topics(to_remove_topics)
             del to_remove_channels, to_remove_topics
         # set our new channel list
@@ -750,122 +704,3 @@ class Twitch:
             campaigns.sort(key=lambda c: c.remaining_minutes)
             return campaigns[0]
         return None
-
-    async def get_live_streams(
-        self, game: Game, *, limit: int = 20, drops_enabled: bool = True
-    ) -> list[Channel]:
-        filters: list[str] = []
-        if drops_enabled:
-            filters.append("DROPS_ENABLED")
-        try:
-            response = await self.transport.gql_request(
-                GQL_QUERIES["GameDirectory"].with_variables({
-                    "limit": limit,
-                    "slug": game.slug,
-                    "options": {
-                        "includeRestricted": ["SUB_ONLY_LIVE"],
-                        "systemFilters": filters,
-                    },
-                })
-            )
-        except GQLException as exc:
-            raise MinerException(f"Game: {game.slug}") from exc
-        data = response.get("data") if isinstance(response, dict) else None
-        game_data = data.get("game") if isinstance(data, dict) else None
-        streams = game_data.get("streams") if isinstance(game_data, dict) else None
-        edges = streams.get("edges") if isinstance(streams, dict) else []
-        if not isinstance(edges, list):
-            return []
-        channels: list[Channel] = []
-        for edge in edges:
-            if not isinstance(edge, dict):
-                continue
-            node = edge.get("node")
-            if not isinstance(node, dict) or node.get("broadcaster") is None:
-                continue
-            try:
-                channels.append(Channel.from_directory(self, node, drops_enabled=drops_enabled))
-            except (KeyError, TypeError, ValueError):
-                logger.warning("Ignoring malformed directory stream response")
-        return channels
-
-    async def bulk_check_online(self, channels: abc.Iterable[Channel]):
-        """
-        Utilize batch GQL requests to check ONLINE status for a lot of channels at once.
-        The optional available-drops check is applied to channels when enabled;
-        otherwise directory filtering and campaign ACLs remain the source of truth.
-        """
-        channels = tuple(channels)
-        acl_streams_map: dict[int, JsonType] = {}
-        stream_gql_ops: list[GQLOperation] = [channel.stream_gql for channel in channels]
-        if not stream_gql_ops:
-            # shortcut for nothing to process
-            # NOTE: Have to do this here, because "channels" can be any iterable
-            return
-        stream_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
-            asyncio.create_task(self.transport.gql_request(stream_gql_chunk))
-            for stream_gql_chunk in chunk(stream_gql_ops, GQL_BATCH_SIZE)
-        ]
-        try:
-            for coro in asyncio.as_completed(stream_gql_tasks):
-                response_list: list[JsonType] = await coro
-                for response_json in response_list:
-                    try:
-                        channel_data = response_json["data"]["user"]
-                        channel_id = (
-                            require_int(
-                                channel_data["id"],
-                                "Invalid channel ID",
-                            )
-                            if channel_data is not None
-                            else None
-                        )
-                    except (KeyError, TypeError, ValueError):
-                        logger.warning("Ignoring malformed stream lookup response")
-                        continue
-                    if isinstance(channel_data, dict) and channel_id is not None:
-                        acl_streams_map[channel_id] = channel_data
-        finally:
-            await cancel_tasks(stream_gql_tasks)
-        # for all channels with an active stream, check the available drops as well
-        acl_available_drops_map: dict[int, list[JsonType]] = {}
-        if self.settings.available_drops_check:
-            available_gql_ops: list[GQLOperation] = [
-                GQL_QUERIES["AvailableDrops"].with_variables({"channelID": str(channel_id)})
-                for channel_id, channel_data in acl_streams_map.items()
-                if isinstance(channel_data.get("stream"), dict)  # only ONLINE channels
-            ]
-            available_gql_tasks: list[asyncio.Task[list[JsonType]]] = [
-                asyncio.create_task(self.transport.gql_request(available_gql_chunk))
-                for available_gql_chunk in chunk(available_gql_ops, GQL_BATCH_SIZE)
-            ]
-            try:
-                for coro in asyncio.as_completed(available_gql_tasks):
-                    response_list = await coro
-                    for response_json in response_list:
-                        try:
-                            available_info = response_json["data"]["channel"]
-                            channel_id = require_int(
-                                available_info["id"],
-                                "Invalid channel ID",
-                            )
-                        except (KeyError, TypeError, ValueError):
-                            logger.warning("Ignoring malformed available-drops response")
-                            continue
-                        acl_available_drops_map[channel_id] = extract_available_drops(
-                            response_json
-                        )
-            finally:
-                await cancel_tasks(available_gql_tasks)
-        for channel in channels:
-            channel_id = channel.id
-            if channel_id not in acl_streams_map:
-                continue
-            channel_data = acl_streams_map[channel_id]
-            if not isinstance(channel_data.get("stream"), dict):
-                continue
-            available_drops: list[JsonType] = acl_available_drops_map.get(channel_id, [])
-            try:
-                channel.external_update(channel_data, available_drops)
-            except (KeyError, TypeError, ValueError):
-                logger.warning("Ignoring malformed stream data for channel %s", channel_id)
