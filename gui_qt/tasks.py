@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -89,6 +90,7 @@ class _QtLogBridge(QObject):
         self._console = console
         self._active = False
         self._generation = 0
+        self._lifecycle_lock = threading.Lock()
         self.message.connect(
             self._deliver,
             Qt.ConnectionType.QueuedConnection,
@@ -96,25 +98,34 @@ class _QtLogBridge(QObject):
 
     @property
     def active(self) -> bool:
-        return self._active
+        with self._lifecycle_lock:
+            return self._active
 
     def activate(self) -> None:
-        self._generation += 1
-        self._active = True
+        with self._lifecycle_lock:
+            self._generation += 1
+            self._active = True
 
     def deactivate(self) -> None:
         # Incrementing invalidates records queued by every earlier activation,
         # even if a recoverable start later activates the bridge again.
-        self._active = False
-        self._generation += 1
+        with self._lifecycle_lock:
+            self._active = False
+            self._generation += 1
 
-    def enqueue(self, message: str) -> None:
-        if self._active:
-            self.message.emit(self._generation, message)
+    def capture_generation(self) -> int | None:
+        """Snapshot this emit's immutable activation before formatting."""
+        with self._lifecycle_lock:
+            return self._generation if self._active else None
+
+    def enqueue(self, generation: int, message: str) -> None:
+        self.message.emit(generation, message)
 
     @Slot(int, str)
     def _deliver(self, generation: int, message: str) -> None:
-        if self._active and generation == self._generation:
+        with self._lifecycle_lock:
+            current = self._active and generation == self._generation
+        if current:
             self._console.print(message)
 
 
@@ -136,12 +147,15 @@ class QtLogHandler(logging.Handler):
         self._bridge.deactivate()
 
     def emit(self, record: logging.LogRecord) -> None:
+        generation = self._bridge.capture_generation()
+        if generation is None:
+            return
         try:
             message = self.format(record)
         except Exception:  # pragma: no cover - logging's defensive contract
             self.handleError(record)
             return
-        self._bridge.enqueue(message)
+        self._bridge.enqueue(generation, message)
 
 
 class QtPresentationRuntime:

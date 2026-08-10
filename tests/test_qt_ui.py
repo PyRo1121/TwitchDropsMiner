@@ -12,6 +12,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from queue import SimpleQueue
 from types import SimpleNamespace
 
 import aiohttp
@@ -25,7 +26,13 @@ try:
     from PySide6.QtCore import QThread, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
+    from PySide6.QtWidgets import (
+        QApplication,
+        QLabel,
+        QLineEdit,
+        QPushButton,
+        QSystemTrayIcon,
+    )
 except ModuleNotFoundError as exc:  # pragma: no cover - depends on test environment
     raise unittest.SkipTest(f"Qt test dependencies unavailable: {exc}") from exc
 
@@ -294,6 +301,129 @@ class QtUiTests(unittest.TestCase):
         manager._log_handler.emit(record)
         self.app.processEvents()
         self.assertEqual(delivered, [])
+
+    def test_in_flight_log_formatting_keeps_original_generation(self) -> None:
+        manager = self.make_manager()
+        manager.start()
+        delivered: list[str] = []
+        manager.output.print = delivered.append  # type: ignore[method-assign]
+        formatting_started = threading.Event()
+        release_formatting = threading.Event()
+        errors: SimpleQueue[BaseException] = SimpleQueue()
+        original_format = manager._log_handler.format
+
+        def blocking_format(record: logging.LogRecord) -> str:
+            formatting_started.set()
+            if not release_formatting.wait(timeout=5):
+                raise RuntimeError("formatting release timed out")
+            return original_format(record)
+
+        record = logging.LogRecord(
+            "TwitchDrops",
+            logging.ERROR,
+            __file__,
+            0,
+            "stale-format-generation",
+            (),
+            None,
+        )
+
+        def emit() -> None:
+            try:
+                manager._log_handler.emit(record)
+            except BaseException as exc:
+                errors.put(exc)
+
+        with patch.object(
+            manager._log_handler,
+            "format",
+            side_effect=blocking_format,
+        ):
+            worker = threading.Thread(target=emit)
+            worker.start()
+            try:
+                self.assertTrue(formatting_started.wait(timeout=5))
+                manager._runtime._remove_log_handler()
+                manager._runtime._install_log_handler()
+            finally:
+                release_formatting.set()
+                worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(errors.empty())
+        self.app.processEvents()
+        self.assertEqual(delivered, [])
+
+    def test_stale_tray_callbacks_cannot_resurrect_stopped_window(self) -> None:
+        manager = self.make_manager()
+        manager.start()
+        tray = manager.tray
+        old_generation = tray._generation
+        old_activation = tray._activation_callback
+        old_show = tray._show_callback
+        old_quit = tray._quit_callback
+        self.assertIsNotNone(old_activation)
+        self.assertIsNotNone(old_show)
+        self.assertIsNotNone(old_quit)
+        assert old_activation is not None
+        assert old_show is not None
+        assert old_quit is not None
+
+        # Re-activation must not relabel callbacks from an earlier tray start.
+        tray.stop()
+        manager.hide()
+        tray.start()
+        old_activation(QSystemTrayIcon.ActivationReason.Trigger)
+        old_show(False)
+        old_quit(False)
+        self.assertTrue(manager.isHidden())
+        self.assertFalse(manager._close_requested.is_set())
+        notifications_enabled = Mock(return_value=True)
+        tray._notifications_enabled = notifications_enabled
+        tray.available = True
+        self.assertFalse(
+            tray.notify(
+                "stale",
+                "stale",
+                generation=old_generation,
+            )
+        )
+        notifications_enabled.assert_not_called()
+
+        tray.restore()
+        self.assertTrue(manager.isVisible())
+        manager.hide()
+        stale_activation = tray._activation_callback
+        stale_show = tray._show_callback
+        stale_quit = tray._quit_callback
+        self.assertIsNotNone(stale_activation)
+        self.assertIsNotNone(stale_show)
+        self.assertIsNotNone(stale_quit)
+        assert stale_activation is not None
+        assert stale_show is not None
+        assert stale_quit is not None
+
+        asyncio.run(manager.stop())
+
+        def invoke_inactive_callbacks() -> None:
+            stale_activation(QSystemTrayIcon.ActivationReason.Trigger)
+            stale_show(False)
+            stale_quit(False)
+            tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
+            tray.restore()
+            tray.quit()
+            tray._show_action.trigger()
+            tray._quit_action.trigger()
+            notifications_enabled.reset_mock()
+            self.assertFalse(tray.notify("inactive", "inactive"))
+            notifications_enabled.assert_not_called()
+            self.app.processEvents()
+            self.assertTrue(manager.isHidden())
+            self.assertFalse(manager._close_requested.is_set())
+
+        invoke_inactive_callbacks()
+        manager.close_window()
+        invoke_inactive_callbacks()
 
     def test_actions_are_inert_during_and_after_stop(self) -> None:
         async def exercise() -> None:

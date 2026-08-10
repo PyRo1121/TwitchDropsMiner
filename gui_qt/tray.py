@@ -50,36 +50,109 @@ class QtTray:
         self._close = close
         self._notifications_enabled = notifications_enabled
         self.available = QSystemTrayIcon.isSystemTrayAvailable()
+        self._active = False
+        self._generation = 0
+        self._activation_callback: Callable[..., None] | None = None
+        self._show_callback: Callable[..., None] | None = None
+        self._quit_callback: Callable[..., None] | None = None
         self._icon = QSystemTrayIcon(parent)
         self._icon.setIcon(_state_icon("pickaxe"))
-        menu = QMenu()
-        show = menu.addAction(_("gui", "tray", "show"))
-        show.triggered.connect(self.restore)
-        quit_ = menu.addAction(_("gui", "tray", "quit"))
-        quit_.triggered.connect(self.quit)
-        self._icon.setContextMenu(menu)
-        self._icon.activated.connect(self._on_activated)
+        self._menu = QMenu()
+        self._show_action = self._menu.addAction(_("gui", "tray", "show"))
+        self._quit_action = self._menu.addAction(_("gui", "tray", "quit"))
+        self._icon.setContextMenu(self._menu)
         self._icon.setToolTip("TwitchDropsMiner")
 
-    def _on_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.restore()
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def _accepts(self, generation: int | None) -> bool:
+        return self._active and (
+            generation is None or generation == self._generation
+        )
+
+    def _on_activated(self, reason, *, generation: int | None = None) -> None:
+        if (
+            self._accepts(generation)
+            and reason == QSystemTrayIcon.ActivationReason.Trigger
+        ):
+            self.restore(generation=generation)
+
+    def _on_show_triggered(
+        self,
+        _checked: bool = False,
+        *,
+        generation: int,
+    ) -> None:
+        self.restore(generation=generation)
+
+    def _on_quit_triggered(
+        self,
+        _checked: bool = False,
+        *,
+        generation: int,
+    ) -> None:
+        self.quit(generation=generation)
 
     def start(self) -> None:
-        if not self.available:
+        if self._active:
             return
-        self._icon.show()
+        self._generation += 1
+        generation = self._generation
+        self._active = True
+        self._activation_callback = lambda reason: self._on_activated(
+            reason,
+            generation=generation,
+        )
+        self._show_callback = lambda checked=False: self._on_show_triggered(
+            checked,
+            generation=generation,
+        )
+        self._quit_callback = lambda checked=False: self._on_quit_triggered(
+            checked,
+            generation=generation,
+        )
+        self._icon.activated.connect(self._activation_callback)
+        self._show_action.triggered.connect(self._show_callback)
+        self._quit_action.triggered.connect(self._quit_callback)
+        if self.available:
+            self._icon.show()
+
+    @staticmethod
+    def _disconnect(signal, callback: Callable[..., None] | None) -> None:
+        if callback is None:
+            return
+        try:
+            signal.disconnect(callback)
+        except (RuntimeError, TypeError):
+            # A partially failed start may leave only some signals connected.
+            pass
 
     def stop(self) -> None:
+        # Deactivate first: queued callbacks retain their activation token and
+        # must be stale before signal disconnection or icon teardown begins.
+        if self._active:
+            self._active = False
+            self._generation += 1
+        self._disconnect(self._icon.activated, self._activation_callback)
+        self._disconnect(self._show_action.triggered, self._show_callback)
+        self._disconnect(self._quit_action.triggered, self._quit_callback)
+        self._activation_callback = None
+        self._show_callback = None
+        self._quit_callback = None
         self._icon.hide()
 
-    def restore(self) -> None:
+    def restore(self, *, generation: int | None = None) -> None:
+        if not self._accepts(generation):
+            return
         self._parent.show()
         self._parent.raise_()
         self._parent.activateWindow()
 
-    def quit(self) -> None:
-        self._close()
+    def quit(self, *, generation: int | None = None) -> None:
+        if self._accepts(generation):
+            self._close()
 
     def change_icon(self, state: str) -> None:
         self._icon.setIcon(_state_icon(state))
@@ -91,9 +164,11 @@ class QtTray:
         duration: int = 5000,
         *,
         severity: Literal["info", "warning", "error"] = "info",
+        generation: int | None = None,
     ) -> bool:
         if not (
-            self.available
+            self._accepts(generation)
+            and self.available
             and QSystemTrayIcon.supportsMessages()
             and self._notifications_enabled()
         ):
