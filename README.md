@@ -83,17 +83,19 @@ The project deliberately excludes multi-account farming, hosted operation, passw
 
 ## Verifying a release
 
-Every published development release includes immutable commit-addressed artifacts, `SHA256SUMS`, an SPDX JSON software bill of materials, and GitHub artifact attestations. Verify the checksum before running an artifact. With the GitHub CLI installed, provenance can also be checked with:
+Every published development release includes immutable commit-addressed artifacts, `SHA256SUMS`, an SPDX JSON software bill of materials, and GitHub provenance plus SBOM attestations. Verify the checksum before running an artifact. With the GitHub CLI installed, provenance can also be checked with:
 
 ```bash
 gh attestation verify <downloaded-artifact> --repo PyRo1121/TwitchDropsMiner
 ```
 
+Current Windows, macOS, and AppImage builds do not carry platform-native trusted publisher signatures; checksum and GitHub-attestation verification is therefore especially important. See [the release engineering guide](docs/RELEASE.md) for exact guarantees and signing blockers.
+
 Security vulnerabilities should be submitted through the [private vulnerability-reporting form](https://github.com/PyRo1121/TwitchDropsMiner/security/advisories/new), not a public issue. See [SECURITY.md](SECURITY.md) for the response policy.
 
 ## Notes about the Windows build
 
-- To achieve a portable-executable format, the application is packaged with PyInstaller into an `EXE`. Some antivirus engines (including Windows Defender) might report the packaged executable as a trojan, because PyInstaller has been used by others to package malicious Python code in the past. These reports can be safely ignored. If you absolutely do not trust the executable, you'll have to install Python yourself and run everything from source.
+- To achieve a portable-executable format, the application is packaged with PyInstaller into an `EXE`. Some antivirus engines may flag PyInstaller executables, but a warning must not be assumed to be a false positive. The current executable is not Authenticode-signed: verify its release checksum and GitHub attestation, and run from reviewed source instead if its origin cannot be established.
 - The executable uses the `%TEMP%` directory for temporary bundled resources. Persistent settings, credentials, logs, history, and caches are stored in `%LOCALAPPDATA%\\TwitchDropsMiner`.
 - The autostart feature is implemented as a registry entry to the current user's (`HKCU`) autostart key. It is only altered when toggling the respective option. If you relocate the app to a different directory, the autostart feature will stop working, until you toggle the option off and back on again
 
@@ -109,7 +111,7 @@ Security vulnerabilities should be submitted through the [private vulnerability-
 ## Notes about the macOS build
 
 - The macOS version is packaged using PyInstaller into a standalone `.app` bundle, distributed as a ZIP archive.
-- Since this application is not signed with a paid Apple Developer Certificate, **macOS Gatekeeper will block it** on the first run (saying it "The application is damaged and can't be opened").
+- Since this application has no trusted Developer ID signature and is not notarized, **macOS Gatekeeper will block it** on the first run (saying it "The application is damaged and can't be opened"). Verify the release checksum and GitHub attestation before choosing to remove quarantine metadata.
   - **To fix this**: Either open the Terminal in the folder the app is in (or navigating with `cd path/to/folder`) and enter `xattr -cr 'Twitch Drops Miner (by DevilXD).app'` or just type `xattr -cr` (make sure to put a space at the end), drag and drop the `Twitch Drops Miner (by DevilXD).app` file into the terminal window (this will auto-fill the path) and enter
 - Persistent files such as `cookies.jar`, `oauth.json`, `settings.json`, and the `cache` folder are stored in `~/Library/Application Support/TwitchDropsMiner`, outside the read-only application bundle.
 

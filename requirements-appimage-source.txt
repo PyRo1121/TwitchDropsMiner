@@ -1,0 +1,4 @@
+# Commit-pinned appimage-builder source. The workflow verifies this archive hash,
+# applies the reviewed namespace-package fix, and installs it without dependencies.
+appimage-builder @ https://github.com/AppImageCrafters/appimage-builder/archive/1a8794d3c89f288fbd82b9accd7c0b74611147d5.tar.gz \
+    --hash=sha256:cf3f39cc0b16741bbb74fc1c223f1301afe61ca35500edfb62fb8d31f087e8aa

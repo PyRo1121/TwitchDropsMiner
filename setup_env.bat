@@ -13,6 +13,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
+python -c "import sys; raise SystemExit(sys.version_info[:2] != (3, 10))"
+if errorlevel 1 (
+    echo:
+    echo Release builds require CPython 3.10.
+    echo:
+    pause
+    exit /b 1
+)
+
 if not exist "%venv_dir%\Scripts\python.exe" (
     echo:
     echo Creating %venv_dir%...
@@ -24,12 +33,32 @@ if not exist "%venv_dir%\Scripts\python.exe" (
     )
 )
 
-echo:
-echo Installing locked build dependencies...
-"%venv_dir%\Scripts\python.exe" -m pip install -r "%script_dir%requirements-build.txt"
+"%venv_dir%\Scripts\python.exe" -c "import sys; raise SystemExit(sys.version_info[:2] != (3, 10))"
 if errorlevel 1 (
     echo:
-    echo Failed to install locked build dependencies.
+    echo Existing .venv does not use CPython 3.10; replace it deliberately.
+    echo:
+    pause
+    exit /b 1
+)
+
+echo:
+echo Installing hash-locked packaging bootstrap...
+"%venv_dir%\Scripts\python.exe" -m pip install --require-hashes --only-binary=:all: -r "%script_dir%requirements-bootstrap.txt"
+if errorlevel 1 (
+    echo:
+    echo Failed to install hash-locked packaging bootstrap.
+    echo:
+    pause
+    exit /b 1
+)
+
+echo:
+echo Installing hash-locked build dependencies...
+"%venv_dir%\Scripts\python.exe" -m pip install --require-hashes --only-binary=:all: -r "%script_dir%requirements-build.txt"
+if errorlevel 1 (
+    echo:
+    echo Failed to install hash-locked build dependencies.
     echo:
     pause
     exit /b 1

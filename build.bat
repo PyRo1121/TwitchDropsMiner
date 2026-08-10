@@ -5,6 +5,9 @@ set "script_dir=%~dp0"
 set "venv_dir=%script_dir%.venv"
 set "pyinstaller=%venv_dir%\Scripts\pyinstaller.exe"
 
+if not defined PYTHONHASHSEED set "PYTHONHASHSEED=0"
+if not defined SOURCE_DATE_EPOCH set "SOURCE_DATE_EPOCH=0"
+
 if not exist "%pyinstaller%" (
     echo:
     echo No build environment found. Run setup_env.bat first.

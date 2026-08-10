@@ -11,8 +11,8 @@ script:
   - cp "$SOURCE_DIR/../"*.py "$TARGET_APPDIR/usr/src/"
   - cp "$SOURCE_DIR/pickaxe.png" "$TARGET_APPDIR/usr/share/icons/hicolor/128x128/apps/io.github.devilxd.twitchdropsminer.png"
 
-  - python3 -m venv env && ./env/bin/python3 -m pip install pip==26.2.1 wheel==0.47.0
-  - PATH="$PWD/env/bin:$PATH" python3 -m pip install --ignore-installed --prefix=/usr --root="$TARGET_APPDIR" -r "$SOURCE_DIR/../requirements.txt"
+  - python3 -m venv env && ./env/bin/python3 -m pip install --require-hashes --only-binary=:all: -r "$SOURCE_DIR/../requirements-bootstrap.txt"
+  - ./env/bin/python3 -m pip install --require-hashes --only-binary=:all: --ignore-installed --prefix=/usr --root="$TARGET_APPDIR" -r "$SOURCE_DIR/../requirements-release.txt"
   - python3 -m compileall "$TARGET_APPDIR/usr/src"
   - find "$TARGET_APPDIR" -type f -print0 | xargs -0 file | grep -F 'not stripped' | cut -f1 -d':' | sort -V | xargs -r strip -s -v
 
@@ -80,7 +80,8 @@ AppDir:
 
 AppImage:
   arch: "{{ARCH}}"
-  file_name: Twitch.Drops.Miner-{{ARCH}}.AppImage
+  file_name: Twitch.Drops.Miner-{{APP_VERSION}}-Linux-AppImage-{{ARCH}}.AppImage
   comp: zstd
+  # Embedded PGP signing remains disabled until an offline-managed release key
+  # and an independently distributed public-key verification path exist.
   sign-key: None
-  update-information: guess

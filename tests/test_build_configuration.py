@@ -6,41 +6,99 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})(?:\s|$)")
+PIN = re.compile(r"([A-Za-z0-9_.-]+)==([^;\s]+)")
+
+
+def _logical_requirements(name: str) -> list[str]:
+    logical: list[str] = []
+    pending = ""
+    for raw_line in (ROOT / name).read_text(encoding="utf8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pending = f"{pending} {line}".strip()
+        if pending.endswith("\\"):
+            pending = pending[:-1].rstrip()
+            continue
+        logical.append(pending)
+        pending = ""
+    if pending:
+        raise AssertionError(f"{name} ends with an incomplete requirement")
+    return logical
+
+
+def _pins(name: str) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    for requirement in _logical_requirements(name):
+        if requirement.startswith("-r "):
+            continue
+        match = PIN.match(requirement)
+        if match:
+            package, version = match.groups()
+            pins[re.sub(r"[-_.]+", "-", package).lower()] = version
+    return pins
 
 
 class BuildConfigurationTests(unittest.TestCase):
-    def test_dependency_files_are_exact_locks(self) -> None:
+    def test_release_dependency_files_are_hash_locked(self) -> None:
         for name in (
-            "requirements.txt",
+            "requirements-bootstrap.txt",
             "requirements-build.txt",
             "requirements-appimage.txt",
+            "requirements-appimage-source.txt",
+            "requirements-release.txt",
         ):
             with self.subTest(file=name):
-                for raw_line in (ROOT / name).read_text(encoding="utf8").splitlines():
-                    line = raw_line.strip()
-                    if not line or line.startswith("#") or line.startswith("-r "):
+                requirements = _logical_requirements(name)
+                self.assertTrue(requirements)
+                for requirement in requirements:
+                    if requirement.startswith("-r "):
                         continue
-                    requirement = line.split(";", 1)[0].strip()
-                    exact_version = re.fullmatch(r"[^=<>!~\s]+==[^=<>!~\s]+", requirement)
-                    pinned_vcs = re.fullmatch(
-                        r"[^@\s]+\s+@\s+git\+https://[^\s]+@[0-9a-f]{40}",
-                        requirement,
+                    pin = requirement.split(" --hash=", 1)[0].strip()
+                    exact_version = re.fullmatch(
+                        r"[A-Za-z0-9_.-]+==[^=<>!~\s;]+(?:;\s*.+)?",
+                        pin,
+                    )
+                    pinned_archive = re.fullmatch(
+                        r"appimage-builder\s+@\s+https://github\.com/"
+                        r"AppImageCrafters/appimage-builder/archive/[0-9a-f]{40}\.tar\.gz",
+                        pin,
                     )
                     self.assertTrue(
-                        exact_version or pinned_vcs,
-                        f"{name} contains an unlocked requirement: {line}",
+                        exact_version or pinned_archive,
+                        f"{name} contains an unlocked requirement: {requirement}",
                     )
+                    self.assertGreaterEqual(
+                        len(HASH.findall(requirement)),
+                        1,
+                        f"{name} contains an unhashed requirement: {requirement}",
+                    )
+                    self.assertNotIn("git+", requirement)
 
-    def test_ci_uses_locks_and_real_frozen_self_tests(self) -> None:
+        self.assertIn("-r requirements-release.txt", _logical_requirements("requirements-build.txt"))
+        runtime_pins = _pins("requirements.txt")
+        release_pins = _pins("requirements-release.txt")
+        self.assertEqual(runtime_pins, {name: release_pins[name] for name in runtime_pins})
+        self.assertEqual(set(release_pins) - set(runtime_pins), {"async-timeout"})
+
+    def test_ci_uses_hash_locks_and_real_frozen_self_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
 
         self.assertIn("concurrency:", workflow)
         self.assertGreaterEqual(workflow.count("requirements-build.txt"), 3)
+        self.assertGreaterEqual(workflow.count("requirements-bootstrap.txt"), 4)
         self.assertIn("requirements-appimage.txt", workflow)
+        self.assertGreaterEqual(workflow.count("--require-hashes"), 8)
+        self.assertGreaterEqual(workflow.count("--only-binary=:all:"), 7)
         self.assertGreaterEqual(workflow.count("--self-test"), 4)
+        self.assertEqual(workflow.count("build_tools/package_release.py"), 4)
         self.assertIn("pyright@1.1.409", workflow)
         self.assertIn("python -m venv .venv", workflow)
         self.assertIn('${PWD}/.venv/bin', workflow)
+        self.assertIn('PYTHONHASHSEED: "0"', workflow)
+        self.assertIn("SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)", workflow)
+        self.assertEqual(workflow.count("git rev-parse --short=12 HEAD"), 4)
         pyright_config = (ROOT / "pyrightconfig.json").read_text(encoding="utf8")
         self.assertIn('"pythonVersion": "3.10"', pyright_config)
         self.assertIn("tests.test_translation_schema", workflow)
@@ -49,76 +107,64 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn('gh release create "dev-build-${GITHUB_SHA}"', workflow)
         self.assertIn("SHA256SUMS", workflow)
         self.assertNotIn("gh release delete", workflow)
-        self.assertNotIn("--appimage-extract-and-run", workflow)
-        self.assertIn('"$image" --self-test', workflow)
+        self.assertNotIn("Compress-Archive", workflow)
+        self.assertNotIn("7z a", workflow)
+        self.assertNotIn("Install UPX", workflow)
         self.assertIn("macos-15-intel", workflow)
-        self.assertIn("Twitch.Drops.Miner.MacOS-${{matrix.arch}}", workflow)
+        self.assertIn("-macOS-${{matrix.arch}}", workflow)
+        self.assertIn("-Windows-x86_64", workflow)
         self.assertNotIn("runs-on: macos-latest", workflow)
 
-    def test_release_has_sbom_provenance_and_security_policy(self) -> None:
+    def test_release_has_sbom_provenance_and_least_privilege(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
+        codeql = (ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf8")
         dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf8")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf8")
 
         self.assertIn("attestations: write", workflow)
+        self.assertIn("artifact-metadata: write", workflow)
         self.assertIn("id-token: write", workflow)
-        self.assertIn("anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610", workflow)
-        self.assertIn(
-            "actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f",
-            workflow,
-        )
-        self.assertIn("subject-path: |", workflow)
+        self.assertEqual(workflow.count("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"), 2)
+        self.assertIn("sbom-path: artifacts/Twitch.Drops.Miner.spdx.json", workflow)
+        self.assertIn("path: sbom-input", workflow)
+        self.assertIn("subject-path: artifacts/*.zip", workflow)
         self.assertIn("merge-multiple: true", workflow)
-        self.assertIn("artifacts/*.zip", workflow)
-        self.assertNotIn("artifacts/*/*", workflow)
         self.assertIn("! -name SHA256SUMS", workflow)
-        self.assertIn("Twitch.Drops.Miner.spdx.json", workflow)
-        self.assertIn("setuptools==83.0.0", workflow)
-        self.assertIn(
-            "setuptools==83.0.0",
-            (ROOT / "requirements-build.txt").read_text(encoding="utf8"),
-        )
+        self.assertEqual(workflow.count("retention-days: 7"), 4)
+        self.assertEqual(workflow.count("compression-level: 0"), 4)
         self.assertEqual(
-            workflow.count("actions/checkout@"),
-            workflow.count("persist-credentials: false"),
-        )
-        self.assertEqual(
-            workflow.count("actions/checkout@"),
-            workflow.count("actions/setup-python@"),
+            (workflow + codeql).count("actions/checkout@"),
+            (workflow + codeql).count("persist-credentials: false"),
         )
         self.assertIn("package-ecosystem: pip", dependabot)
         self.assertIn("package-ecosystem: github-actions", dependabot)
         self.assertEqual(dependabot.count("default-days: 7"), 2)
         self.assertIn("security/advisories/new", security)
         self.assertIn("gh attestation verify", security)
-        self.assertIn(
-            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
-            workflow,
-        )
-        self.assertIn(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-            workflow,
-        )
-        self.assertIn(
-            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-            workflow,
-        )
 
-        codeql = (ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf8")
-        self.assertIn(
-            "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+        expected_actions = {
+            "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            "actions/attest": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+            "anchore/sbom-action": "e22c389904149dbc22b58101806040fa8d37a610",
+            "github/codeql-action/init": "5595ccaf912efad79be6eef63a5619ff05969be3",
+            "github/codeql-action/analyze": "5595ccaf912efad79be6eef63a5619ff05969be3",
+        }
+        action_references = re.findall(
+            r"uses:\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})(?:\s+#\s+[^\n]+)?",
             workflow + codeql,
         )
+        self.assertTrue(action_references)
+        self.assertEqual((workflow + codeql).count("uses:"), len(action_references))
+        for action, revision in action_references:
+            self.assertEqual(expected_actions[action], revision)
         self.assertEqual(codeql.count("github/codeql-action/"), 2)
-        self.assertEqual(
-            codeql.count("@c4dd10e44af883a891fe31ced449bcb4a6728b9b"),
-            2,
-        )
         self.assertIn("security-events: write", codeql)
         self.assertIn("build-mode: none", codeql)
-        self.assertIn("persist-credentials: false", codeql)
 
-    def test_local_scripts_anchor_outputs_and_share_dot_venv(self) -> None:
+    def test_local_scripts_use_hash_locks_and_normalized_packaging(self) -> None:
         build_sh = (ROOT / "build.sh").read_text(encoding="utf8")
         setup_sh = (ROOT / "setup_env.sh").read_text(encoding="utf8")
         build_bat = (ROOT / "build.bat").read_text(encoding="utf8")
@@ -129,48 +175,58 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn('cd "$script_dir"', build_sh)
         self.assertIn("--clean --noconfirm", build_sh)
         self.assertIn('venv_dir="$script_dir/.venv"', build_sh)
+        self.assertIn("PYTHONHASHSEED", build_sh)
+        self.assertIn("SOURCE_DATE_EPOCH", build_sh)
         self.assertIn('venv_dir="$script_dir/.venv"', setup_sh)
+        self.assertIn("sys.version_info[:2] != (3, 10)", setup_sh)
+        self.assertIn("--require-hashes --only-binary=:all:", setup_sh)
         self.assertIn(".venv", build_bat)
         self.assertIn("pushd", build_bat.lower())
         self.assertIn("--clean --noconfirm", build_bat)
-        self.assertIn(".venv", setup_bat)
-        self.assertIn("where 7z.exe", pack_bat.lower())
-        self.assertIn("%~dp0", pack_bat)
+        self.assertIn("SOURCE_DATE_EPOCH", build_bat)
+        self.assertIn("sys.version_info[:2] != (3, 10)", setup_bat)
+        self.assertIn("--require-hashes", setup_bat)
+        self.assertIn("build_tools\\package_release.py", pack_bat)
+        self.assertNotIn("7z.exe", pack_bat.lower())
         self.assertIn(".venv", run_dev_bat)
         self.assertNotIn("\\env\\", run_dev_bat)
 
-    def test_appimage_runtime_and_bootstrap_versions_are_explicit(self) -> None:
+    def test_appimage_runtime_and_trust_settings_are_explicit(self) -> None:
         recipe = (ROOT / "appimage/AppImageBuilder.yml").read_text(encoding="utf8")
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
         runtime = (ROOT / "requirements.txt").read_text(encoding="utf8")
 
-        self.assertIn("pip==26.2.1", recipe)
-        self.assertIn("wheel==0.47.0", recipe)
+        self.assertIn("requirements-bootstrap.txt", recipe)
+        self.assertIn("requirements-release.txt", recipe)
+        self.assertEqual(recipe.count("--require-hashes"), 2)
         self.assertIn("python3.10", recipe)
         self.assertIn("python3.10/site-packages", recipe)
-        self.assertIn("pip install --ignore-installed --prefix=/usr", recipe)
+        self.assertIn("pip install --require-hashes --only-binary=:all: --ignore-installed", recipe)
         self.assertIn("libxcb-cursor0", recipe)
         self.assertIn("{{APT_REPOSITORY}}", recipe)
         self.assertIn("jammy main universe", recipe)
-        self.assertNotIn("[arch=amd64]", recipe)
-        self.assertIn("APT_REPOSITORY:", workflow)
+        self.assertIn("sign-key: None", recipe)
+        self.assertNotIn("update-information: guess", recipe)
+        self.assertIn("{{APP_VERSION}}-Linux-AppImage-{{ARCH}}.AppImage", recipe)
+        self.assertIn("SETUPTOOLS_SCM_PRETEND_VERSION_FOR_APPIMAGE_BUILDER", workflow)
+        self.assertIn("requirements-appimage-source.txt", workflow)
+        self.assertIn("--no-index --no-deps --no-build-isolation", workflow)
+        self.assertIn("apprun_3/helpers/__init__.py", workflow)
         self.assertIn("FUSE_PACKAGE:", workflow)
         self.assertIn('runtime_library_path="$(\n', workflow)
         self.assertIn('LD_LIBRARY_PATH="$runtime_library_path" ldd', workflow)
         self.assertEqual(workflow.count("runner: ubuntu-24.04-arm"), 2)
-        self.assertNotIn("runner: ubuntu-22.04-arm", workflow)
         self.assertIn("PySide6==6.11.1", runtime)
-        self.assertNotIn("PySide6==6.8.0.2", runtime)
-        readme = (ROOT / "README.md").read_text(encoding="utf8")
-        self.assertIn("ARM64 artifacts require `glibc>=2.39`", readme)
         self.assertNotIn("pip install --upgrade", recipe)
 
-    def test_documented_macos_command_quotes_the_application_path(self) -> None:
+    def test_release_documentation_is_honest_about_unsigned_artifacts(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf8")
-        self.assertIn(
-            "xattr -cr 'Twitch Drops Miner (by DevilXD).app'",
-            readme,
-        )
+        release = (ROOT / "docs/RELEASE.md").read_text(encoding="utf8")
+        self.assertIn("xattr -cr 'Twitch Drops Miner (by DevilXD).app'", readme)
+        self.assertIn("not Authenticode-signed", release)
+        self.assertIn("not notarized", release)
+        self.assertIn("not carry an embedded PGP signature", release)
+        self.assertIn("--require-hashes", release)
 
 
 if __name__ == "__main__":

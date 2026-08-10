@@ -4,6 +4,9 @@ set -euo pipefail
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 venv_dir="$script_dir/.venv"
 
+export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+
 if [ ! -x "$venv_dir/bin/pyinstaller" ]; then
 	printf '\nNo build environment found. Run setup_env.sh first.\n\n' >&2
 	exit 1

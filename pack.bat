@@ -2,25 +2,25 @@
 setlocal
 
 set "script_dir=%~dp0"
-set "release_dir=%script_dir%Twitch Drops Miner"
+set "python=%script_dir%.venv\Scripts\python.exe"
+set "executable=%script_dir%dist\Twitch Drops Miner (by DevilXD).exe"
 set "archive=%script_dir%Twitch Drops Miner.zip"
 
-where 7z.exe >nul 2>&1
-if errorlevel 1 (
-    echo No 7z.exe detected in PATH, skipping packaging.
+if not exist "%python%" (
+    echo No build environment found. Run setup_env.bat first.
     exit /b 1
 )
+if not exist "%executable%" (
+    echo No frozen Windows executable found. Run build.bat first.
+    exit /b 1
+)
+if not defined SOURCE_DATE_EPOCH set "SOURCE_DATE_EPOCH=0"
 
-if not exist "%release_dir%" mkdir "%release_dir%"
-copy /y /v "%script_dir%dist\*.exe" "%release_dir%\" >nul
-if errorlevel 1 exit /b 1
-copy /y /v "%script_dir%manual.txt" "%release_dir%\" >nul
+"%python%" "%script_dir%build_tools\package_release.py" ^
+    --output "%archive%" ^
+    --entry "%executable%=Twitch Drops Miner/Twitch Drops Miner (by DevilXD).exe" ^
+    --entry "%script_dir%manual.txt=Twitch Drops Miner/manual.txt"
 if errorlevel 1 exit /b 1
 
-7z.exe a -tzip "%archive%" "%release_dir%\*" -r
-if errorlevel 1 exit /b 1
-7z.exe t "%archive%"
-set "pack_status=%errorlevel%"
-
-if exist "%release_dir%" rmdir /s /q "%release_dir%"
-exit /b %pack_status%
+"%python%" -m zipfile -t "%archive%"
+exit /b %errorlevel%

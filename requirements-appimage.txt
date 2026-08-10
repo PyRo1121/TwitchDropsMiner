@@ -1,33 +1,73 @@
-# Reproducible appimage-builder dependency lock for CI.
-appimage-builder @ git+https://github.com/AppImageCrafters/appimage-builder.git@1a8794d3c89f288fbd82b9accd7c0b74611147d5
-arpy==2.3.0
-certifi==2026.7.22
-cffi==2.1.1
-charset-normalizer==3.4.9
-cryptography==50.0.0
-decorator==5.3.1
-docker==7.2.0
-emrichen==0.4.0
-idna==3.18
-jsonpath-rw==1.4.0
-libconf==2.0.1
-lief==1.0.0
-packaging==26.3
-PGPy13==0.6.1rc1
-ply==3.11
-prompt_toolkit==3.0.53
-pyaml==21.10.1
-pyasn1==0.6.4
-pycparser==3.0
-pydpkg==1.9.5
-python-gnupg==0.5.6
-PyYAML==6.0.3
-questionary==2.1.1
-requests==2.34.2
-roam==0.3.1
-ruamel.yaml==0.19.1
-schema==0.7.8
-six==1.17.0
-urllib3==2.7.0
-wcwidth==0.8.2
-zstandard==0.23.0
+# Hash-locked appimage-builder dependency graph for the Linux release matrix.
+# The separately locked builder source is installed with dependencies disabled.
+
+arpy==2.3.0 \
+    --hash=sha256:8302829a991cfcef2630b61e00f315db73164021cecbd7fb1fc18525f83f339c
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+cffi==2.1.1 \
+    --hash=sha256:194cffa889098ced9976c3fc6340305e43f6303657d298da55366907c05c22d6 \
+    --hash=sha256:5a59cc1c4442bc3d5c703bf720b51138d0bfc173618807c9ee2490a7541dd3d9
+charset-normalizer==3.4.9 \
+    --hash=sha256:9bb41182d93ea91f60b4bc8fbf4c820c69ef8a12ab2d917f3f1834f1acad07e8 \
+    --hash=sha256:aa99adc8f081b475a12843953db36831eaf83ec33eb46a90629ca6a5de45a616
+cryptography==50.0.0 \
+    --hash=sha256:2a8183b489dc1f7f80f135780fadc1108f14b31b8a40411c7a5b17425f65f28b \
+    --hash=sha256:37fdb0d0111f1e2ff07139dfb79f1b49531f8e213c46f1163dd7642979b58c47
+decorator==5.3.1 \
+    --hash=sha256:f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c
+docker==7.2.0 \
+    --hash=sha256:a3f45fdeb9165e2d25d9a1d02ddf3bc70fb572cf5ebbf9b58558c22caf29b71f
+emrichen==0.4.0 \
+    --hash=sha256:bf315f39a70ec4c61e9b9500bcb6ada9e69b6026e240252b4f786ea55df4ab84
+idna==3.18 \
+    --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2
+jsonpath-rw==1.4.0 \
+    --hash=sha256:05c471281c45ae113f6103d1268ec7a4831a2e96aa80de45edc89b11fac4fbec
+libconf==2.0.1 \
+    --hash=sha256:b9e9bc79d0e22a9c6239a16cd8ecf198114395c4365b9fb62c39cffff0593ffc
+lief==1.0.0 \
+    --hash=sha256:5b40bb3591c2db6aea6208b51ef7cb9a9e05c8be5c9437314857d1fda1e61f21 \
+    --hash=sha256:cd7512a23b20c7c47a11bc27925e8c324c062a393e23716d7cee866c4d92db1f
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+PGPy13==0.6.1rc1 \
+    --hash=sha256:c8d6cf3dea0cc23373ff1c4ed79a6a4bf39216bf54970bae7cca656003d1aa4f
+ply==3.11 \
+    --hash=sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce
+prompt_toolkit==3.0.53 \
+    --hash=sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2
+pyaml==21.10.1 \
+    --hash=sha256:19985ed303c3a985de4cf8fd329b6d0a5a5b5c9035ea240eccc709ebacbaf4a0
+pyasn1==0.6.4 \
+    --hash=sha256:deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+pydpkg==1.9.5 \
+    --hash=sha256:b6900a6b646fd4785d7fa26ab0eb240ef8b148742b883f36749fa8774ac7967a
+python-gnupg==0.5.6 \
+    --hash=sha256:b5050a55663d8ab9fcc8d97556d229af337a87a3ebebd7054cbd8b7e2043394a
+PyYAML==6.0.3 \
+    --hash=sha256:9c7708761fccb9397fe64bbc0395abcae8c4bf7b0eac081e12b809bf47700d0b \
+    --hash=sha256:b30236e45cf30d2b8e7b3e85881719e98507abed1011bf463a8fa23e9c3e98a8
+questionary==2.1.1 \
+    --hash=sha256:a51af13f345f1cdea62347589fbb6df3b290306ab8930713bfae4d475a7d4a59
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+roam==0.3.1 \
+    --hash=sha256:d5364e7dd170a02745d40b178ad1b9abc2a9a12e988b4f475d8a9fc8e67a73e5
+ruamel.yaml==0.19.1 \
+    --hash=sha256:27592957fedf6e0b62f281e96effd28043345e0e66001f97683aa9a40c667c93
+schema==0.7.8 \
+    --hash=sha256:00bd977fadc7d9521bf289850cd8a8aa5f4948f575476b8daaa5c1b57af2dce1
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+typing_extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+urllib3==2.7.0 \
+    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
+wcwidth==0.8.2 \
+    --hash=sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85
+zstandard==0.23.0 \
+    --hash=sha256:157e89ceb4054029a289fb504c98c6a9fe8010f1680de0201b3eb5dc20aa6d9e \
+    --hash=sha256:77da4c6bfa20dd5ea25cbf12c76f181a8e8cd7ea231c673828d0386b1740b8dc
