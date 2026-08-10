@@ -397,18 +397,26 @@ class QtHelp:
             # Remote revocation is best-effort. Local logout must still erase
             # credentials and all account-derived state.
             self._manager.print(
-                _("gui", "text", "token_revoke_error").format(error=exc)
-            )
-        finally:
-            try:
-                auth_state.invalidate(
-                    delete_cookies=True,
-                    delete_refresh_token=True,
+                _("gui", "text", "token_revoke_error").format(
+                    error=type(exc).__name__
                 )
-            finally:
-                self._invalidate_task = None
-                self._invalidate_button.config(state="disabled")
-        self._twitch.change_state(State.RESTART)
+            )
+        try:
+            await auth_state.logout()
+        except Exception as exc:
+            # The storage layer has already installed a durable tombstone.
+            # Keep the application stopped and report only the exception type;
+            # restarting must not turn incomplete cleanup into automatic reuse.
+            self._manager.print(
+                _("gui", "text", "token_revoke_error").format(
+                    error=type(exc).__name__
+                )
+            )
+        else:
+            self._twitch.change_state(State.RESTART)
+        finally:
+            self._invalidate_task = None
+            self._invalidate_button.config(state="disabled")
 
 
 class QtSettings:

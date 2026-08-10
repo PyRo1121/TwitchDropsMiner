@@ -80,7 +80,6 @@ class AuthState:
         self,
         *,
         delete_cookies: bool = False,
-        delete_refresh_token: bool = False,
     ) -> None:
         self._delattrs("access_token", "user_id")
         self._last_validated = None
@@ -89,8 +88,45 @@ class AuthState:
         if delete_cookies:
             self._transport.clear_cookies()
             remove_file(COOKIES_PATH)
-        if delete_refresh_token:
-            self._clear_refresh_token()
+
+    async def logout(self) -> None:
+        """Drain authentication, tombstone credentials, and clear cookies."""
+        # Invalidate post-await writers immediately, including callers that did
+        # not originate under ``validate()`` and therefore do not hold _lock.
+        self._generation += 1
+        async with self._lock:
+            self._delattrs("access_token", "user_id")
+            self._last_validated = None
+            self._logged_in.clear()
+            self._twitch.gui.set_authenticated(False)
+
+            credential_error: CredentialStorageError | OSError | None = None
+            try:
+                self._oauth_tokens.clear()
+            except (CredentialStorageError, OSError) as exc:
+                credential_error = exc
+                logger.warning(
+                    "Local authentication cleanup failed: %s",
+                    type(exc).__name__,
+                )
+
+            cookie_error: OSError | None = None
+            self._transport.clear_cookies()
+            try:
+                remove_file(COOKIES_PATH)
+            except OSError as exc:
+                cookie_error = exc
+                logger.warning(
+                    "Local cookie cleanup failed: %s",
+                    type(exc).__name__,
+                )
+
+            if credential_error is not None:
+                raise credential_error
+            if cookie_error is not None:
+                raise LoginException(
+                    "Local authentication cookie cleanup was incomplete"
+                ) from None
 
     def invalidate_if_current(self, generation: int) -> bool:
         if generation != self._generation:
@@ -117,6 +153,9 @@ class AuthState:
                 "Local authentication cleanup failed: %s",
                 type(exc).__name__,
             )
+            raise LoginException(
+                "Local OAuth credential cleanup was incomplete"
+            ) from None
 
     def _save_refresh_token(
         self,
@@ -124,6 +163,7 @@ class AuthState:
         refresh_token: str,
         *,
         rotated: bool = False,
+        new_session: bool = False,
     ) -> None:
         description = (
             "rotated OAuth refresh token"
@@ -131,7 +171,11 @@ class AuthState:
             else "OAuth refresh token"
         )
         try:
-            self._oauth_tokens.save(client_id, refresh_token)
+            self._oauth_tokens.save(
+                client_id,
+                refresh_token,
+                new_session=new_session,
+            )
         except (CredentialStorageError, OSError, TypeError, ValueError) as exc:
             logger.warning(
                 "Unable to persist %s: %s",
@@ -141,6 +185,12 @@ class AuthState:
             raise LoginException(
                 f"Unable to persist {description} safely"
             ) from None
+
+    def _require_generation(self, generation: int) -> None:
+        if generation != self._generation:
+            raise LoginException(
+                "Authentication state changed while a token request was pending"
+            )
 
     def _oauth_headers(self, client_info: ClientInfo) -> dict[str, str]:
         return {
@@ -162,6 +212,7 @@ class AuthState:
         client_info: ClientInfo,
         refresh_token: str,
     ) -> str | None:
+        generation = self._generation
         payload = {
             "client_id": client_info.CLIENT_ID,
             "grant_type": "refresh_token",
@@ -173,6 +224,7 @@ class AuthState:
             headers=self._oauth_headers(client_info),
             data=payload,
         ) as response:
+            self._require_generation(generation)
             if response.status in (400, 401):
                 return None
             if response.status != 200:
@@ -186,6 +238,7 @@ class AuthState:
             )
             if not isinstance(response_json, dict):
                 raise RuntimeError("OAuth refresh returned invalid data")
+            self._require_generation(generation)
             access_token = response_json.get("access_token")
             if not isinstance(access_token, str) or not access_token:
                 raise LoginException(
@@ -211,12 +264,15 @@ class AuthState:
         interval: float,
         expires_at: datetime,
         client_info: ClientInfo,
+        generation: int,
     ) -> str:
         while True:
+            self._require_generation(generation)
             await self._transport.wait_for_delay(
                 interval,
                 deadline=expires_at,
             )
+            self._require_generation(generation)
             async with self._transport.request(
                 "POST",
                 "https://id.twitch.tv/oauth2/token",
@@ -224,6 +280,7 @@ class AuthState:
                 data=payload,
                 invalidate_after=expires_at,
             ) as response:
+                self._require_generation(generation)
                 if response.status == 200:
                     response_json = await read_json(
                         response,
@@ -234,6 +291,7 @@ class AuthState:
                         raise LoginException(
                             "OAuth token response was malformed"
                         )
+                    self._require_generation(generation)
                     access_token = response_json.get("access_token")
                     if not isinstance(access_token, str) or not access_token:
                         raise LoginException(
@@ -244,6 +302,7 @@ class AuthState:
                         self._save_refresh_token(
                             client_info.CLIENT_ID,
                             refresh_token,
+                            new_session=True,
                         )
                     else:
                         logger.debug(
@@ -284,6 +343,7 @@ class AuthState:
                 )
 
     async def _oauth_login(self) -> str:
+        generation = self._generation
         login_form: LoginPort = self._twitch.gui.login
         client_info: ClientInfo = self._twitch._client_type
         headers = self._oauth_headers(client_info)
@@ -292,6 +352,7 @@ class AuthState:
             "scopes": "",
         }
         while True:
+            self._require_generation(generation)
             try:
                 now = datetime.now(timezone.utc)
                 async with self._transport.request(
@@ -362,6 +423,7 @@ class AuthState:
                     verification_uri,
                     user_code,
                 )
+                self._require_generation(generation)
                 token_payload = {
                     "client_id": client_info.CLIENT_ID,
                     "scopes": "",
@@ -376,6 +438,7 @@ class AuthState:
                     interval,
                     expires_at,
                     client_info,
+                    generation,
                 )
             except RequestInvalid:
                 continue

@@ -12,7 +12,11 @@ from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from constants import ClientType
-from oauth_storage import CredentialStorageError, OAuthTokenStore
+from oauth_storage import (
+    CredentialCleanupError,
+    CredentialStorageError,
+    OAuthTokenStore,
+)
 from auth import (
     AUTH_VALIDATION_INTERVAL,
     AuthState,
@@ -77,24 +81,138 @@ class AuthValidationTests(unittest.TestCase):
             self.assertFalse(cookie_path.exists())
             self.assertFalse(hasattr(auth, "access_token"))
 
-    def test_logout_invalidation_clears_refresh_token_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "oauth.json"
-            transport = SimpleNamespace(clear_cookies=Mock())
-            twitch = SimpleNamespace(
-                transport=transport,
-                gui=SimpleNamespace(set_authenticated=lambda _value: None),
+    def test_async_logout_clears_refresh_token_fallback(self) -> None:
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "oauth.json"
+                cookie_path = Path(directory) / "cookies.jar"
+                cookie_path.write_text("cookie", encoding="utf8")
+                transport = SimpleNamespace(clear_cookies=Mock())
+                twitch = SimpleNamespace(
+                    transport=transport,
+                    gui=SimpleNamespace(
+                        set_authenticated=lambda _value: None
+                    ),
+                )
+                auth = AuthState(cast(Any, twitch))
+                auth._oauth_tokens = OAuthTokenStore(
+                    path,
+                    use_system_vault=False,
+                )
+                auth._oauth_tokens.save("client-a", "refresh-secret")
+
+                with patch("auth.COOKIES_PATH", cookie_path):
+                    await auth.logout()
+
+                self.assertFalse(path.exists())
+                self.assertFalse(cookie_path.exists())
+                transport.clear_cookies.assert_called_once_with()
+                self.assertIsNone(
+                    auth._oauth_tokens.load("client-a")
+                )
+
+        asyncio.run(exercise())
+
+    def test_failed_logout_propagates_and_tombstones_reuse(self) -> None:
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "oauth.json"
+                encoded = OAuthTokenStore._encode_record(
+                    "client-a",
+                    "refresh-secret",
+                )
+                vault = SimpleNamespace(
+                    get_password=Mock(return_value=encoded),
+                    set_password=Mock(),
+                    delete_password=Mock(side_effect=RuntimeError("locked")),
+                )
+                transport = SimpleNamespace(clear_cookies=Mock())
+                twitch = SimpleNamespace(
+                    transport=transport,
+                    gui=SimpleNamespace(
+                        set_authenticated=lambda _value: None
+                    ),
+                )
+                auth = AuthState(cast(Any, twitch))
+                auth._oauth_tokens = OAuthTokenStore(
+                    path,
+                    vault=cast(Any, vault),
+                )
+
+                with self.assertLogs("auth", level="WARNING") as captured:
+                    with self.assertRaises(CredentialCleanupError):
+                        await auth.logout()
+
+                self.assertNotIn(
+                    "refresh-secret",
+                    "\n".join(captured.output),
+                )
+                with self.assertRaises(CredentialCleanupError):
+                    auth._oauth_tokens.load("client-a")
+
+        asyncio.run(exercise())
+
+    def test_logout_racing_refresh_cannot_recreate_rotated_token(self) -> None:
+        async def exercise() -> None:
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            class BlockingResponse(_Response):
+                async def __aenter__(self) -> BlockingResponse:
+                    started.set()
+                    await release.wait()
+                    return self
+
+            response = BlockingResponse(
+                200,
+                {
+                    "access_token": "new-access",
+                    "refresh_token": "post-logout-refresh",
+                },
             )
+            class TwitchStub(_Twitch):
+                def __init__(self) -> None:
+                    super().__init__(response)
+                    self.gui = SimpleNamespace(
+                        set_authenticated=lambda _value: None
+                    )
+                    self.clear_cookies = Mock()
+
+            twitch = TwitchStub()
             auth = AuthState(cast(Any, twitch))
-            auth._oauth_tokens = OAuthTokenStore(
-                path,
-                use_system_vault=False,
-            )
-            auth._oauth_tokens.save("client-a", "refresh-secret")
+            auth.device_id = "device-id"
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "oauth.json"
+                cookie_path = Path(directory) / "cookies.jar"
+                auth._oauth_tokens = OAuthTokenStore(
+                    path,
+                    use_system_vault=False,
+                )
+                auth._oauth_tokens.save("client-a", "old-refresh")
+                refresh = asyncio.create_task(
+                    auth._refresh_access_token(
+                        ClientType.WEB,
+                        "old-refresh",
+                    )
+                )
+                await started.wait()
 
-            auth.invalidate(delete_refresh_token=True)
+                with patch("auth.COOKIES_PATH", cookie_path):
+                    await auth.logout()
+                release.set()
 
-            self.assertFalse(path.exists())
+                with self.assertRaises(LoginException):
+                    await refresh
+                self.assertIsNone(
+                    auth._oauth_tokens.load(ClientType.WEB.CLIENT_ID)
+                )
+                with self.assertRaises(CredentialStorageError):
+                    auth._oauth_tokens.save(
+                        ClientType.WEB.CLIENT_ID,
+                        "post-logout-refresh",
+                    )
+
+        asyncio.run(exercise())
 
     def test_authentication_migrates_refresh_token_with_a_valid_cookie(
         self,

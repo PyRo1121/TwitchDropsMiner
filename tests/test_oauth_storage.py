@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +21,27 @@ from oauth_storage import (
     UnsupportedCredentialVersionError,
     system_vault_type,
 )
+from utils import lock_file
+
+
+def _hold_interprocess_lock(
+    lock_path: str,
+    ready_path: str,
+    release_path: str,
+) -> None:
+    acquired, handle = lock_file(Path(lock_path))
+    if not acquired:
+        handle.close()
+        raise RuntimeError("child could not acquire credential lock")
+    try:
+        Path(ready_path).write_text("ready", encoding="utf8")
+        deadline = time.monotonic() + 5
+        while not Path(release_path).exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("child lock release timed out")
+            time.sleep(0.01)
+    finally:
+        handle.close()
 
 
 class _MemoryVault:
@@ -60,6 +84,23 @@ def _record(client_id: str, token: str, *, version: int = 1) -> str:
             "refresh_token": token,
             "version": version,
         }
+    )
+
+
+def _legacy_record(client_id: str, token: str) -> str:
+    return json.dumps({"client_id": client_id, "refresh_token": token})
+
+
+def _current_record(client_id: str, token: str, *, vault: bool) -> str:
+    return json.dumps(
+        {
+            "client_id": client_id,
+            "provenance": "native" if vault else "fallback",
+            "refresh_token": token,
+            "version": CREDENTIAL_VERSION,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 
@@ -139,7 +180,10 @@ class OAuthTokenStoreTests(unittest.TestCase):
     def test_existing_destination_wins_over_legacy_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oauth.json"
-            path.write_text(_record("client-a", "legacy"), encoding="utf8")
+            path.write_text(
+                _legacy_record("client-a", "legacy"),
+                encoding="utf8",
+            )
             vault = _MemoryVault(_record("client-a", "destination"))
             store = OAuthTokenStore(path, vault=vault)
 
@@ -150,7 +194,10 @@ class OAuthTokenStoreTests(unittest.TestCase):
     def test_mismatched_destination_wins_without_deleting_other_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oauth.json"
-            path.write_text(_record("client-a", "legacy"), encoding="utf8")
+            path.write_text(
+                _legacy_record("client-a", "legacy"),
+                encoding="utf8",
+            )
             vault = _MemoryVault(_record("client-b", "destination"))
             store = OAuthTokenStore(path, vault=vault)
 
@@ -215,7 +262,7 @@ class OAuthTokenStoreTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertIsNone(vault.value)
 
-    def test_failed_migration_verification_rolls_back_and_preserves_source(self) -> None:
+    def test_failed_verification_preserves_unrecognized_value_and_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oauth.json"
             path.write_text(_record("client-a", "legacy"), encoding="utf8")
@@ -223,11 +270,29 @@ class OAuthTokenStoreTests(unittest.TestCase):
             vault.corrupt_writes = True
             store = OAuthTokenStore(path, vault=vault)
 
-            with self.assertRaises(CredentialVaultError):
+            with self.assertRaises(oauth_storage.CredentialConflictError):
                 store.load("client-a")
 
             self.assertTrue(path.exists())
-            self.assertIsNone(vault.value)
+            self.assertEqual(vault.value, "corrupt")
+
+    def test_state_write_failure_conditionally_restores_previous_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            previous = _current_record("client-a", "previous", vault=True)
+            vault = _MemoryVault(previous)
+            store = OAuthTokenStore(path, vault=vault)
+
+            with patch.object(
+                store,
+                "_write_state",
+                side_effect=OSError("state unavailable"),
+            ):
+                with self.assertRaises(OSError):
+                    store.save("client-a", "new")
+
+            self.assertEqual(vault.value, previous)
+            self.assertFalse(path.exists())
 
     def test_failed_source_removal_rolls_back_new_destination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -321,6 +386,299 @@ class OAuthTokenStoreTests(unittest.TestCase):
 
             self.assertEqual(store.load("client-a"), "fresh")
             self.assertFalse(temporary.exists())
+
+    def test_interprocess_lock_blocks_complete_fallback_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "oauth.json"
+            ready = root / "ready"
+            release = root / "release"
+            lock_path = root / "oauth.json.lock"
+            context = multiprocessing.get_context("spawn")
+            process = context.Process(
+                target=_hold_interprocess_lock,
+                args=(str(lock_path), str(ready), str(release)),
+            )
+            process.start()
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if not process.is_alive():
+                    self.fail("lock-holder process exited early")
+                if time.monotonic() >= deadline:
+                    self.fail("lock-holder process did not become ready")
+                time.sleep(0.01)
+
+            store = OAuthTokenStore(path, use_system_vault=False)
+            failure: list[BaseException] = []
+
+            def save() -> None:
+                try:
+                    store.save("client-a", "secret")
+                except BaseException as exc:
+                    failure.append(exc)
+
+            thread = threading.Thread(target=save)
+            thread.start()
+            time.sleep(0.1)
+            self.assertTrue(thread.is_alive())
+            self.assertFalse(path.exists())
+            release.write_text("release", encoding="utf8")
+            process.join(5)
+            thread.join(5)
+
+            self.assertEqual(process.exitcode, 0)
+            self.assertFalse(failure)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(store.load("client-a"), "secret")
+
+    def test_concurrent_migration_and_save_preserve_newest_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            path.write_text(_record("client-a", "legacy"), encoding="utf8")
+            migration_started = threading.Event()
+            release_migration = threading.Event()
+
+            class BlockingVault(_MemoryVault):
+                def set_password(
+                    self,
+                    service: str,
+                    username: str,
+                    password: str,
+                ) -> None:
+                    if not migration_started.is_set():
+                        migration_started.set()
+                        self.assert_release()
+                    super().set_password(service, username, password)
+
+                @staticmethod
+                def assert_release() -> None:
+                    if not release_migration.wait(2):
+                        raise AssertionError("migration release timed out")
+
+            vault = BlockingVault()
+            migrating = OAuthTokenStore(path, vault=vault)
+            saving = OAuthTokenStore(path, vault=vault)
+            migration_result: list[str | None] = []
+            failures: list[BaseException] = []
+
+            def migrate() -> None:
+                try:
+                    migration_result.append(migrating.load("client-a"))
+                except BaseException as exc:
+                    failures.append(exc)
+
+            def save_newest() -> None:
+                try:
+                    saving.save("client-a", "newest")
+                except BaseException as exc:
+                    failures.append(exc)
+
+            migration_thread = threading.Thread(target=migrate)
+            save_thread = threading.Thread(target=save_newest)
+            migration_thread.start()
+            self.assertTrue(migration_started.wait(2))
+            save_thread.start()
+            time.sleep(0.05)
+            self.assertTrue(save_thread.is_alive())
+            release_migration.set()
+            migration_thread.join(2)
+            save_thread.join(2)
+
+            self.assertFalse(failures)
+            self.assertEqual(migration_result, ["legacy"])
+            self.assertFalse(path.exists())
+            final = OAuthTokenStore._parse_record(
+                vault.value or "",
+                source="vault",
+            )
+            self.assertEqual(final.refresh_token, "newest")
+
+    def test_conditional_rollback_preserves_external_concurrent_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            path.write_text(_record("client-a", "legacy"), encoding="utf8")
+            vault = _MemoryVault()
+            store = OAuthTokenStore(path, vault=vault)
+            concurrent = _current_record("client-a", "newest", vault=True)
+
+            def concurrent_write_then_fail() -> None:
+                vault.value = concurrent
+                raise OSError("source removal failed")
+
+            with patch.object(
+                store,
+                "_delete_file",
+                side_effect=concurrent_write_then_fail,
+            ):
+                with self.assertRaises(oauth_storage.CredentialConflictError):
+                    store.load("client-a")
+
+            self.assertEqual(vault.value, concurrent)
+            self.assertTrue(path.exists())
+
+    def test_provisioned_vault_outage_fails_closed_and_logout_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault()
+            available = OAuthTokenStore(path, vault=vault)
+            available.save("client-a", "old-vault")
+            outage = OAuthTokenStore(path, use_system_vault=False)
+
+            with self.assertRaises(
+                oauth_storage.CredentialVaultUnavailableError
+            ):
+                outage.save("client-a", "new-during-outage")
+            self.assertFalse(path.exists())
+
+            with self.assertRaises(
+                oauth_storage.CredentialCleanupError
+            ) as raised:
+                outage.clear()
+            self.assertTrue(raised.exception.vault_pending)
+
+            recovered = OAuthTokenStore(path, vault=vault)
+            self.assertIsNone(recovered.load("client-a"))
+            self.assertIsNone(vault.value)
+            with self.assertRaises(oauth_storage.CredentialLoggedOutError):
+                recovered.save("client-a", "stale-rotation")
+
+            recovered.save(
+                "client-a",
+                "new-login",
+                new_session=True,
+            )
+            self.assertEqual(recovered.load("client-a"), "new-login")
+
+    def test_recovery_preserves_differing_provenance_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            fallback = OAuthTokenStore(path, use_system_vault=False)
+            fallback.save("client-a", "new-during-outage")
+            vault_value = _current_record("client-a", "old-vault", vault=True)
+            vault = _MemoryVault(vault_value)
+            recovered = OAuthTokenStore(path, vault=vault)
+
+            with self.assertRaises(oauth_storage.CredentialConflictError):
+                recovered.load("client-a")
+
+            self.assertEqual(vault.value, vault_value)
+            self.assertTrue(path.exists())
+            preserved = OAuthTokenStore._parse_record(
+                path.read_text(encoding="utf8"),
+                source="file",
+            )
+            self.assertEqual(
+                preserved.refresh_token,
+                "new-during-outage",
+            )
+
+    def test_save_rejects_forward_vault_and_file_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            future = _record(
+                "client-a",
+                "future",
+                version=CREDENTIAL_VERSION + 1,
+            )
+            vault = _MemoryVault(future)
+            vault_store = OAuthTokenStore(path, vault=vault)
+
+            with self.assertRaises(UnsupportedCredentialVersionError):
+                vault_store.save("client-a", "older-writer")
+            self.assertEqual(vault.value, future)
+
+            path.write_text(future, encoding="utf8")
+            file_store = OAuthTokenStore(path, use_system_vault=False)
+            with self.assertRaises(UnsupportedCredentialVersionError):
+                file_store.save("client-a", "older-writer")
+            self.assertEqual(path.read_text(encoding="utf8"), future)
+
+    def test_concurrent_forward_writer_is_serialized_before_older_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault()
+            older = OAuthTokenStore(path, vault=vault)
+            newer = OAuthTokenStore(path, vault=vault)
+            future = _record(
+                "client-a",
+                "future",
+                version=CREDENTIAL_VERSION + 1,
+            )
+            newer_holds_lock = threading.Event()
+            release_newer = threading.Event()
+            older_error: list[BaseException] = []
+
+            def write_future() -> None:
+                with newer._transaction():
+                    vault.value = future
+                    newer_holds_lock.set()
+                    if not release_newer.wait(2):
+                        raise AssertionError("newer writer release timed out")
+
+            def save_older() -> None:
+                try:
+                    older.save("client-a", "older")
+                except BaseException as exc:
+                    older_error.append(exc)
+
+            newer_thread = threading.Thread(target=write_future)
+            older_thread = threading.Thread(target=save_older)
+            newer_thread.start()
+            self.assertTrue(newer_holds_lock.wait(2))
+            older_thread.start()
+            time.sleep(0.05)
+            self.assertTrue(older_thread.is_alive())
+            release_newer.set()
+            newer_thread.join(2)
+            older_thread.join(2)
+
+            self.assertEqual(len(older_error), 1)
+            self.assertIsInstance(
+                older_error[0],
+                UnsupportedCredentialVersionError,
+            )
+            self.assertEqual(vault.value, future)
+
+    def test_forward_state_version_blocks_every_save_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            state_path = path.with_name("oauth.json.state")
+            future_state = json.dumps(
+                {
+                    "cleanup": "none",
+                    "vault_provisioned": False,
+                    "version": oauth_storage.STATE_VERSION + 1,
+                }
+            )
+            state_path.write_text(future_state, encoding="utf8")
+            store = OAuthTokenStore(path, use_system_vault=False)
+
+            with self.assertRaises(UnsupportedCredentialVersionError):
+                store.save("client-a", "older")
+
+            self.assertEqual(
+                state_path.read_text(encoding="utf8"),
+                future_state,
+            )
+            self.assertFalse(path.exists())
+
+    def test_failed_logout_tombstone_prevents_automatic_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault(_current_record("client-a", "secret", vault=True))
+            vault.delete_error = RuntimeError("locked")
+            store = OAuthTokenStore(path, vault=vault)
+
+            with self.assertRaises(oauth_storage.CredentialCleanupError):
+                store.clear()
+            with self.assertRaises(oauth_storage.CredentialCleanupError):
+                store.load("client-a")
+
+            vault.delete_error = None
+            self.assertIsNone(store.load("client-a"))
+            self.assertIsNone(vault.value)
+            with self.assertRaises(oauth_storage.CredentialLoggedOutError):
+                store.save("client-a", "stale")
 
     def test_frozen_platform_mapping_uses_only_native_backends(self) -> None:
         self.assertEqual(

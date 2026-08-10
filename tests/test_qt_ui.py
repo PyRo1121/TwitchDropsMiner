@@ -38,6 +38,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - depends on test environ
 
 from constants import PROJECT_URL, ClientType, PriorityMode, State
 from exceptions import ExitRequest, WebsocketClosed
+from oauth_storage import CredentialCleanupError
 from gui_qt.autostart import AutostartManager
 from gui_qt.image_cache import QtImageCache
 from gui_qt.manager import QtGUIManager
@@ -543,7 +544,7 @@ class QtUiTests(unittest.TestCase):
         manager = self.make_manager()
         auth_state = SimpleNamespace(
             _access_token="access-token",
-            invalidate=Mock(),
+            logout=AsyncMock(),
         )
 
         class FailingTransport:
@@ -557,11 +558,34 @@ class QtUiTests(unittest.TestCase):
 
         asyncio.run(manager.help._invalidate_token())
 
-        auth_state.invalidate.assert_called_once_with(
-            delete_cookies=True,
-            delete_refresh_token=True,
-        )
+        auth_state.logout.assert_awaited_once_with()
         self.assertEqual(twitch.state_changes, [State.RESTART])
+
+    def test_failed_local_logout_does_not_restart_or_reuse_credentials(
+        self,
+    ) -> None:
+        manager = self.make_manager()
+        auth_state = SimpleNamespace(
+            _access_token=None,
+            logout=AsyncMock(
+                side_effect=CredentialCleanupError(
+                    vault_pending=True,
+                    file_pending=False,
+                )
+            ),
+        )
+        twitch = cast(Any, manager._twitch)
+        twitch._auth_state = auth_state
+
+        with patch.object(manager, "print") as print_message:
+            asyncio.run(manager.help._invalidate_token())
+
+        auth_state.logout.assert_awaited_once_with()
+        self.assertEqual(twitch.state_changes, [])
+        self.assertIn(
+            "CredentialCleanupError",
+            str(print_message.call_args),
+        )
 
     def test_modern_shell_navigation_and_command_palette(self) -> None:
         manager = self.make_manager()
