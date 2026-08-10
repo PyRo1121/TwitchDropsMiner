@@ -41,7 +41,16 @@ class AuthState:
         self._twitch = twitch
         self._transport = twitch.transport
         self._lock = asyncio.Lock()
-        self._oauth_tokens = OAuthTokenStore(OAUTH_TOKEN_PATH)
+        self._oauth_tokens = OAuthTokenStore(
+            OAUTH_TOKEN_PATH,
+            allow_file_fallback=bool(
+                getattr(
+                    getattr(twitch, "settings", None),
+                    "allow_insecure_oauth_file",
+                    False,
+                )
+            ),
+        )
         self._logged_in = asyncio.Event()
         self._last_validated: datetime | None = None
         self._generation = 0

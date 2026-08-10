@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from constants import PROJECT_URL, PriorityMode, State
+from oauth_storage import CredentialCleanupError
 from settings import parse_proxy
 from translate import _
 from utils import format_duration, webopen
@@ -401,12 +402,26 @@ class QtHelp:
                     error=type(exc).__name__
                 )
             )
+        retry_logout = False
+        block_exit_until_retry = False
         try:
             await auth_state.logout()
+        except CredentialCleanupError as exc:
+            # A persisted tombstone makes exit/relaunch safe; without one the
+            # current process must stay available for an explicit retry.
+            retry_logout = not exc.tombstone_persisted
+            if retry_logout:
+                block_exit_until_retry = exc.vault_pending
+                if exc.file_pending:
+                    block_exit_until_retry = True
+            self._manager.print(
+                _("gui", "text", "token_revoke_error").format(
+                    error=type(exc).__name__
+                )
+            )
         except Exception as exc:
-            # The storage layer has already installed a durable tombstone.
-            # Keep the application stopped and report only the exception type;
-            # restarting must not turn incomplete cleanup into automatic reuse.
+            retry_logout = True
+            block_exit_until_retry = True
             self._manager.print(
                 _("gui", "text", "token_revoke_error").format(
                     error=type(exc).__name__
@@ -415,8 +430,12 @@ class QtHelp:
         else:
             self._twitch.change_state(State.RESTART)
         finally:
+            if block_exit_until_retry:
+                self._twitch.prevent_close()
             self._invalidate_task = None
-            self._invalidate_button.config(state="disabled")
+            self._invalidate_button.config(
+                state="normal" if retry_logout else "disabled"
+            )
 
 
 class QtSettings:

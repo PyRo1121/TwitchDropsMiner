@@ -15,6 +15,7 @@ class _Args:
     log = False
     tray = False
     dump = False
+    allow_insecure_oauth_file = False
 
     @property
     def debug_ws(self) -> int:

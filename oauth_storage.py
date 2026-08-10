@@ -30,7 +30,8 @@ from utils import atomic_write, lock_file, remove_file
 
 
 CREDENTIAL_VERSION: Final = 2
-STATE_VERSION: Final = 1
+STATE_VERSION: Final = 2
+LOGOUT_MARKER_VERSION: Final = 1
 VAULT_SERVICE: Final = "io.github.devilxd.twitchdropsminer.oauth"
 VAULT_ACCOUNT: Final = "twitch-session"
 _MAX_CREDENTIAL_BYTES: Final = 1024 * 1024
@@ -57,6 +58,10 @@ class CredentialVaultUnavailableError(CredentialStorageError):
     """The native vault is unavailable and plaintext fallback is unsafe."""
 
 
+class CredentialFallbackEligibilityError(CredentialVaultUnavailableError):
+    """File fallback requires an explicit, durable eligibility decision."""
+
+
 class CredentialMigrationError(CredentialStorageError):
     """A credential could not be migrated transactionally."""
 
@@ -78,11 +83,20 @@ class UnsupportedCredentialVersionError(CredentialStorageError):
 
 
 class CredentialCleanupError(CredentialStorageError):
-    """Local logout is tombstoned until every credential is confirmed absent."""
+    """Local logout did not yet reach a fully verified durable state."""
 
-    def __init__(self, *, vault_pending: bool, file_pending: bool) -> None:
+    def __init__(
+        self,
+        *,
+        vault_pending: bool,
+        file_pending: bool,
+        marker_pending: bool,
+        tombstone_persisted: bool,
+    ) -> None:
         self.vault_pending = vault_pending
         self.file_pending = file_pending
+        self.marker_pending = marker_pending
+        self.tombstone_persisted = tombstone_persisted
         super().__init__("Local OAuth credential cleanup remains pending")
 
 
@@ -113,6 +127,7 @@ class _CredentialRecord:
 class _StorageState:
     version: int = STATE_VERSION
     vault_provisioned: bool = False
+    fallback_eligible: bool = False
     cleanup: str = _CLEANUP_NONE
 
 
@@ -160,11 +175,14 @@ class OAuthTokenStore:
         *,
         vault: CredentialVault | None = None,
         use_system_vault: bool = True,
+        allow_file_fallback: bool = False,
     ) -> None:
         self._path = path
         self._state_path = path.with_name(f"{path.name}.state")
+        self._logout_marker_path = path.with_name(f"{path.name}.logout")
         self._lock_path = path.with_name(f"{path.name}.lock")
         self._process_lock = _process_lock(self._lock_path)
+        self._explicit_file_fallback = allow_file_fallback or not use_system_vault
         self._vault = (
             _create_system_vault()
             if vault is None and use_system_vault
@@ -202,10 +220,24 @@ class OAuthTokenStore:
     def clear(self) -> None:
         """Durably tombstone logout, then confirm vault and file deletion."""
         with self._transaction():
-            state = self._read_state()
+            state, tombstone_persisted = self._read_cleanup_state()
             pending = replace(state, cleanup=_CLEANUP_PENDING)
-            self._write_state(pending)
-            self._complete_cleanup(pending)
+            try:
+                self._write_logout_marker()
+            except (CredentialStorageError, OSError):
+                pass
+            else:
+                tombstone_persisted = True
+            try:
+                self._write_state(pending)
+            except (CredentialStorageError, OSError):
+                pass
+            else:
+                tombstone_persisted = True
+            self._complete_cleanup(
+                pending,
+                tombstone_persisted=tombstone_persisted,
+            )
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -234,9 +266,12 @@ class OAuthTokenStore:
                 lock_handle.close()
 
     def _load_locked(self, client_id: str) -> str | None:
-        state = self._read_state()
+        state, tombstone_persisted = self._read_cleanup_state()
         if state.cleanup != _CLEANUP_NONE:
-            self._complete_cleanup(state)
+            self._complete_cleanup(
+                state,
+                tombstone_persisted=tombstone_persisted,
+            )
             return None
 
         if self._vault is None:
@@ -310,9 +345,12 @@ class OAuthTokenStore:
         *,
         new_session: bool,
     ) -> None:
-        state = self._read_state()
+        state, tombstone_persisted = self._read_cleanup_state()
         if state.cleanup != _CLEANUP_NONE:
-            state = self._complete_cleanup(state)
+            state = self._complete_cleanup(
+                state,
+                tombstone_persisted=tombstone_persisted,
+            )
             if not new_session:
                 raise CredentialLoggedOutError(
                     "Logout tombstone rejected automatic credential reuse"
@@ -363,6 +401,7 @@ class OAuthTokenStore:
         self._write_vault(encoded)
         target_state = _StorageState(
             vault_provisioned=True,
+            fallback_eligible=state.fallback_eligible,
             cleanup=_CLEANUP_NONE,
         )
         try:
@@ -389,6 +428,10 @@ class OAuthTokenStore:
                 "Provisioned OS credential vault is temporarily unavailable"
             )
         source = self._read_file_record()
+        state = self._ensure_fallback_eligibility(
+            state,
+            source_exists=source is not None,
+        )
         if source is None or source.client_id != client_id:
             return None
         return source.refresh_token
@@ -408,6 +451,10 @@ class OAuthTokenStore:
         previous = self._read_file_text()
         if previous is not None:
             self._parse_record(previous, source="file")
+        state = self._ensure_fallback_eligibility(
+            state,
+            source_exists=previous is not None,
+        )
         encoded = self._encode_record(
             client_id,
             refresh_token,
@@ -421,10 +468,36 @@ class OAuthTokenStore:
                 self._rollback_file(previous, encoded)
                 raise
 
-    def _complete_cleanup(self, state: _StorageState) -> _StorageState:
+    def _ensure_fallback_eligibility(
+        self,
+        state: _StorageState,
+        *,
+        source_exists: bool,
+    ) -> _StorageState:
+        if state.fallback_eligible:
+            return state
+        if not source_exists and not self._explicit_file_fallback:
+            raise CredentialFallbackEligibilityError(
+                "File fallback eligibility is unknown while the vault is unavailable"
+            )
+        eligible = replace(state, fallback_eligible=True)
+        self._write_state(eligible)
+        return eligible
+
+    def _read_cleanup_state(self) -> tuple[_StorageState, bool]:
+        state = self._read_state()
+        marker_exists = self._read_logout_marker()
+        if marker_exists:
+            return replace(state, cleanup=_CLEANUP_PENDING), True
+        return state, state.cleanup != _CLEANUP_NONE
+
+    def _complete_cleanup(
+        self,
+        state: _StorageState,
+        *,
+        tombstone_persisted: bool,
+    ) -> _StorageState:
         pending = replace(state, cleanup=_CLEANUP_PENDING)
-        if pending != state:
-            self._write_state(pending)
 
         vault_pending = False
         if self._vault is None:
@@ -446,15 +519,38 @@ class OAuthTokenStore:
         except OSError:
             file_pending = True
 
-        if vault_pending or file_pending:
+        final_state = replace(
+            pending,
+            cleanup=(
+                _CLEANUP_PENDING
+                if vault_pending or file_pending
+                else _CLEANUP_LOGGED_OUT
+            ),
+        )
+        state_pending = False
+        try:
+            self._write_state(final_state)
+        except (CredentialStorageError, OSError):
+            state_pending = True
+        else:
+            tombstone_persisted = True
+
+        marker_pending = False
+        if not state_pending:
+            try:
+                self._delete_logout_marker()
+                marker_pending = os.path.lexists(self._logout_marker_path)
+            except OSError:
+                marker_pending = True
+
+        if vault_pending or file_pending or state_pending or marker_pending:
             raise CredentialCleanupError(
                 vault_pending=vault_pending,
                 file_pending=file_pending,
+                marker_pending=marker_pending or state_pending,
+                tombstone_persisted=tombstone_persisted,
             )
-
-        completed = replace(pending, cleanup=_CLEANUP_LOGGED_OUT)
-        self._write_state(completed)
-        return completed
+        return final_state
 
     def _reconcile_source(
         self,
@@ -614,6 +710,52 @@ class OAuthTokenStore:
     def _delete_file(self) -> None:
         remove_file(self._path)
 
+    def _read_logout_marker(self) -> bool:
+        encoded = self._read_bounded_text(
+            self._logout_marker_path,
+            maximum=_MAX_STATE_BYTES,
+            label="OAuth logout marker",
+            symlink_is_missing=False,
+        )
+        if encoded is None:
+            return False
+        try:
+            payload: Any = json.loads(encoded)
+        except (TypeError, ValueError):
+            raise CredentialStorageError(
+                "OAuth logout marker is malformed"
+            ) from None
+        if not isinstance(payload, dict):
+            raise CredentialStorageError("OAuth logout marker is malformed")
+        version = payload.get("version")
+        if type(version) is not int:
+            raise CredentialStorageError(
+                "OAuth logout marker has an invalid version"
+            )
+        if version > LOGOUT_MARKER_VERSION:
+            raise UnsupportedCredentialVersionError(
+                "OAuth logout marker uses a newer version"
+            )
+        logout = payload.get("logout")
+        if (
+            version != LOGOUT_MARKER_VERSION
+            or type(logout) is not bool
+            or not logout
+        ):
+            raise CredentialStorageError("OAuth logout marker is malformed")
+        return True
+
+    def _write_logout_marker(self) -> None:
+        encoded = json.dumps(
+            {"logout": True, "version": LOGOUT_MARKER_VERSION},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._atomic_text(self._logout_marker_path, encoded)
+
+    def _delete_logout_marker(self) -> None:
+        remove_file(self._logout_marker_path)
+
     def _read_state(self) -> _StorageState:
         encoded = self._read_bounded_text(
             self._state_path,
@@ -642,16 +784,20 @@ class OAuthTokenStore:
             )
         provisioned = payload.get("vault_provisioned")
         cleanup = payload.get("cleanup")
+        fallback_eligible = (
+            False if version == 1 else payload.get("fallback_eligible")
+        )
         if (
-            version != STATE_VERSION
+            version not in (1, STATE_VERSION)
             or type(provisioned) is not bool
+            or type(fallback_eligible) is not bool
             or cleanup
             not in (_CLEANUP_NONE, _CLEANUP_PENDING, _CLEANUP_LOGGED_OUT)
         ):
             raise CredentialStorageError("OAuth storage state is malformed")
         return _StorageState(
-            version=version,
             vault_provisioned=provisioned,
+            fallback_eligible=fallback_eligible,
             cleanup=cleanup,
         )
 
@@ -659,6 +805,7 @@ class OAuthTokenStore:
         encoded = json.dumps(
             {
                 "cleanup": state.cleanup,
+                "fallback_eligible": state.fallback_eligible,
                 "vault_provisioned": state.vault_provisioned,
                 "version": state.version,
             },

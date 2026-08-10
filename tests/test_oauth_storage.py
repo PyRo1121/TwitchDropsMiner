@@ -24,6 +24,21 @@ from oauth_storage import (
 from utils import lock_file
 
 
+def _load_fallback_in_fresh_process(
+    credential_path: str,
+    result_path: str,
+) -> None:
+    try:
+        value = OAuthTokenStore(
+            Path(credential_path),
+            use_system_vault=False,
+        ).load("client-a")
+        result: dict[str, object] = {"value": value}
+    except Exception as exc:
+        result = {"error": type(exc).__name__}
+    Path(result_path).write_text(json.dumps(result), encoding="utf8")
+
+
 def _hold_interprocess_lock(
     lock_path: str,
     ready_path: str,
@@ -311,17 +326,26 @@ class OAuthTokenStoreTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertIsNone(vault.value)
 
-    def test_no_keyring_error_is_the_only_operational_file_fallback(self) -> None:
+    def test_explicit_file_fallback_eligibility_is_durable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oauth.json"
             vault = _MemoryVault()
             vault.get_error = oauth_storage.NoKeyringError("no backend")
-            store = OAuthTokenStore(path, vault=vault)
+            store = OAuthTokenStore(
+                path,
+                vault=vault,
+                allow_file_fallback=True,
+            )
 
             store.save("client-a", "fallback-secret")
 
             self.assertTrue(path.exists())
-            self.assertEqual(store.load("client-a"), "fallback-secret")
+            fresh = OAuthTokenStore(path, vault=vault)
+            self.assertEqual(fresh.load("client-a"), "fallback-secret")
+            state = _json_record(
+                path.with_name("oauth.json.state").read_text(encoding="utf8")
+            )
+            self.assertIs(state["fallback_eligible"], True)
 
     def test_generic_vault_read_failure_never_uses_plaintext_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -345,6 +369,77 @@ class OAuthTokenStoreTests(unittest.TestCase):
             store.clear()
 
             self.assertFalse(path.exists())
+
+    def test_initial_tombstone_write_failure_blocks_fresh_vault_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault()
+            store = OAuthTokenStore(path, vault=vault)
+            store.save("client-a", "vault-secret")
+            vault.delete_error = RuntimeError("vault locked")
+
+            with patch.object(
+                store,
+                "_write_state",
+                side_effect=OSError("state unavailable"),
+            ):
+                with self.assertRaises(
+                    oauth_storage.CredentialCleanupError
+                ) as raised:
+                    store.clear()
+
+            self.assertTrue(raised.exception.tombstone_persisted)
+            self.assertTrue(path.with_name("oauth.json.logout").exists())
+            self.assertIsNotNone(vault.value)
+
+            vault.delete_error = None
+            fresh = OAuthTokenStore(path, vault=vault)
+            self.assertIsNone(fresh.load("client-a"))
+            self.assertIsNone(vault.value)
+            self.assertFalse(path.with_name("oauth.json.logout").exists())
+
+    def test_initial_tombstone_write_failure_blocks_fresh_fallback_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            store = OAuthTokenStore(path, use_system_vault=False)
+            store.save("client-a", "fallback-secret")
+
+            with (
+                patch.object(
+                    store,
+                    "_write_state",
+                    side_effect=OSError("state unavailable"),
+                ),
+                patch.object(
+                    store,
+                    "_delete_file",
+                    side_effect=OSError("file locked"),
+                ),
+            ):
+                with self.assertRaises(
+                    oauth_storage.CredentialCleanupError
+                ) as raised:
+                    store.clear()
+
+            self.assertTrue(raised.exception.tombstone_persisted)
+            self.assertTrue(path.with_name("oauth.json.logout").exists())
+            self.assertTrue(path.exists())
+
+            result_path = path.with_name("fresh-process-result.json")
+            process = multiprocessing.get_context("spawn").Process(
+                target=_load_fallback_in_fresh_process,
+                args=(str(path), str(result_path)),
+            )
+            process.start()
+            process.join(5)
+
+            self.assertEqual(process.exitcode, 0)
+            self.assertEqual(
+                _json_record(result_path.read_text(encoding="utf8")),
+                {"value": None},
+            )
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name("oauth.json.logout").exists())
 
     def test_logout_attempts_file_cleanup_when_vault_deletion_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -515,6 +610,30 @@ class OAuthTokenStoreTests(unittest.TestCase):
 
             self.assertEqual(vault.value, concurrent)
             self.assertTrue(path.exists())
+
+    def test_v1_vault_upgrade_outage_cannot_create_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault(_record("client-a", "v1-vault", version=1))
+            vault.get_error = oauth_storage.NoKeyringError("provider offline")
+            outage = OAuthTokenStore(path, vault=vault)
+
+            with self.assertRaises(
+                oauth_storage.CredentialFallbackEligibilityError
+            ):
+                outage.load("client-a")
+            with self.assertRaises(
+                oauth_storage.CredentialFallbackEligibilityError
+            ):
+                outage.save("client-a", "new-session", new_session=True)
+
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name("oauth.json.state").exists())
+
+            vault.get_error = None
+            recovered = OAuthTokenStore(path, vault=vault)
+            self.assertEqual(recovered.load("client-a"), "v1-vault")
+            self.assertFalse(path.exists())
 
     def test_provisioned_vault_outage_fails_closed_and_logout_retries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

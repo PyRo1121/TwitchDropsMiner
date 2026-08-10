@@ -77,6 +77,7 @@ class FakeTwitch:
         self.inventory: list[Any] = []
         self.channels: dict[int, Any] = {}
         self.state_changes: list[Any] = []
+        self.close_prevented = False
 
     def close(self) -> None:
         pass
@@ -86,6 +87,9 @@ class FakeTwitch:
 
     def change_state(self, state: Any) -> None:
         self.state_changes.append(state)
+
+    def prevent_close(self) -> None:
+        self.close_prevented = True
 
 
 class FakeWebSocket:
@@ -571,6 +575,8 @@ class QtUiTests(unittest.TestCase):
                 side_effect=CredentialCleanupError(
                     vault_pending=True,
                     file_pending=False,
+                    marker_pending=False,
+                    tombstone_persisted=True,
                 )
             ),
         )
@@ -586,6 +592,36 @@ class QtUiTests(unittest.TestCase):
             "CredentialCleanupError",
             str(print_message.call_args),
         )
+        self.assertFalse(
+            manager.help._invalidate_button.widget.isEnabled()
+        )
+        self.assertFalse(twitch.close_prevented)
+
+    def test_logout_without_persisted_marker_remains_retryable(self) -> None:
+        manager = self.make_manager()
+        auth_state = SimpleNamespace(
+            _access_token=None,
+            logout=AsyncMock(
+                side_effect=CredentialCleanupError(
+                    vault_pending=True,
+                    file_pending=False,
+                    marker_pending=True,
+                    tombstone_persisted=False,
+                )
+            ),
+        )
+        twitch = cast(Any, manager._twitch)
+        twitch._auth_state = auth_state
+
+        with patch.object(manager, "print"):
+            asyncio.run(manager.help._invalidate_token())
+
+        auth_state.logout.assert_awaited_once_with()
+        self.assertEqual(twitch.state_changes, [])
+        self.assertTrue(
+            manager.help._invalidate_button.widget.isEnabled()
+        )
+        self.assertTrue(twitch.close_prevented)
 
     def test_modern_shell_navigation_and_command_palette(self) -> None:
         manager = self.make_manager()

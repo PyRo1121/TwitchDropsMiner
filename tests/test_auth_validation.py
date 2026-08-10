@@ -61,6 +61,20 @@ class _Twitch:
 
 
 class AuthValidationTests(unittest.TestCase):
+    def test_explicit_file_fallback_setting_reaches_token_store(self) -> None:
+        twitch = SimpleNamespace(
+            transport=SimpleNamespace(),
+            settings=SimpleNamespace(allow_insecure_oauth_file=True),
+        )
+
+        with patch("auth.OAuthTokenStore") as token_store:
+            AuthState(cast(Any, twitch))
+
+        self.assertIs(
+            token_store.call_args.kwargs["allow_file_fallback"],
+            True,
+        )
+
     def test_cookie_invalidation_removes_disk_state_without_a_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cookie_path = Path(directory) / "cookies.jar"

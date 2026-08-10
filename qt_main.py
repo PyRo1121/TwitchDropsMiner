@@ -81,6 +81,7 @@ class ParsedArgs(argparse.Namespace):
     tray: bool
     dump: bool
     self_test: bool
+    allow_insecure_oauth_file: bool
 
     @property
     def logging_level(self) -> int:
@@ -113,6 +114,14 @@ def _build_parser():
     parser.add_argument("--tray", action="store_true")
     parser.add_argument("--log", action="store_true")
     parser.add_argument("--dump", action="store_true")
+    parser.add_argument(
+        "--allow-insecure-oauth-file",
+        action="store_true",
+        help=(
+            "explicitly allow a mode-0600 OAuth token file when the native "
+            "credential provider is unavailable"
+        ),
+    )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug-ws", dest="_debug_ws", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug-gql", dest="_debug_gql", action="store_true", help=argparse.SUPPRESS)

@@ -20,6 +20,7 @@ class CliArgs(Protocol):
     log: bool
     tray: bool
     dump: bool
+    allow_insecure_oauth_file: bool
 
     @property
     def debug_ws(self) -> int: ...
