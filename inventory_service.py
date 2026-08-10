@@ -7,11 +7,24 @@ from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from math import floor
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from constants import GQL_BATCH_SIZE, GQL_QUERIES
-from exceptions import ExitRequest, MinerException, RequestException
+from constants import (
+    GQL_BATCH_SIZE,
+    GQL_QUERIES,
+    INVENTORY_RETRY_BASE,
+    INVENTORY_RETRY_MAX,
+    State,
+)
+from exceptions import (
+    ExitRequest,
+    LoginException,
+    MinerException,
+    RequestException,
+    RequestInvalid,
+)
 from inventory import DropsCampaign, TimedDrop
 from translate import _
 from utils import (
@@ -34,6 +47,124 @@ class InventoryService:
 
     def __init__(self, twitch: Twitch) -> None:
         self._twitch = twitch
+        self._retry_attempt = 0
+        self._retry_task: asyncio.Task[None] | None = None
+        self._deadline_alerts: set[str] = set()
+
+    def start_session(self) -> None:
+        self._deadline_alerts.clear()
+
+    async def close(self) -> None:
+        await self._cancel_retry_task()
+        self._retry_attempt = 0
+
+    async def _cancel_retry_task(self) -> None:
+        retry_task = self._retry_task
+        self._retry_task = None
+        if retry_task is None or retry_task is asyncio.current_task():
+            return
+        await cancel_tasks((retry_task,))
+
+    async def _retry_after(self, generation: int, delay: float) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await self._twitch.transport.wait_for_delay(delay)
+        except ExitRequest:
+            return
+        finally:
+            if self._retry_task is current_task:
+                self._retry_task = None
+        if (
+            self._twitch._state_generation == generation
+            and self._twitch._state is State.INVENTORY_FETCH
+        ):
+            self._twitch.change_state(State.INVENTORY_FETCH)
+
+    def _record_campaign_deadlines(self) -> None:
+        now = datetime.now(timezone.utc)
+        for campaign in self._twitch.inventory:
+            remaining = (campaign.ends_at - now).total_seconds()
+            if (
+                campaign.finished
+                or not campaign.active
+                or not 0 < remaining <= 3600
+                or campaign.id in self._deadline_alerts
+            ):
+                continue
+            self._deadline_alerts.add(campaign.id)
+            self._twitch.history_event(
+                "campaign.deadline",
+                severity="warning",
+                data={
+                    "campaign_id": campaign.id,
+                    "campaign": campaign.name,
+                    "game": campaign.game.name,
+                    "remaining_minutes": max(1, floor(remaining / 60)),
+                },
+            )
+
+    async def sync_state(self) -> None:
+        state_generation = self._twitch._state_generation
+        self._twitch.gui.tray.change_icon("maint")
+        # Preserve the last-good snapshot until fetch_inventory commits.
+        await self._twitch.websocket.start()
+        try:
+            await self.fetch_inventory()
+        except (ExitRequest, LoginException, RequestInvalid):
+            raise
+        except RequestException as exc:
+            self._retry_attempt += 1
+            delay = min(
+                INVENTORY_RETRY_BASE
+                * (2 ** min(self._retry_attempt - 1, 10)),
+                INVENTORY_RETRY_MAX,
+            )
+            if self._retry_attempt == 1:
+                self._twitch.history_event(
+                    "inventory.sync_failed",
+                    severity="warning",
+                    data={"error_type": type(exc).__name__},
+                )
+            self._twitch.gui.status.update(
+                _("gui", "status", "inventory_retry").format(
+                    seconds=max(1, round(delay))
+                )
+            )
+            await self._cancel_retry_task()
+            self._retry_task = asyncio.create_task(
+                self._retry_after(state_generation, delay)
+            )
+            return
+        except Exception as exc:
+            self._twitch.history_event(
+                "inventory.sync_failed",
+                severity="warning",
+                data={"error_type": type(exc).__name__},
+            )
+            raise
+
+        await self._cancel_retry_task()
+        retry_attempts = self._retry_attempt
+        self._retry_attempt = 0
+        if retry_attempts:
+            self._twitch.history_event(
+                "inventory.sync_recovered",
+                data={"attempts": retry_attempts},
+            )
+        self._twitch.history_event(
+            "inventory.synced",
+            data={
+                "campaigns": len(self._twitch.inventory),
+                "drops": len(self._twitch._drops),
+            },
+        )
+        self._record_campaign_deadlines()
+        self._twitch.gui.set_games(
+            {campaign.game for campaign in self._twitch.inventory}
+        )
+        self._twitch.save()
+        if self._twitch._state_generation == state_generation:
+            self._twitch.change_state(State.GAMES_UPDATE)
 
     @staticmethod
     def _merge_data(primary_data: JsonType, secondary_data: JsonType) -> JsonType:

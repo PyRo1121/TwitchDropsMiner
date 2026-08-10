@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from math import floor
 from time import monotonic
 from functools import partial
 from collections import abc, deque, OrderedDict
@@ -39,8 +38,6 @@ from utils import (
 )
 from constants import (
     MAX_INT,
-    INVENTORY_RETRY_BASE,
-    INVENTORY_RETRY_MAX,
     State,
     ClientType,
     PriorityMode,
@@ -79,8 +76,6 @@ class Twitch:
         self._drops: dict[str, TimedDrop] = {}
         self._campaigns: dict[str, DropsCampaign] = {}
         self._inventory_generation = 0
-        self._inventory_retry_attempt = 0
-        self._inventory_retry_task: asyncio.Task[None] | None = None
         self._mnt_triggers: deque[datetime] = deque()
         # Client type, transport, and auth
         self._client_type: ClientInfo = ClientType.ANDROID_APP
@@ -108,7 +103,6 @@ class Twitch:
         )
         self._history_auth_recorded = False
         self._history_watch_signature: tuple[tuple[int, str], ...] | None = None
-        self._history_deadline_alerts: set[str] = set()
         self.watch_service: WatchService = WatchService(self)
         # Websocket
         self.websocket = WebsocketPool(self)
@@ -124,10 +118,6 @@ class Twitch:
         if self._mnt_task is not None:
             background_tasks.append(self._mnt_task)
             self._mnt_task = None
-        if self._inventory_retry_task is not None:
-            background_tasks.append(self._inventory_retry_task)
-            self._inventory_retry_task = None
-        self._inventory_retry_attempt = 0
         pending_channel_tasks = [
             channel._pending_stream_up
             for channel in self.channels.values()
@@ -136,6 +126,7 @@ class Twitch:
         for channel in self.channels.values():
             channel.remove()
         await cancel_tasks((*background_tasks, *pending_channel_tasks))
+        await self.inventory_service.close()
         # stop websocket, close transport, and persist cookies
         await self.websocket.stop(clear_topics=True)
         await self.transport.close()
@@ -224,7 +215,7 @@ class Twitch:
         self.history.start()
         self._history_auth_recorded = False
         self._history_watch_signature = None
-        self._history_deadline_alerts.clear()
+        self.inventory_service.start_session()
         refresh_history = getattr(self.gui, "history_changed", None)
         if refresh_history is not None:
             refresh_history()
@@ -321,7 +312,7 @@ class Twitch:
                 if self._handle_idle_state():
                     continue
             elif self._state is State.INVENTORY_FETCH:
-                await self._fetch_inventory_state()
+                await self.inventory_service.sync_state()
             elif self._state is State.GAMES_UPDATE:
                 await self._update_games_state()
                 full_cleanup = True
@@ -396,103 +387,6 @@ class Twitch:
         # clear the flag and wait until it's set again
         self._state_change.clear()
         return False
-
-    async def _retry_inventory_after(self, generation: int, delay: float) -> None:
-        current_task = asyncio.current_task()
-        try:
-            await self.transport.wait_for_delay(delay)
-        except ExitRequest:
-            return
-        finally:
-            if self._inventory_retry_task is current_task:
-                self._inventory_retry_task = None
-        if (
-            self._state_generation == generation
-            and self._state is State.INVENTORY_FETCH
-        ):
-            self.change_state(State.INVENTORY_FETCH)
-
-    async def _fetch_inventory_state(self) -> None:
-        state_generation = self._state_generation
-        self.gui.tray.change_icon("maint")
-        # Keep the last-good snapshot and watch assignments active while a
-        # replacement is fetched. InventoryService quiesces them at commit.
-        await self.websocket.start()
-        try:
-            await self.inventory_service.fetch_inventory()
-        except (ExitRequest, LoginException, RequestInvalid):
-            raise
-        except RequestException as exc:
-            self._inventory_retry_attempt += 1
-            delay = min(
-                INVENTORY_RETRY_BASE
-                * (2 ** min(self._inventory_retry_attempt - 1, 10)),
-                INVENTORY_RETRY_MAX,
-            )
-            if self._inventory_retry_attempt == 1:
-                self.history_event(
-                    "inventory.sync_failed",
-                    severity="warning",
-                    data={"error_type": type(exc).__name__},
-                )
-            self.gui.status.update(
-                _("gui", "status", "inventory_retry").format(
-                    seconds=max(1, round(delay))
-                )
-            )
-            retry_task = self._inventory_retry_task
-            if retry_task is not None:
-                await cancel_tasks((retry_task,))
-            self._inventory_retry_task = asyncio.create_task(
-                self._retry_inventory_after(state_generation, delay)
-            )
-            return
-        except Exception as exc:
-            self.history_event(
-                "inventory.sync_failed",
-                severity="warning",
-                data={"error_type": type(exc).__name__},
-            )
-            raise
-
-        retry_attempts = self._inventory_retry_attempt
-        self._inventory_retry_attempt = 0
-        if retry_attempts:
-            self.history_event(
-                "inventory.sync_recovered",
-                data={"attempts": retry_attempts},
-            )
-        self.history_event(
-            "inventory.synced",
-            data={"campaigns": len(self.inventory), "drops": len(self._drops)},
-        )
-        self._record_campaign_deadlines()
-        self.gui.set_games(set(campaign.game for campaign in self.inventory))
-        # Save state on every inventory fetch. Do not overwrite a newer state
-        # request (including a manual refresh requesting INVENTORY_FETCH again).
-        self.save()
-        if self._state_generation == state_generation:
-            self.change_state(State.GAMES_UPDATE)
-
-    def _record_campaign_deadlines(self) -> None:
-        now = datetime.now(timezone.utc)
-        for campaign in self.inventory:
-            remaining = (campaign.ends_at - now).total_seconds()
-            if campaign.finished or not campaign.active or not 0 < remaining <= 3600:
-                continue
-            if campaign.id in self._history_deadline_alerts:
-                continue
-            self._history_deadline_alerts.add(campaign.id)
-            self.history_event(
-                "campaign.deadline",
-                severity="warning",
-                data={
-                    "campaign_id": campaign.id,
-                    "campaign": campaign.name,
-                    "game": campaign.game.name,
-                    "remaining_minutes": max(1, floor(remaining / 60)),
-                },
-            )
 
     def _switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
         if self.settings.dump:

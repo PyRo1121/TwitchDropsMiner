@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -13,8 +14,8 @@ from constants import State
 from drop_event_service import DropEventService
 from exceptions import MinerException, RequestException
 from http_transport import HttpTransport
+from inventory_service import InventoryService
 from twitch import Twitch
-from utils import cancel_tasks
 
 
 class _Inventory:
@@ -79,8 +80,6 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         miner._state_change = asyncio.Event()
         miner.inventory = []
         miner._drops = {}
-        miner._inventory_retry_attempt = 0
-        miner._inventory_retry_task = None
         miner.gui = SimpleNamespace(
             tray=SimpleNamespace(change_icon=lambda _icon: None),
             set_games=lambda _games: None,
@@ -88,18 +87,23 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         miner.watch_service = SimpleNamespace(stop_watching=lambda: None)
         miner.websocket = SimpleNamespace(start=AsyncMock(return_value=None))
         miner.history_event = lambda *_args, **_kwargs: None
-        miner._record_campaign_deadlines = lambda: None
         miner.save = lambda: None
 
         async def fetch_inventory() -> None:
             miner.change_state(State.INVENTORY_FETCH)
 
-        miner.inventory_service = SimpleNamespace(fetch_inventory=fetch_inventory)
+        service = cast(Any, InventoryService(miner))
+        service.fetch_inventory = fetch_inventory
+        stale_retry = asyncio.create_task(asyncio.Event().wait())
+        service._retry_task = stale_retry
+        miner.inventory_service = service
 
-        await miner._fetch_inventory_state()
+        await service.sync_state()
 
         self.assertIs(miner._state, State.INVENTORY_FETCH)
         self.assertEqual(miner._state_generation, 2)
+        self.assertTrue(stale_retry.done())
+        self.assertIsNone(service._retry_task)
 
     async def test_transient_inventory_failure_preserves_snapshot_and_retries(self) -> None:
         miner = cast(Any, Twitch.__new__(Twitch))
@@ -110,8 +114,6 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         old_drops = {"old": object()}
         miner.inventory = old_inventory
         miner._drops = old_drops
-        miner._inventory_retry_attempt = 0
-        miner._inventory_retry_task = None
         statuses: list[str] = []
         events: list[str] = []
         delay_started = asyncio.Event()
@@ -129,23 +131,56 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         miner.websocket = SimpleNamespace(start=AsyncMock(return_value=None))
         miner.transport = SimpleNamespace(wait_for_delay=wait_for_delay)
-        miner.inventory_service = SimpleNamespace(fetch_inventory=fail_inventory)
+        service = cast(Any, InventoryService(miner))
+        service.fetch_inventory = fail_inventory
+        miner.inventory_service = service
         miner.history_event = lambda kind, **_kwargs: events.append(kind)
 
-        await miner._fetch_inventory_state()
+        await service.sync_state()
         await asyncio.wait_for(delay_started.wait(), timeout=1)
         try:
             self.assertIs(miner.inventory, old_inventory)
             self.assertIs(miner._drops, old_drops)
             self.assertEqual(events, ["inventory.sync_failed"])
             self.assertIn("retrying", statuses[-1].lower())
-            self.assertIsNotNone(miner._inventory_retry_task)
-            self.assertFalse(cast(asyncio.Task[Any], miner._inventory_retry_task).done())
+            self.assertIsNotNone(service._retry_task)
+            self.assertFalse(cast(asyncio.Task[Any], service._retry_task).done())
         finally:
-            retry_task = miner._inventory_retry_task
-            miner._inventory_retry_task = None
-            if retry_task is not None:
-                await cancel_tasks((retry_task,))
+            await service.close()
+            self.assertIsNone(service._retry_task)
+            self.assertEqual(service._retry_attempt, 0)
+
+    def test_campaign_deadline_alerts_are_deduplicated_per_session(self) -> None:
+        events: list[str] = []
+        campaign = SimpleNamespace(
+            id="campaign",
+            name="Campaign",
+            game=SimpleNamespace(name="Game"),
+            ends_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+            finished=False,
+            active=True,
+        )
+        miner = cast(
+            Any,
+            SimpleNamespace(
+                inventory=[campaign],
+                history_event=lambda kind, **_kwargs: events.append(kind),
+            ),
+        )
+        service = InventoryService(miner)
+
+        service._record_campaign_deadlines()
+        service._record_campaign_deadlines()
+        self.assertEqual(events, ["campaign.deadline"])
+
+        service.start_session()
+        service._record_campaign_deadlines()
+        self.assertEqual(events, ["campaign.deadline", "campaign.deadline"])
+
+    def test_coordinator_does_not_own_inventory_retry_lifecycle(self) -> None:
+        self.assertFalse(hasattr(Twitch, "_retry_inventory_after"))
+        self.assertFalse(hasattr(Twitch, "_fetch_inventory_state"))
+        self.assertFalse(hasattr(Twitch, "_record_campaign_deadlines"))
 
     async def test_inventory_to_shutdown_smoke_has_no_loop_errors(self) -> None:
         loop_errors: list[dict[str, Any]] = []
@@ -178,6 +213,11 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             inventory = cast(_Inventory, miner.gui.inv)
             self.assertEqual(inventory.snapshots, [[]])
             self.assertIsNotNone(miner._mnt_task)
+            async def wait_forever() -> None:
+                await asyncio.Event().wait()
+
+            retry_task = asyncio.create_task(wait_forever())
+            miner.inventory_service._retry_task = retry_task
 
             with patch("twitch.asyncio.sleep", new=AsyncMock(return_value=None)):
                 await miner.shutdown()
@@ -185,6 +225,8 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(miner.inventory, [])
             self.assertEqual(miner._drops, {})
+            self.assertTrue(retry_task.done())
+            self.assertIsNone(miner.inventory_service._retry_task)
             self.assertEqual(inventory.snapshots, [[], ()])
             self.assertEqual(loop_errors, [])
             self.assertEqual(gui.authenticated, [False])
