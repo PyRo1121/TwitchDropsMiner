@@ -106,6 +106,7 @@ class ChannelEventServiceTests(unittest.IsolatedAsyncioTestCase):
         channel = _Channel()
         states: list[State] = []
         watch_service = SimpleNamespace(
+            is_watching=Mock(return_value=True),
             can_watch=Mock(return_value=False),
             should_switch=Mock(return_value=False),
             watch=Mock(),
@@ -113,7 +114,6 @@ class ChannelEventServiceTests(unittest.IsolatedAsyncioTestCase):
         twitch = cast(
             Any,
             SimpleNamespace(
-                _watching_channels={channel.id: channel},
                 watch_service=watch_service,
                 print=Mock(),
                 change_state=states.append,

@@ -138,7 +138,7 @@ class ChannelEventService:
             else:
                 logger.log(CALL, "%s stays OFFLINE", channel.name)
         else:
-            is_watching = channel.id in self._twitch._watching_channels
+            is_watching = self._twitch.watch_service.is_watching(channel)
             if is_watching:
                 if not self._twitch.watch_service.can_watch(channel):
                     if stream_after is None:

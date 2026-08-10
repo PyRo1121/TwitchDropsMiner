@@ -16,12 +16,12 @@ from constants import (
 )
 from exceptions import GQLException, RequestException
 from translate import _
-from utils import cancel_tasks, require_int, task_wrapper, timestamp
+from utils import AwaitableValue, cancel_tasks, require_int, task_wrapper, timestamp
 
 if TYPE_CHECKING:
     from channel import Channel
     from constants import JsonType
-    from inventory import TimedDrop
+    from inventory import DropsCampaign, TimedDrop
     from twitch import Twitch
 
 logger = logging.getLogger("TwitchDrops")
@@ -32,16 +32,50 @@ class WatchService:
 
     def __init__(self, twitch: Twitch) -> None:
         self._twitch = twitch
+        self.primary_channel: AwaitableValue[Channel] = AwaitableValue()
+        self._watching_channels: OrderedDict[int, Channel] = OrderedDict()
+        self._drop_ids: dict[int, str] = {}
+        self._tasks: dict[int, asyncio.Task[None]] = {}
+        self._restart_events: dict[int, asyncio.Event] = {}
+        self._claim_cooldowns: dict[str, float] = {}
+        self._completed_drop_ids: set[str] = set()
+        self._channel_cooldowns: dict[int, float] = {}
+        self._resync_cooldowns: dict[str, float] = {}
+        self._generation = 0
+        self._history_signature: tuple[tuple[int, str], ...] | None = None
+        self._dual_watch_enabled = False
         self._cooldown_handles: dict[int, asyncio.TimerHandle] = {}
+        self.start_session()
+
+    def start_session(self) -> None:
+        self._history_signature = None
+        settings = getattr(self._twitch, "settings", None)
+        self._dual_watch_enabled = bool(
+            getattr(settings, "experimental_dual_watch", False)
+        )
+
+    async def close(self) -> None:
+        await self.stop_watching_and_wait()
+        self.reset()
+
+    def retain_claim_cooldowns(self, drops: dict[str, TimedDrop]) -> None:
+        now = monotonic()
+        self._claim_cooldowns = {
+            drop_id: blocked_until
+            for drop_id, blocked_until in self._claim_cooldowns.items()
+            if blocked_until > now
+            and drop_id in drops
+            and not drops[drop_id].is_claimed
+        }
 
     def reset(self) -> None:
         for handle in self._cooldown_handles.values():
             handle.cancel()
         self._cooldown_handles.clear()
-        self._twitch._watch_channel_cooldowns.clear()
-        self._twitch._watch_claim_cooldowns.clear()
-        self._twitch._watch_resync_cooldowns.clear()
-        self._twitch._watch_completed_drop_ids.clear()
+        self._channel_cooldowns.clear()
+        self._claim_cooldowns.clear()
+        self._resync_cooldowns.clear()
+        self._completed_drop_ids.clear()
 
     async def _watch_sleep(self, event: asyncio.Event, delay: float) -> bool:
         # Each watched channel owns an event so a restart wakes every watch loop.
@@ -53,39 +87,105 @@ class WatchService:
             await cancel_tasks((wait_task,))
             event.clear()
 
-    def _display_primary_drop(self, drop: TimedDrop) -> None:
-        primary = self._twitch.watching_channel.get_with_default(None)
-        if primary is not None and self._twitch._watch_drop_ids.get(primary.id) == drop.id:
+    def display_primary_drop(self, drop: TimedDrop) -> None:
+        primary = self.primary_channel.get_with_default(None)
+        if primary is not None and self._drop_ids.get(primary.id) == drop.id:
             drop.display()
 
-    def _mark_watch_completed_drop(self, drop_id: str) -> None:
-        completed_drop_ids = getattr(self._twitch, "_watch_completed_drop_ids", None)
-        if completed_drop_ids is None:
-            completed_drop_ids = set()
-            self._twitch._watch_completed_drop_ids = completed_drop_ids
-        completed_drop_ids.add(drop_id)
+    def mark_completed_drop(self, drop_id: str) -> None:
+        self._completed_drop_ids.add(drop_id)
 
     def _request_watch_resync(self, key: str, seconds: float = 300) -> bool:
-        resync_cooldowns = getattr(self._twitch, "_watch_resync_cooldowns", None)
-        if resync_cooldowns is None:
-            resync_cooldowns = {}
-            self._twitch._watch_resync_cooldowns = resync_cooldowns
         now = monotonic()
-        if resync_cooldowns.get(key, 0) > now:
+        if self._resync_cooldowns.get(key, 0) > now:
             return False
-        resync_cooldowns[key] = now + seconds
+        self._resync_cooldowns[key] = now + seconds
         self._twitch.change_state(State.INVENTORY_FETCH)
         return True
 
+    def is_watching(self, channel: Channel) -> bool:
+        return channel.id in self._watching_channels
+
+    def assigned_channels(self, drop_id: str) -> list[Channel]:
+        return [
+            channel
+            for channel in self._watching_channels.values()
+            if self._drop_ids.get(channel.id) == drop_id
+        ]
+
+    def adopt_unassigned_drop(
+        self,
+        drop_id: str,
+        drop: TimedDrop | None,
+    ) -> list[Channel]:
+        if drop_id in self._completed_drop_ids:
+            logger.log(
+                CALL,
+                "Ignoring an event for a previously completed drop: %s",
+                drop_id,
+            )
+            return []
+        candidates = (
+            [
+                channel
+                for channel in self._watching_channels.values()
+                if drop.can_earn(channel)
+            ]
+            if drop is not None
+            else []
+        )
+        if drop is None or len(candidates) != 1:
+            if self._request_watch_resync(f"unassigned-drop:{drop_id}"):
+                logger.warning(
+                    "Ignoring an event for an unassigned drop: %s",
+                    drop_id,
+                )
+            return []
+
+        channel = candidates[0]
+        previous_drop_id = self._drop_ids.get(channel.id)
+        self._drop_ids[channel.id] = drop_id
+        restart_event = self._restart_events.get(channel.id)
+        if restart_event is not None:
+            restart_event.set()
+        logger.info(
+            "Adopted unassigned drop event for %s: %s -> %s",
+            channel.name,
+            previous_drop_id,
+            drop_id,
+        )
+        return [channel]
+
+    def continue_after_claim(
+        self,
+        claimed: bool,
+        campaign: DropsCampaign,
+        watching_channels: list[Channel],
+    ) -> bool:
+        if claimed and any(
+            self.can_watch(channel) for channel in self._watching_channels.values()
+        ):
+            primary = self.primary_channel.get_with_default(None)
+            if primary is not None:
+                self.watch(primary, update_status=False)
+                self.restart_watching()
+                return True
+        elif not claimed and any(
+            campaign.can_earn(channel) for channel in watching_channels
+        ):
+            self.restart_watching()
+            return True
+        return False
+
     def _disable_dual_watch_if_secondary(self, channel: Channel) -> None:
-        primary = self._twitch.watching_channel.get_with_default(None)
+        primary = self.primary_channel.get_with_default(None)
         if (
             primary is not None
             and primary.id != channel.id
-            and len(self._twitch._watching_channels) > 1
-            and self._twitch._dual_watch_enabled
+            and len(self._watching_channels) > 1
+            and self._dual_watch_enabled
         ):
-            self._twitch._dual_watch_enabled = False
+            self._dual_watch_enabled = False
             logger.warning(
                 "Disabling the second watch target after unscoped progress for %s",
                 channel.name,
@@ -93,7 +193,7 @@ class WatchService:
 
     async def _reconcile_watch_progress(self, channel: Channel) -> None:
         """Refresh assigned progress from Twitch's authoritative viewer session."""
-        if self._twitch._watch_drop_ids.get(channel.id) is None:
+        if self._drop_ids.get(channel.id) is None:
             return
         try:
             context = await self._twitch.transport.gql_request(
@@ -133,10 +233,10 @@ class WatchService:
         # a stale session for a different channel even when channelID was supplied.
         # The Drop ID is the safest discriminator, followed by the reported channel.
         # A mismatch is therefore advisory and must not restart the productive target.
-        if drop_id in getattr(self._twitch, "_watch_completed_drop_ids", set()):
+        if drop_id in self._completed_drop_ids:
             stale_channel: Channel | None = channel
             if reported_channel_id is not None:
-                stale_channel = self._twitch._watching_channels.get(reported_channel_id)
+                stale_channel = self._watching_channels.get(reported_channel_id)
                 if stale_channel is None:
                     logger.log(
                         CALL,
@@ -160,13 +260,13 @@ class WatchService:
             assigned_owner = next(
                 (
                     candidate
-                    for candidate, assigned in self._twitch._watch_drop_ids.items()
-                    if assigned == drop_id and candidate in self._twitch._watching_channels
+                    for candidate, assigned in self._drop_ids.items()
+                    if assigned == drop_id and candidate in self._watching_channels
                 ),
                 None,
             )
             if assigned_owner is not None:
-                target = self._twitch._watching_channels[assigned_owner]
+                target = self._watching_channels[assigned_owner]
                 logger.log(
                     CALL,
                     "Routing current drop %s from %s to assigned channel %s",
@@ -174,8 +274,8 @@ class WatchService:
                     channel.name,
                     target.name,
                 )
-            elif reported_channel_id in self._twitch._watching_channels:
-                target = self._twitch._watching_channels[reported_channel_id]
+            elif reported_channel_id in self._watching_channels:
+                target = self._watching_channels[reported_channel_id]
                 logger.log(
                     CALL,
                     "Routing current drop response from %s to reported channel %s",
@@ -190,7 +290,7 @@ class WatchService:
                 )
                 return
 
-        assigned_drop_id = self._twitch._watch_drop_ids.get(target.id)
+        assigned_drop_id = self._drop_ids.get(target.id)
         if assigned_drop_id is None:
             return
         current_minutes = drop_data.get("currentMinutesWatched")
@@ -218,7 +318,7 @@ class WatchService:
         if drop_id != assigned_drop_id:
             assigned_elsewhere = any(
                 other_id != target.id and assigned == drop_id
-                for other_id, assigned in self._twitch._watch_drop_ids.items()
+                for other_id, assigned in self._drop_ids.items()
             )
             if assigned_elsewhere:
                 logger.log(
@@ -237,8 +337,8 @@ class WatchService:
                 self._disable_dual_watch_if_secondary(target)
                 self._block_watch_channel(target.id)
                 return
-            self._twitch._watch_drop_ids[target.id] = drop_id
-            restart_event = self._twitch._watch_restart_events.get(target.id)
+            self._drop_ids[target.id] = drop_id
+            restart_event = self._restart_events.get(target.id)
             if restart_event is not None:
                 restart_event.set()
             logger.info(
@@ -249,7 +349,7 @@ class WatchService:
             )
         if gql_drop.is_claimed:
             logger.info("Twitch reported an already-claimed drop for %s", target.name)
-            self._mark_watch_completed_drop(drop_id)
+            self.mark_completed_drop(drop_id)
             self._disable_dual_watch_if_secondary(target)
             self._block_watch_channel(target.id)
             self._request_watch_resync(f"claimed-current-drop:{drop_id}")
@@ -278,18 +378,18 @@ class WatchService:
                 claimed = False
             self._block_watch_channel(target.id)
             if claimed:
-                self._mark_watch_completed_drop(drop_id)
-                self._twitch._watch_claim_cooldowns.pop(drop_id, None)
+                self.mark_completed_drop(drop_id)
+                self._claim_cooldowns.pop(drop_id, None)
                 logger.info("Claimed completed current drop %s", drop_id)
             else:
                 # Do not let the normal inventory claim pass immediately retry
                 # the same synthetic claim ID; retry it only after a cooldown.
                 gql_drop.claim_id = None
-                self._twitch._watch_claim_cooldowns[drop_id] = monotonic() + 300
+                self._claim_cooldowns[drop_id] = monotonic() + 300
                 logger.warning("Could not claim completed current drop %s", drop_id)
             self._request_watch_resync(f"completed-current-drop:{drop_id}")
             return
-        self._display_primary_drop(gql_drop)
+        self.display_primary_drop(gql_drop)
         if gql_drop.current_minutes > previous_minutes:
             logger.log(
                 CALL,
@@ -307,9 +407,9 @@ class WatchService:
         interval = WATCH_INTERVAL.total_seconds()
         try:
             while (
-                generation == self._twitch._watch_generation
-                and self._twitch._watching_channels.get(channel.id) is channel
-                and channel.id in self._twitch._watch_drop_ids
+                generation == self._generation
+                and self._watching_channels.get(channel.id) is channel
+                and channel.id in self._drop_ids
             ):
                 if not channel.online or not self.can_watch(channel):
                     self._twitch.change_state(State.CHANNEL_SWITCH)
@@ -320,7 +420,7 @@ class WatchService:
                     logger.log(CALL, "Watch request failed for channel: %s", channel.name)
                 if await self._watch_sleep(restart_event, 20):
                     continue
-                primary = self._twitch.watching_channel.get_with_default(None)
+                primary = self.primary_channel.get_with_default(None)
                 if channel is not primary or self._twitch.gui.progress.minute_almost_done():
                     await self._reconcile_watch_progress(channel)
                 await self._watch_sleep(
@@ -341,8 +441,8 @@ class WatchService:
             self._twitch.change_state(State.CHANNEL_SWITCH)
 
     def _watch_task_done(self, channel_id: int, task: asyncio.Task[None]) -> None:
-        if self._twitch._watch_tasks.get(channel_id) is task:
-            del self._twitch._watch_tasks[channel_id]
+        if self._tasks.get(channel_id) is task:
+            del self._tasks[channel_id]
         if not task.cancelled() and task.exception() is not None:
             logger.error("Watch task failed for channel %s", channel_id)
 
@@ -366,7 +466,7 @@ class WatchService:
         self._cooldown_handles[channel_id] = handle
 
     def _release_watch_channel(self, channel_id: int, blocked_until: float) -> None:
-        channel_cooldowns = getattr(self._twitch, "_watch_channel_cooldowns", {})
+        channel_cooldowns = self._channel_cooldowns
         if channel_cooldowns.get(channel_id) != blocked_until:
             return
         self._cooldown_handles.pop(channel_id, None)
@@ -378,23 +478,19 @@ class WatchService:
         self._twitch.change_state(State.CHANNEL_SWITCH)
 
     def _block_watch_channel(self, channel_id: int, seconds: float = 300) -> None:
-        channel_cooldowns = getattr(self._twitch, "_watch_channel_cooldowns", None)
-        if channel_cooldowns is None:
-            channel_cooldowns = {}
-            self._twitch._watch_channel_cooldowns = channel_cooldowns
         blocked_until = max(
-            channel_cooldowns.get(channel_id, 0),
+            self._channel_cooldowns.get(channel_id, 0),
             monotonic() + seconds,
         )
-        channel_cooldowns[channel_id] = blocked_until
+        self._channel_cooldowns[channel_id] = blocked_until
         self._schedule_channel_release(channel_id, blocked_until)
 
     def _eligible_drops_for_channel(self, channel: Channel) -> list[TimedDrop]:
         candidates: list[TimedDrop] = []
         seen: set[str] = set()
         now = monotonic()
-        claim_cooldowns = getattr(self._twitch, "_watch_claim_cooldowns", {})
-        completed_drop_ids = getattr(self._twitch, "_watch_completed_drop_ids", set())
+        claim_cooldowns = self._claim_cooldowns
+        completed_drop_ids = self._completed_drop_ids
         for campaign in self._twitch.inventory:
             if not campaign.can_earn(channel):
                 continue
@@ -423,7 +519,7 @@ class WatchService:
             ordered.remove(preferred)
             ordered.insert(0, preferred)
         now = monotonic()
-        channel_cooldowns = getattr(self._twitch, "_watch_channel_cooldowns", {})
+        channel_cooldowns = self._channel_cooldowns
         for candidate in ordered:
             blocked_until = channel_cooldowns.get(candidate.id)
             if blocked_until is not None and blocked_until <= now:
@@ -438,7 +534,7 @@ class WatchService:
         for first_index, (first_channel, first_drops) in enumerate(options):
             for first_drop in first_drops:
                 first_assignment = (first_channel, first_drop)
-                if MAX_WATCH_CHANNELS == 1 or not getattr(self._twitch, "_dual_watch_enabled", True):
+                if MAX_WATCH_CHANNELS == 1 or not self._dual_watch_enabled:
                     return [first_assignment]
                 for second_channel, second_drops in options[first_index + 1:]:
                     if second_channel.game == first_channel.game:
@@ -460,7 +556,7 @@ class WatchService:
         update_status: bool = True,
     ) -> None:
         max_targets = (
-            MAX_WATCH_CHANNELS if getattr(self._twitch, "_dual_watch_enabled", True) else 1
+            MAX_WATCH_CHANNELS if self._dual_watch_enabled else 1
         )
         assignments = assignments[:max_targets]
         channels = [channel for channel, _drop in assignments]
@@ -468,31 +564,31 @@ class WatchService:
         target_drop_ids = {channel.id: drop.id for channel, drop in assignments}
         generation = self._bump_watch_generation()
         self._cancel_watch_tasks()
-        self._twitch._watching_channels = targets
-        self._twitch._watch_drop_ids = target_drop_ids
+        self._watching_channels = targets
+        self._drop_ids = target_drop_ids
         for channel in channels:
             event = asyncio.Event()
-            self._twitch._watch_restart_events[channel.id] = event
+            self._restart_events[channel.id] = event
             task = asyncio.create_task(
                 self._watch_channel_loop(channel, event, generation)
             )
-            self._twitch._watch_tasks[channel.id] = task
+            self._tasks[channel.id] = task
             task.add_done_callback(
                 lambda completed, channel_id=channel.id: self._watch_task_done(
                     channel_id, completed
                 )
             )
         primary = channels[0] if channels else None
-        history_signature = getattr(self._twitch, "_history_watch_signature", None)
+        history_signature = self._history_signature
         if primary is None:
             if history_signature is not None:
                 self._twitch.history_event(
                     "watch.stopped",
                     data={"targets": len(history_signature)},
                 )
-                self._twitch._history_watch_signature = None
-            self._twitch._watch_drop_ids.clear()
-            self._twitch.watching_channel.clear()
+                self._history_signature = None
+            self._drop_ids.clear()
+            self.primary_channel.clear()
             self._twitch.gui.channels.clear_watching()
             return
         signature = tuple((channel.id, drop.id) for channel, drop in assignments)
@@ -504,8 +600,8 @@ class WatchService:
                     "targets": len(signature),
                 },
             )
-            self._twitch._history_watch_signature = signature
-        self._twitch.watching_channel.set(primary)
+            self._history_signature = signature
+        self.primary_channel.set(primary)
         set_watching_channels = getattr(self._twitch.gui.channels, "set_watching_channels", None)
         if set_watching_channels is not None:
             set_watching_channels(channels)
@@ -582,19 +678,19 @@ class WatchService:
 
     def should_switch(self, channel: Channel) -> bool:
         """Return whether a channel should enter the distinct watch set."""
-        if not self.can_watch(channel) or channel.id in self._twitch._watching_channels:
+        if not self.can_watch(channel) or channel.id in self._watching_channels:
             return False
-        watching_channel = self._twitch.watching_channel.get_with_default(None)
+        watching_channel = self.primary_channel.get_with_default(None)
         if watching_channel is None or not self.can_watch(watching_channel):
             return True
         selected = self._select_watch_channels(preferred=channel)
         if channel.id not in {candidate.id for candidate in selected}:
             return False
-        if len(self._twitch._watching_channels) < MAX_WATCH_CHANNELS:
+        if len(self._watching_channels) < MAX_WATCH_CHANNELS:
             return True
         get_priority = self._twitch.channel_directory_service.get_priority
         current_worst = max(
-            self._twitch._watching_channels.values(),
+            self._watching_channels.values(),
             key=lambda candidate: (get_priority(candidate), not candidate.acl_based),
         )
         candidate_priority = get_priority(channel)
@@ -604,46 +700,94 @@ class WatchService:
             and channel.acl_based > current_worst.acl_based
         )
 
-    def watch(self, channel: Channel, *, update_status: bool = True):
+    def handle_idle_state(self) -> bool:
+        if self._twitch.settings.dump:
+            self._twitch.gui.close()
+            return True
+        self._twitch.gui.tray.change_icon("idle")
+        self._twitch.gui.status.update(_("gui", "status", "idle"))
+        self.stop_watching()
+        self._twitch._state_change.clear()
+        return False
+
+    def switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
+        if self._twitch.settings.dump:
+            self._twitch.gui.close()
+            return True
+        self._twitch.gui.status.update(_("gui", "status", "switching"))
+        selected_channel = self._twitch.gui.channels.get_selection()
+        new_watching = None
+        if selected_channel is not None and self.can_watch(selected_channel):
+            new_watching = selected_channel
+        else:
+            for channel in sorted(
+                channels.values(),
+                key=self._twitch.channel_directory_service.get_priority,
+            ):
+                if self.should_switch(channel):
+                    new_watching = channel
+                    break
+
+        watching_channel = self.primary_channel.get_with_default(None)
+        if new_watching is not None:
+            self.watch(new_watching)
+            self._twitch._state_change.clear()
+        elif watching_channel is not None and self.can_watch(watching_channel):
+            self.watch(watching_channel, update_status=False)
+            self._twitch.gui.status.update(
+                _("status", "watching").format(channel=watching_channel.name)
+            )
+            self._twitch._state_change.clear()
+        else:
+            self._twitch.print(_("status", "no_channel"))
+            self._twitch.history_event(
+                "watch.unavailable",
+                severity="warning",
+                data={"reason": "no_eligible_channel"},
+            )
+            self._twitch.change_state(State.IDLE)
+        return False
+
+    def watch(self, channel: Channel, *, update_status: bool = True) -> None:
         self._twitch.gui.tray.change_icon("active")
         assignments = self._select_watch_assignments(preferred=channel)
         self._apply_watch_assignments(assignments, update_status=update_status)
 
     def _bump_watch_generation(self) -> int:
-        self._twitch._watch_generation += 1
-        return self._twitch._watch_generation
+        self._generation += 1
+        return self._generation
 
     def _cancel_watch_tasks(self) -> None:
-        for event in self._twitch._watch_restart_events.values():
+        for event in self._restart_events.values():
             event.set()
-        for task in self._twitch._watch_tasks.values():
+        for task in self._tasks.values():
             task.cancel()
-        self._twitch._watch_tasks.clear()
-        self._twitch._watch_restart_events.clear()
+        self._tasks.clear()
+        self._restart_events.clear()
 
     async def stop_watching_and_wait(self) -> None:
         """Stop every watch loop and consume cancellation before returning."""
-        tasks = tuple(self._twitch._watch_tasks.values())
+        tasks = tuple(self._tasks.values())
         self.stop_watching()
         await cancel_tasks(tasks)
 
-    def stop_watching(self):
-        history_signature = getattr(self._twitch, "_history_watch_signature", None)
+    def stop_watching(self) -> None:
+        history_signature = self._history_signature
         if history_signature is not None:
             self._twitch.history_event(
                 "watch.stopped",
                 data={"targets": len(history_signature)},
             )
-            self._twitch._history_watch_signature = None
+            self._history_signature = None
         self._twitch.gui.clear_drop()
         self._bump_watch_generation()
         self._cancel_watch_tasks()
-        self._twitch._watching_channels.clear()
-        self._twitch._watch_drop_ids.clear()
-        self._twitch.watching_channel.clear()
+        self._watching_channels.clear()
+        self._drop_ids.clear()
+        self.primary_channel.clear()
         self._twitch.gui.channels.clear_watching()
 
-    def restart_watching(self):
+    def restart_watching(self) -> None:
         self._twitch.gui.progress.stop_timer()
-        for event in self._twitch._watch_restart_events.values():
+        for event in self._restart_events.values():
             event.set()

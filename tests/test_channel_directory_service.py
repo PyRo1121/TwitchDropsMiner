@@ -127,15 +127,15 @@ class ChannelDirectoryServiceTests(unittest.IsolatedAsyncioTestCase):
         watch_service = SimpleNamespace(
             stop_watching_and_wait=AsyncMock(),
             can_watch=Mock(return_value=True),
+            primary_channel=SimpleNamespace(
+                get_with_default=lambda default: default,
+            ),
         )
         twitch = cast(
             Any,
             SimpleNamespace(
                 wanted_games=[game],
                 inventory=campaigns,
-                watching_channel=SimpleNamespace(
-                    get_with_default=lambda default: default,
-                ),
                 gui=SimpleNamespace(
                     status=SimpleNamespace(update=Mock()),
                     channels=SimpleNamespace(clear=Mock()),

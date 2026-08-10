@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -23,11 +22,9 @@ class DropEventServiceTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(
                 _inventory_generation=1,
                 _drops={},
-                _watching_channels=OrderedDict(),
-                _watch_drop_ids={},
-                _watch_completed_drop_ids=set(),
                 watch_service=SimpleNamespace(
-                    _request_watch_resync=Mock(return_value=False)
+                    assigned_channels=Mock(return_value=[]),
+                    adopt_unassigned_drop=Mock(return_value=[]),
                 ),
             ),
         )
@@ -43,7 +40,8 @@ class DropEventServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(message=message):
                 await service.process_drops(42, cast(Any, message))
 
-        twitch.watch_service._request_watch_resync.assert_not_called()
+        twitch.watch_service.assigned_channels.assert_not_called()
+        twitch.watch_service.adopt_unassigned_drop.assert_not_called()
 
     async def test_unknown_assigned_drop_requests_inventory_refresh(self) -> None:
         channel = _Channel()
@@ -53,9 +51,9 @@ class DropEventServiceTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(
                 _inventory_generation=1,
                 _drops={},
-                _watching_channels=OrderedDict(((channel.id, channel),)),
-                _watch_drop_ids={channel.id: "unknown-drop"},
-                _watch_completed_drop_ids=set(),
+                watch_service=SimpleNamespace(
+                    assigned_channels=Mock(return_value=[channel]),
+                ),
                 change_state=states.append,
             ),
         )

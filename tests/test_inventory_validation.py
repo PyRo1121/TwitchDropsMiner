@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from exceptions import RequestException
 from inventory import DropsCampaign
-from inventory_service import InventoryService
+from inventory_snapshot import build_campaigns
 
 
 def _stamp(offset_minutes: int) -> str:
@@ -91,11 +91,11 @@ class InventoryValidationTests(unittest.TestCase):
 
     def test_one_malformed_campaign_does_not_discard_valid_campaigns(self) -> None:
         twitch = _Twitch()
-        service = InventoryService(cast(Any, twitch))
         malformed = _campaign_data()
         malformed["status"] = "MYSTERY"
 
-        campaigns = service._build_campaigns(
+        campaigns = build_campaigns(
+            cast(Any, twitch),
             {"campaign": _campaign_data(), "malformed": malformed},
             {},
         )
@@ -105,12 +105,11 @@ class InventoryValidationTests(unittest.TestCase):
 
     def test_snapshot_with_no_valid_campaign_is_rejected(self) -> None:
         twitch = _Twitch()
-        service = InventoryService(cast(Any, twitch))
         malformed = _campaign_data()
         malformed["status"] = "MYSTERY"
 
         with self.assertRaisesRegex(RequestException, "Every Twitch campaign"):
-            service._build_campaigns({"malformed": malformed}, {})
+            build_campaigns(cast(Any, twitch), {"malformed": malformed}, {})
 
     def test_boolean_fields_reject_strings(self) -> None:
         mutations = (

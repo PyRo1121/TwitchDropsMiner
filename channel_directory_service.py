@@ -184,7 +184,9 @@ class ChannelDirectoryService:
     ) -> DropsCampaign | None:
         if not self._twitch.wanted_games:
             return None
-        watching_channel = self._twitch.watching_channel.get_with_default(channel)
+        watching_channel = self._twitch.watch_service.primary_channel.get_with_default(
+            channel
+        )
         if watching_channel is None:
             return None
         campaigns = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,6 +17,7 @@ from exceptions import MinerException, RequestException
 from http_transport import HttpTransport
 from inventory_service import InventoryService
 from twitch import Twitch
+from watch_service import WatchService
 
 
 class _Inventory:
@@ -150,6 +152,57 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(service._retry_task)
             self.assertEqual(service._retry_attempt, 0)
 
+    def test_watch_service_owns_idle_and_channel_switch_policy(self) -> None:
+        selected_channel = SimpleNamespace(id=7, name="selected")
+        state_change = asyncio.Event()
+        state_change.set()
+        gui = SimpleNamespace(
+            close=Mock(),
+            clear_drop=Mock(),
+            tray=SimpleNamespace(change_icon=Mock()),
+            status=SimpleNamespace(update=Mock()),
+            channels=SimpleNamespace(
+                get_selection=Mock(return_value=selected_channel),
+                clear_watching=Mock(),
+            ),
+        )
+        miner = cast(
+            Any,
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    dump=False,
+                    experimental_dual_watch=False,
+                ),
+                gui=gui,
+                _state_change=state_change,
+                channel_directory_service=SimpleNamespace(
+                    get_priority=Mock(return_value=0),
+                ),
+                print=Mock(),
+                history_event=Mock(),
+                change_state=Mock(),
+            ),
+        )
+        service = cast(Any, WatchService(miner))
+        service.can_watch = Mock(return_value=True)
+        service.watch = Mock()
+
+        self.assertFalse(
+            service.switch_channel(
+                cast(OrderedDict[int, Any], OrderedDict(((7, selected_channel),)))
+            )
+        )
+        service.watch.assert_called_once_with(selected_channel)
+        self.assertFalse(state_change.is_set())
+
+        state_change.set()
+        self.assertFalse(service.handle_idle_state())
+        gui.tray.change_icon.assert_called_with("idle")
+        gui.clear_drop.assert_called_once_with()
+        self.assertFalse(state_change.is_set())
+        self.assertFalse(hasattr(Twitch, "_handle_idle_state"))
+        self.assertFalse(hasattr(Twitch, "_switch_channel"))
+
     async def test_game_selection_is_atomic_and_does_not_reorder_inventory(self) -> None:
         class GameStub:
             def __init__(self, name: str) -> None:
@@ -200,7 +253,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     priority_mode=PriorityMode.ENDING_SOONEST,
                 ),
                 watch_service=SimpleNamespace(
-                    _mark_watch_completed_drop=completed,
+                    mark_completed_drop=completed,
                 ),
             ),
         )

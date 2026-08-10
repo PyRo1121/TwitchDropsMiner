@@ -10,6 +10,11 @@ from typing import Any, cast
 from exceptions import RequestException
 from inventory import DropsCampaign
 from inventory_service import InventoryService
+from inventory_snapshot import (
+    parse_available_campaigns,
+    parse_inventory_snapshot,
+    prepare_inventory,
+)
 from twitch import Twitch
 from utils import cancel_tasks
 
@@ -47,11 +52,19 @@ class _InventoryAdapter:
 
 
 class _WatchAdapter:
-    def __init__(self) -> None:
+    def __init__(self, claim_cooldowns: dict[str, float]) -> None:
         self.stops = 0
+        self.claim_cooldowns = claim_cooldowns
 
     async def stop_watching_and_wait(self) -> None:
         self.stops += 1
+
+    def retain_claim_cooldowns(self, drops: dict[str, Any]) -> None:
+        self.claim_cooldowns = {
+            drop_id: blocked_until
+            for drop_id, blocked_until in self.claim_cooldowns.items()
+            if drop_id in drops and not drops[drop_id].is_claimed
+        }
 
     async def _maintenance_task(self) -> None:
         await asyncio.Event().wait()
@@ -75,7 +88,6 @@ class InventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         miner._campaigns = {old_campaign.id: cast(Any, old_campaign)}
         miner._inventory_generation = 1
         miner._mnt_triggers = deque(old_campaign.time_triggers)
-        miner._watch_claim_cooldowns = {old_drop.id: 99999999999.0}
         miner._mnt_task = None
         miner.websocket = cast(Any, _WebsocketAdapter())
         miner.gui = cast(
@@ -83,7 +95,10 @@ class InventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(inv=adapter, close_requested=False),
         )
         miner.inventory_service = InventoryService(miner)
-        miner.watch_service = cast(Any, _WatchAdapter())
+        miner.watch_service = cast(
+            Any,
+            _WatchAdapter({old_drop.id: 99999999999.0}),
+        )
         miner.history_event = lambda *_args, **_kwargs: None
         return miner, old_drop, old_campaign
 
@@ -125,7 +140,10 @@ class InventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(miner._drops, {"new-drop": new_drop})
             self.assertEqual(miner._inventory_generation, 2)
             self.assertEqual(cast(Any, miner.websocket).cancellations, 1)
-            self.assertNotIn("old-drop", miner._watch_claim_cooldowns)
+            self.assertNotIn(
+                "old-drop",
+                cast(_WatchAdapter, miner.watch_service).claim_cooldowns,
+            )
             self.assertTrue(statuses[-1].endswith("(1/1)"))
         finally:
             if miner._mnt_task is not None:
@@ -139,24 +157,22 @@ class InventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with self.assertRaisesRegex(RequestException, "duplicate drop ID"):
-            miner.inventory_service._prepare_inventory(
-                cast(list[DropsCampaign], campaigns)
-            )
+            prepare_inventory(cast(list[DropsCampaign], campaigns))
 
     def test_malformed_remote_lists_are_rejected(self) -> None:
         with self.assertRaisesRegex(RequestException, "campaign list"):
-            InventoryService._parse_available_campaigns(
+            parse_available_campaigns(
                 {"data": {"currentUser": {"dropCampaigns": {}}}}
             )
         with self.assertRaisesRegex(RequestException, "in-progress campaign list"):
-            InventoryService._parse_inventory_snapshot(
+            parse_inventory_snapshot(
                 {
                     "dropCampaignsInProgress": {},
                     "gameEventDrops": [],
                 }
             )
         with self.assertRaisesRegex(RequestException, "claimed-benefit list"):
-            InventoryService._parse_inventory_snapshot(
+            parse_inventory_snapshot(
                 {
                     "dropCampaignsInProgress": [],
                     "gameEventDrops": {},

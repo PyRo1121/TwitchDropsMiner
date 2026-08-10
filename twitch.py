@@ -33,7 +33,6 @@ from utils import (
     timestamp,
     cancel_tasks,
     open_dump,
-    AwaitableValue,
     redact_log_value,
 )
 from constants import (
@@ -86,21 +85,7 @@ class Twitch:
         self.gui: GuiPort = gui_factory(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
-        self.watching_channel: AwaitableValue[Channel] = AwaitableValue()
-        self._watching_channels: OrderedDict[int, Channel] = OrderedDict()
-        self._watch_drop_ids: dict[int, str] = {}
-        self._watch_tasks: dict[int, asyncio.Task[None]] = {}
-        self._watch_restart_events: dict[int, asyncio.Event] = {}
-        self._watch_claim_cooldowns: dict[str, float] = {}
-        self._watch_completed_drop_ids: set[str] = set()
-        self._watch_channel_cooldowns: dict[int, float] = {}
-        self._watch_resync_cooldowns: dict[str, float] = {}
-        self._watch_generation = 0
-        self._dual_watch_enabled = bool(
-            getattr(settings, "experimental_dual_watch", False)
-        )
         self._history_auth_recorded = False
-        self._history_watch_signature: tuple[tuple[int, str], ...] | None = None
         self.watch_service: WatchService = WatchService(self)
         # Websocket
         self.websocket = WebsocketPool(self)
@@ -110,9 +95,8 @@ class Twitch:
     async def shutdown(self) -> None:
         start_time = monotonic()
         self._inventory_generation += 1
-        background_tasks: list[asyncio.Task[Any]] = list(self._watch_tasks.values())
-        self.watch_service.stop_watching()
-        self.watch_service.reset()
+        background_tasks: list[asyncio.Task[Any]] = []
+        await self.watch_service.close()
         if self._mnt_task is not None:
             background_tasks.append(self._mnt_task)
             self._mnt_task = None
@@ -212,7 +196,6 @@ class Twitch:
     async def run(self):
         self.history.start()
         self._history_auth_recorded = False
-        self._history_watch_signature = None
         self.inventory_service.start_session()
         refresh_history = getattr(self.gui, "history_changed", None)
         if refresh_history is not None:
@@ -268,11 +251,7 @@ class Twitch:
         • Changing the stream that's being watched if necessary
         """
         self.gui.start()
-        # The second slot is experimental and opt-in until live canary evidence
-        # proves Twitch credits both independent watch sessions reliably.
-        self._dual_watch_enabled = bool(
-            getattr(self.settings, "experimental_dual_watch", False)
-        )
+        self.watch_service.start_session()
         try:
             auth_state = await self.get_auth()
         except (LoginException, RequestInvalid) as exc:
@@ -307,7 +286,7 @@ class Twitch:
         self.change_state(State.INVENTORY_FETCH)
         while True:
             if self._state is State.IDLE:
-                if self._handle_idle_state():
+                if self.watch_service.handle_idle_state():
                     continue
             elif self._state is State.INVENTORY_FETCH:
                 await self.inventory_service.sync_state()
@@ -325,7 +304,7 @@ class Twitch:
             elif self._state is State.CHANNELS_FETCH:
                 await self.channel_directory_service.fetch_channels(channels)
             elif self._state is State.CHANNEL_SWITCH:
-                if self._switch_channel(channels):
+                if self.watch_service.switch_channel(channels):
                     continue
             elif self._state is State.RESTART:
                 raise ReloadRequest()
@@ -335,68 +314,6 @@ class Twitch:
                 # we've been requested to exit the application
                 break
             await self._state_change.wait()
-
-    def _handle_idle_state(self) -> bool:
-        if self.settings.dump:
-            self.gui.close()
-            return True
-        self.gui.tray.change_icon("idle")
-        self.gui.status.update(_("gui", "status", "idle"))
-        self.watch_service.stop_watching()
-        # clear the flag and wait until it's set again
-        self._state_change.clear()
-        return False
-
-    def _switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
-        if self.settings.dump:
-            self.gui.close()
-            return True
-        self.gui.status.update(_("gui", "status", "switching"))
-        # Change into the selected channel, stay in the watching channel,
-        # or select a new channel that meets the required conditions
-        new_watching = None
-        selected_channel = self.gui.channels.get_selection()
-        if selected_channel is not None and self.watch_service.can_watch(selected_channel):
-            # selected channel is checked first, and set as long as we can watch it
-            new_watching = selected_channel
-        else:
-            # other channels additionally need to have a good reason
-            # for a switch (including the watching one)
-            # NOTE: we need to sort the channels every time because one channel
-            # can end up streaming any game - channels aren't game-tied
-            for channel in sorted(
-                channels.values(),
-                key=self.channel_directory_service.get_priority,
-            ):
-                if self.watch_service.should_switch(channel):
-                    new_watching = channel
-                    break
-        watching_channel = self.watching_channel.get_with_default(None)
-        if new_watching is not None:
-            # if we have a better switch target - do so
-            self.watch_service.watch(new_watching)
-            # break the state change chain by clearing the flag
-            self._state_change.clear()
-        elif watching_channel is not None and self.watch_service.can_watch(watching_channel):
-            # otherwise, continue watching what we had before and refill
-            # the second distinct target if one is available.
-            self.watch_service.watch(watching_channel, update_status=False)
-            self.gui.status.update(
-                _("status", "watching").format(channel=watching_channel.name)
-            )
-            # break the state change chain by clearing the flag
-            self._state_change.clear()
-        else:
-            # not watching anything and there isn't anything to watch either
-            self.print(_("status", "no_channel"))
-            self.history_event(
-                "watch.unavailable",
-                severity="warning",
-                data={"reason": "no_eligible_channel"},
-            )
-            self.change_state(State.IDLE)
-        del new_watching, selected_channel, watching_channel
-        return False
 
     async def get_auth(self) -> AuthState:
         await self._auth_state.validate()

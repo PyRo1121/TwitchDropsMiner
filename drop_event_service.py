@@ -34,58 +34,6 @@ class DropEventService:
             and self._twitch._drops.get(drop.id) is drop
         )
 
-    def _assigned_channels(self, drop_id: str) -> list[Channel]:
-        return [
-            channel
-            for channel in self._twitch._watching_channels.values()
-            if self._twitch._watch_drop_ids.get(channel.id) == drop_id
-        ]
-
-    def _adopt_unassigned_drop(
-        self,
-        drop_id: str,
-        drop: TimedDrop | None,
-    ) -> list[Channel]:
-        if drop_id in self._twitch._watch_completed_drop_ids:
-            logger.log(
-                CALL,
-                "Ignoring an event for a previously completed drop: %s",
-                drop_id,
-            )
-            return []
-        candidates = (
-            [
-                channel
-                for channel in self._twitch._watching_channels.values()
-                if drop.can_earn(channel)
-            ]
-            if drop is not None
-            else []
-        )
-        if drop is None or len(candidates) != 1:
-            if self._twitch.watch_service._request_watch_resync(
-                f"unassigned-drop:{drop_id}"
-            ):
-                logger.warning(
-                    "Ignoring an event for an unassigned drop: %s",
-                    drop_id,
-                )
-            return []
-
-        channel = candidates[0]
-        previous_drop_id = self._twitch._watch_drop_ids.get(channel.id)
-        self._twitch._watch_drop_ids[channel.id] = drop_id
-        restart_event = self._twitch._watch_restart_events.get(channel.id)
-        if restart_event is not None:
-            restart_event.set()
-        logger.info(
-            "Adopted unassigned drop event for %s: %s -> %s",
-            channel.name,
-            previous_drop_id,
-            drop_id,
-        )
-        return [channel]
-
     async def _wait_for_next_drop(
         self,
         channel: Channel,
@@ -136,8 +84,8 @@ class DropEventService:
             logger.info("Ignoring a claim result from a replaced inventory")
             return
         if claimed:
-            self._twitch.watch_service._mark_watch_completed_drop(drop.id)
-        self._twitch.watch_service._display_primary_drop(drop)
+            self._twitch.watch_service.mark_completed_drop(drop.id)
+        self._twitch.watch_service.display_primary_drop(drop)
 
         await asyncio.sleep(4)
         if not self._inventory_drop_is_current(inventory_generation, drop):
@@ -154,20 +102,11 @@ class DropEventService:
         )
         if not self._inventory_drop_is_current(inventory_generation, drop):
             return
-        active_channels = self._twitch._watching_channels.values()
-        if claimed and any(
-            self._twitch.watch_service.can_watch(channel)
-            for channel in active_channels
+        if self._twitch.watch_service.continue_after_claim(
+            claimed,
+            campaign,
+            watching_channels,
         ):
-            primary = self._twitch.watching_channel.get_with_default(None)
-            if primary is not None:
-                self._twitch.watch_service.watch(primary, update_status=False)
-                self._twitch.watch_service.restart_watching()
-                return
-        elif not claimed and any(
-            campaign.can_earn(channel) for channel in watching_channels
-        ):
-            self._twitch.watch_service.restart_watching()
             return
         self._twitch.change_state(State.INVENTORY_FETCH)
 
@@ -201,7 +140,7 @@ class DropEventService:
         # PubSub does not include a channel ID; the assigned Drop ID is the
         # authoritative discriminator when two channels are being farmed.
         drop.update_minutes(current_progress, required_progress)
-        self._twitch.watch_service._display_primary_drop(drop)
+        self._twitch.watch_service.display_primary_drop(drop)
 
     @task_wrapper
     async def process_drops(self, user_id: int, message: JsonType) -> None:
@@ -219,9 +158,11 @@ class DropEventService:
             logger.warning("Ignoring a drop event without a valid drop ID")
             return
         drop = self._twitch._drops.get(drop_id)
-        watching_channels = self._assigned_channels(drop_id)
+        watching_channels = self._twitch.watch_service.assigned_channels(drop_id)
         if not watching_channels:
-            watching_channels = self._adopt_unassigned_drop(drop_id, drop)
+            watching_channels = self._twitch.watch_service.adopt_unassigned_drop(
+                drop_id, drop
+            )
             if not watching_channels:
                 return
         if drop is None:
