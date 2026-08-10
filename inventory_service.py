@@ -8,9 +8,9 @@ from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
-from constants import DUMP_PATH, GQL_BATCH_SIZE, GQL_QUERIES
+from constants import GQL_BATCH_SIZE, GQL_QUERIES
 from exceptions import ExitRequest, MinerException, RequestException
 from inventory import DropsCampaign, TimedDrop
 from translate import _
@@ -18,6 +18,7 @@ from utils import (
     cancel_tasks,
     chunk,
     merge_primary_json,
+    open_dump,
     timestamp,
 )
 
@@ -26,13 +27,6 @@ if TYPE_CHECKING:
     from twitch import Twitch
 
 logger = logging.getLogger("TwitchDrops")
-
-
-def _open_dump(mode: Literal["w", "a"]) -> Any:
-    try:
-        return open(DUMP_PATH, mode, encoding="utf8")
-    except OSError as exc:
-        raise RuntimeError(f"Unable to open dump file: {DUMP_PATH}") from exc
 
 
 class InventoryService:
@@ -221,7 +215,7 @@ class InventoryService:
         self, inventory_data: dict[str, JsonType], inventory: JsonType
     ) -> None:
         # dump the campaigns data to the dump file
-        with _open_dump("a") as file:
+        with open_dump("a") as file:
             # we need to pre-process the inventory dump a little
             dump_data: JsonType = deepcopy(inventory_data)
             for campaign_data in dump_data.values():
@@ -266,7 +260,7 @@ class InventoryService:
         try:
             for coro in asyncio.as_completed(fetch_campaigns_tasks):
                 chunk_campaigns_data = await coro
-                # merge the inventory and campaigns datas together
+                # Merge inventory and campaign data together.
                 inventory_data = self._merge_data(inventory_data, chunk_campaigns_data)
         finally:
             await cancel_tasks(fetch_campaigns_tasks)

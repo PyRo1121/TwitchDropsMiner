@@ -33,13 +33,12 @@ from exceptions import (
 from utils import (
     timestamp,
     cancel_tasks,
+    open_dump,
     AwaitableValue,
     redact_log_value,
 )
 from constants import (
     MAX_INT,
-    DUMP_PATH,
-    MAX_CHANNELS,
     INVENTORY_RETRY_BASE,
     INVENTORY_RETRY_MAX,
     State,
@@ -57,13 +56,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("TwitchDrops")
-
-
-def _open_dump(mode: Literal["w", "a"]) -> Any:
-    try:
-        return open(DUMP_PATH, mode, encoding="utf8")
-    except OSError as exc:
-        raise RuntimeError(f"Unable to open dump file: {DUMP_PATH}") from exc
 
 
 class Twitch:
@@ -240,7 +232,7 @@ class Twitch:
         failure_reason: str | None = None
         try:
             if self.settings.dump:
-                with _open_dump("w"):
+                with open_dump("w"):
                     # replace the existing file with an empty one
                     pass
             while True:

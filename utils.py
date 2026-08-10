@@ -6,6 +6,7 @@ import re
 import sys
 import json
 import random
+import secrets
 import unicodedata
 import string
 import asyncio
@@ -26,7 +27,7 @@ from typing import Any, Literal, Callable, Generic, Mapping, TypeVar, ParamSpec,
 from yarl import URL
 
 from exceptions import ExitRequest, ReloadRequest
-from constants import IS_PACKAGED, JsonType, PriorityMode
+from constants import DUMP_PATH, IS_PACKAGED, JsonType, PriorityMode
 
 
 _T = TypeVar("_T")  # type
@@ -38,6 +39,14 @@ logger = logging.getLogger("TwitchDrops")
 # Matches an RFC3339 fractional-seconds group (e.g. ".123456789") so the
 # microseconds portion can be capped for Python 3.10's fromisoformat.
 _FRACTION_RE = re.compile(r"\.(\d+)")
+
+
+def open_dump(mode: Literal["w", "a"]):
+    """Open the trusted application debug dump with a controlled error."""
+    try:
+        return open(DUMP_PATH, mode, encoding="utf8")
+    except OSError as exc:
+        raise RuntimeError(f"Unable to open dump file: {DUMP_PATH}") from exc
 
 
 async def cancel_tasks(tasks: abc.Iterable[asyncio.Future[Any]]) -> None:
@@ -59,7 +68,7 @@ def chunk(to_chunk: abc.Iterable[_T], chunk_length: int) -> abc.Generator[list[_
 def format_traceback(exc: BaseException, **kwargs: Any) -> str:
     """
     Like `traceback.print_exc` but returns a string. Uses the passed-in exception.
-    Any additional `**kwargs` are passed to the underlaying `traceback.format_exception`.
+    Any additional `**kwargs` are passed to the underlying `traceback.format_exception`.
     """
     return ''.join(traceback.format_exception(type(exc), exc, **kwargs))
 
@@ -281,7 +290,7 @@ CHARS_HEX_LOWER = string.digits + "abcdef"
 
 
 def create_nonce(chars: str, length: int) -> str:
-    return ''.join(random.choices(chars, k=length))
+    return ''.join(secrets.choice(chars) for _ in range(length))
 
 
 def safe_int(value: Any) -> int | None:
@@ -336,7 +345,7 @@ def task_wrapper(
             try:
                 await afunc(*args, **kwargs)
             except (ExitRequest, ReloadRequest):
-                pass
+                return
             except BaseException as exc:
                 _handle_task_exception(exc, afunc.__name__, args, critical)
                 raise

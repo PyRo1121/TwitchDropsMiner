@@ -30,6 +30,7 @@ from constants import (
 )
 from utils import (
     atomic_write,
+    create_nonce,
     format_duration,
     json_load,
     json_save,
@@ -42,6 +43,11 @@ from utils import (
 
 
 class JsonLoadTests(unittest.TestCase):
+    def test_nonce_uses_cryptographic_choice(self) -> None:
+        with patch("utils.secrets.choice", return_value="x") as choice:
+            self.assertEqual(create_nonce("abc", 4), "xxxx")
+        self.assertEqual(choice.call_count, 4)
+
     def test_websocket_topic_equality_matches_hash_contract(self) -> None:
         def process(_target: int, _message: dict[str, Any]) -> None:
             return None
