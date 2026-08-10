@@ -141,7 +141,7 @@
                 "warning_text": "Tyto možnosti mohou způsobit nesprávné chování aplikace.\nPokud narazíte na problémy, ujistěte se, že jsou všechny tyto možnosti vypnuty.",
                 "enable_badges_emotes": "Povolit částečnou podporu odznaků a emotikon: ",
                 "available_drops_check": "Povolit kontrolu dostupných extra dropů: ",
-                "experimental_dual_watch": "Experimentální sledování dvou přenosů (může to nezískat obě odměny): "
+                "experimental_dual_watch": "Experimentální sledování dvou přenosů (nemusí získat obě odměny): "
             },
             "priority_modes": {
                 "priority_only": "Pouze prioritní: ",
@@ -155,7 +155,7 @@
             "reload_text": "Většina změn vyžaduje restart aplikace nebo obnovení: "
         },
         "text": {
-            "device_authorization": "Ověřte toto použití pomocí bezpečného toku zařízení Twitch.",
+            "device_authorization": "Autorizujte tuto aplikaci pomocí zabezpečeného přihlášení s kódem zařízení Twitch.",
             "enter_device_code": "Zadejte kód zařízení: {code}",
             "device_code": "Kód zařízení: {code}",
             "brand_name": "TDM",
@@ -171,9 +171,9 @@
             "status_attention": "Pozor",
             "status_error_detail": "Aplikace vyžaduje pozornost. Otevřete protokol událostí pro přesné detaily požadavku nebo přihlášení.",
             "status_scanning_detail": "Skenování seznamu kampaní odměn a přenosových kanálů. Obvykle to trvá jen několik sekund.",
-            "status_switching_detail": "Přeodhadování fronty sledování přenosů, aby další minuta byla zaúčtována na nejlepší způsobilý kanál.",
+            "status_switching_detail": "Přehodnocování fronty sledování přenosů, aby byla další minuta započítána nejlepšímu způsobilému kanálu.",
             "status_idle_detail": "Nyní nepřenáší žádný způsobilý kanál. Aplikace čeká a automaticky se obnoví.",
-            "status_watching_detail": "Je vybrán přenášející kanál; minuty sledování Twitch jsou automaticky odesílány.",
+            "status_watching_detail": "Je vybrán živý kanál; minuty sledování Twitch jsou automaticky odesílány.",
             "status_waiting_detail": "Aplikace je připojena a čeká na další aktualizaci ze serveru.",
             "websocket_waiting": "WebSocket: —",
             "websocket_summary": "WS {index}: {status} · {topics} témat",
@@ -251,7 +251,7 @@
             "event_log": "Událostní log",
             "diagnostics": "diagnostika",
             "session_title": "Sezení · {time}",
-            "session_running": "BEŽÍ",
+            "session_running": "BĚŽÍ",
             "session_stopped": "ZASTAVENO",
             "session_failed": "SELHALO",
             "session_interrupted": "PŘERUŠENO",
@@ -288,9 +288,9 @@
                 "campaigns": "Zobrazit všechny kampaňe a spravovat propojené účty"
             },
             "how_it_works": "Jak to funguje",
-            "how_it_works_text": "Každých ~60 sekund aplikace odešle událost 'sledované minuty' na aktuálně sledovaný kanál - to stačí k posunu umístění. Všimněte si, že tímto způsobem zcela odpadá nutnost stahovat skutečné streamované video a zvuk. Aby byl stav kanálu (online nebo offline) stále aktuální, je navázáno spojení přes websocket, které přijímá události o spuštění nebo vypnutí streamů nebo aktualizace o aktuálním počtu diváků.",
+            "how_it_works_text": "Twitch Drops Miner posouvá průběh získávání odměn Drops kontrolou metadat streamu; nestahuje ani nepřehrává video či zvuk. Když je kampaň aktivní, udržuje vybraný kanál a účet připravené, aby mohl postup pokračovat.",
             "getting_started": "Jak začít",
-            "getting_started_text": "1. Přihlaste se do aplikace. \n2. Ujistěte se, že je váš účet Twitch spojen se všemi reklamními sériemi, které chcete těžit. \n3. Pokud chcete klepnout pouze na veškerý obsah, zrušte zaškrtnutí políčka 'Pouze prioritní' a stiskněte tlačítko 'Obnovit'. \n4. Pokud se chcete nejprve věnovat konkrétním hrám, použijte seznam 'Prioritní' a nastavte si pořadí vybraných her. Nejprve se vyzkouší hry na začátku seznamu a poté hry na konci seznamu. \n5. Ponechte zaškrtnutou možnost 'Pouze prioritní', abyste se vyhnuli vyhledávání her, které nejsou na seznamu priorit. Nebo ne - záleží na vás. \n6. Pomocí seznamu 'vyloučit' můžete aplikaci sdělit, které hry by neměly být vytěženy. \n7. Změna obsahu obou seznamů nebo stavu možnosti Pouze prioritní vyžaduje stisknutí tlačítka Znovu načíst, aby se změna projevila.",
+            "getting_started_text": "1. Přihlaste se na Twitch.\n2. Propojte požadované kampaně na stránkách Twitch Drops.\n3. Vyberte režim priority a podle potřeby přidejte hry do seznamu Priorita nebo Vynechat.\n4. Po změně priorit nebo vyloučení stiskněte Obnovit.\n5. Vraťte se do Přehledu a nechte aplikaci spuštěnou, zatímco získává Drops.",
             "invalidate": {
                 "button": "Zneplatnit",
                 "text": "Zneplatnit autentizační token (odhlásit se):"

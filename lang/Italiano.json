@@ -252,9 +252,9 @@
             "diagnostics": "diagnostica",
             "session_title": "Sessione · {time}",
             "session_running": "IN ESECUZIONE",
-            "session_stopped": "FERMATO",
+            "session_stopped": "ARRESTATA",
             "session_failed": "NON RIUSCITA",
-            "session_interrupted": "INTERROTTO",
+            "session_interrupted": "INTERROTTA",
             "session_in_progress": "in corso",
             "session_summary": "{start} → {end} · {duration} · {claims} premi riscattati · {syncs} sincronizzazioni elenco premi",
             "clear_completed": "Rimuovi sessioni completate",
@@ -288,9 +288,9 @@
                 "campaigns": "Vedi tutte le campagne e gestisci i collegamenti dell'account"
             },
             "how_it_works": "Come funziona",
-            "how_it_works_text": "Ogni ~60 secondi, l'applicazione invia un evento \"minuto guardato\" al canale che stai guardando - questo è sufficiente per far avanzare il progresso dei drop. Da notare che questo bypassa completamente la necessità di scaricare qualsiasi video o audio della diretta. Per mantenere lo stato (ONLINE o OFFLINE) dei canali aggiornato, c'è una connessione websocket stabilita che riceve eventi sui canali che vanno online o offline, o aggiornamenti riguardanti il numero attuale di spettatori.",
+            "how_it_works_text": "Twitch Drops Miner fa avanzare i Drops controllando i metadati dello stream; non scarica né riproduce video o audio. Quando una campagna è attiva, mantiene pronti il canale e l’account selezionati affinché i progressi possano continuare.",
             "getting_started": "Per iniziare",
-            "getting_started_text": "1. Effettua il login nell'applicazione.\n2. Assicurati che il tuo account Twitch sia collegato a tutte le campagne per cui sei interessato a ottenere i drop.\n3. Se sei interessato a ottenere tutto, deseleziona \"Solo priorità\" e premi su \"Ricarica\".\n4. Se vuoi ottenere prima giochi specifici, usa la lista \"Priorità\" per impostare una lista ordinata di giochi a tua scelta. I giochi in cima alla lista verranno ottenuti prima.\n5. Mantieni l'opzione \"Solo priorità\" selezionata, per evitare di ottenere giochi che non sono nella lista delle priorità. Oppure non farlo - dipende da te.\n6. Usa la lista \"Escludi\" per dire all'applicazione quali giochi non devono mai essere ottenuti.\n7. Cambiare il contenuto di una delle liste, o cambiare lo stato dell'opzione \"Solo priorità\", richiede di premere su \"Ricarica\" perché le modifiche abbiano effetto.",
+            "getting_started_text": "1. Accedi a Twitch.\n2. Collega le campagne desiderate dalle pagine Drops di Twitch.\n3. Scegli una modalità di priorità, quindi aggiungi giochi a Priorità o Escludi se necessario.\n4. Premi Ricarica dopo aver modificato priorità o esclusioni.\n5. Torna alla Panoramica e lascia l’applicazione in esecuzione mentre raccoglie i Drops.",
             "invalidate": {
                 "button": "Invalida",
                 "text": "Invalida il token di autenticazione (disconnetti):"

@@ -240,7 +240,7 @@
             "watching_badge": "OGLĄDANIE TRANSMISJI",
             "open": "OTWÓRZ",
             "open_channel": "Otwórz {channel} na Twitch",
-            "select_channel": "Obserwuj {channel}",
+            "select_channel": "Oglądaj {channel}",
             "monitored": "{count} monitorowane",
             "monitored_live": "{count} monitorowane  ·  {live} na żywo",
             "filter_channels": "Filtruj kanały  ·  nazwa lub gra",
@@ -252,9 +252,9 @@
             "diagnostics": "diagnostyka",
             "session_title": "Sesja · {time}",
             "session_running": "AKTYWNY",
-            "session_stopped": "ZATRZYMANY",
+            "session_stopped": "ZATRZYMANA",
             "session_failed": "NIEUDANA",
-            "session_interrupted": "PRZERWANY",
+            "session_interrupted": "PRZERWANA",
             "session_in_progress": "w toku",
             "session_summary": "{start} → {end} · {duration} · {claims} odebranych nagród · {syncs} synchronizacji listy nagród",
             "clear_completed": "Usuń zakończone sesje",
@@ -288,9 +288,9 @@
                 "campaigns": "Zobacz wszystkie kampanie na Twitchu"
             },
             "how_it_works": "Jak to działa?",
-            "how_it_works_text": "Co kilkanaście sekund aplikacja pobiera metadane strumienia, udając oglądanie streamu - to wystarczy, aby uzyskać postęp dropu. Zauważ, że w ten sposób możesz całkowicie pominąć konieczność pobierania rzeczywistego strumienia wideo i dźwięku. Do utrzymania statusu ONLINE lub OFFLINE kanałów używane jest połączenie WebSocket, które odbiera zdarzenia o zmianie statusu kanałów oraz na bieżąco aktualizuje liczbę widzów.",
+            "how_it_works_text": "Twitch Drops Miner zwiększa postęp zdobywania Dropsów, sprawdzając metadane transmisji; nie pobiera ani nie odtwarza obrazu lub dźwięku. Gdy kampania jest aktywna, aplikacja utrzymuje wybrany kanał i konto w gotowości, aby postęp mógł być naliczany.",
             "getting_started": "Pierwsze kroki",
-            "getting_started_text": "1. Zaloguj się do aplikacji.\n2. Upewnij się, że Twoje konto Twitch jest połączone ze wszystkimi kampaniami, z których chcesz otrzymywać dropy.\n3. Zmień tryb priorytetu na coś innego niż „Tylko lista priorytetów” i kliknij „Przeładuj”, jeśli chcesz otrzymywać dropy ze wszystkich aktywnych kampanii.\n4. Użyj listy „Priorytety”, aby wybrać uporządkowaną listę gier, z których chcesz otrzymać dropy. Gry znajdujące się wyżej na liście będą miały wyższy priorytet przy zdobywaniu dropów.\n5. Wybierz opcję „Tylko lista priorytetów”, aby wykluczyć gry, które nie znajdują się na liście priorytetowej.\n6. Użyj listy „Wykluczone”, aby wskazać gry, z których przedmioty nigdy nie powinny być zdobywane.\n7. Zmiana zawartości list „Priorytety” i „Wykluczone” oraz opcji „Tryb priorytetu” wymaga kliknięcia „Przeładuj”, aby aplikacja mogła zastosować wprowadzone zmiany.",
+            "getting_started_text": "1. Zaloguj się do Twitcha.\n2. Połącz wybrane kampanie na stronach Dropsów Twitcha.\n3. Wybierz tryb priorytetu, a następnie w razie potrzeby dodaj gry do list Priorytety lub Wykluczone.\n4. Po zmianie priorytetów lub wykluczeń naciśnij Przeładuj.\n5. Wróć do Podglądu i pozostaw aplikację uruchomioną, gdy zbiera Dropsy.",
             "invalidate": {
                 "button": "Unieważnij",
                 "text": "Unieważnij token uwierzytelniający (wyloguj się):"

@@ -141,7 +141,7 @@
                 "warning_text": "Disse alternativene kan føre til at applikasjonen oppfører seg feil.\nHvis du opplever problemer, sørg for at alle disse alternativene er deaktivert.",
                 "enable_badges_emotes": "Aktiver delvis støtte for merker og emotes: ",
                 "available_drops_check": "Aktiver ekstra sjekk av tilgjengelige drops: ",
-                "experimental_dual_watch": "Eksperimentell visning av to strømer (kan ikke gi begge belønninger): "
+                "experimental_dual_watch": "Eksperimentell visning av to strømmer (gir kanskje ikke begge belønningene): "
             },
             "priority_modes": {
                 "priority_only": "Kun prioritetsliste",
@@ -171,9 +171,9 @@
             "status_attention": "Oppmerksomhet",
             "status_error_detail": "Applikasjonen trenger oppmerksomhet. Åpne hendelsesloggen for detaljer om forespørsel eller innlogging.",
             "status_scanning_detail": "Skanner belønningskampanjeliste og livekanaler. Dette tar vanligvis noen sekunder.",
-            "status_switching_detail": "Gjenutvurderer køen for strømmetilsyn slik at neste minutt krediteres til den beste kvalifiserende kanalen.",
+            "status_switching_detail": "Vurderer visningskøen på nytt, slik at det neste minuttet godskrives den best egnede kanalen.",
             "status_idle_detail": "Ingen kvalifiserende kanal sender live nå. Applikasjonen venter og vil fortsette automatisk.",
-            "status_watching_detail": "Et sendekanal er valgt; Twitch-seminutter sendes inn automatisk.",
+            "status_watching_detail": "En direktesendt kanal er valgt; Twitch-visningsminutter sendes inn automatisk.",
             "status_waiting_detail": "Programmet er tilkoblet og venter på neste oppdatering fra backend.",
             "websocket_waiting": "WebSocket: —",
             "websocket_summary": "WS {index}: {status} · {topics} emner",
@@ -254,7 +254,7 @@
             "session_running": "KJØRER",
             "session_stopped": "STOPPET",
             "session_failed": "MISLYKTES",
-            "session_interrupted": "AVBROKKET",
+            "session_interrupted": "AVBRUTT",
             "session_in_progress": "pågår",
             "session_summary": "{start} → {end} · {duration} · {claims} innløste belønninger · {syncs} synkroniseringer av belønningslisten",
             "clear_completed": "Fjern fullførte sesjoner",
@@ -288,9 +288,9 @@
                 "campaigns": "Se alle kampanjer og administrer kontotilkoblinger"
             },
             "how_it_works": "Slik fungerer det",
-            "how_it_works_text": "Hvert par sekunder later applikasjonen som den ser på en bestemt strøm ved å hente strømmetadata - dette er nok til å øke fremdriften på drops. Merk at dette fullstendig unngår behovet for å laste ned selve video- og lydstrømmen. For å holde statusen (ONLINE eller OFFLINE) til kanalene oppdatert, opprettes det en websocket-tilkobling som mottar hendelser om strømmer som går opp eller ned, eller oppdateringer angående gjeldende antall seere.",
+            "how_it_works_text": "Twitch Drops Miner øker Drops-fremdriften ved å kontrollere strømmemetadata; programmet laster ikke ned eller spiller av video eller lyd. Når en kampanje er aktiv, holder det den valgte kanalen og kontoen klare slik at fremdriften kan fortsette.",
             "getting_started": "Kom i gang",
-            "getting_started_text": "1. Logg inn i applikasjonen.\n2. Sørg for at Twitch-kontoen din er koblet til alle kampanjer du er interessert i å utvinne.\n3. Hvis du er interessert i å utvinne alt mulig, endre \"Prioritetsmodus\" til noe annet enn \"Kun prioritetsliste\" og trykk på \"Last inn på nytt\".\n4. Hvis du vil utvinne spesifikke spill først, bruk \"Prioritet\"-listen til å sette opp en ordnet liste over spill etter eget valg. Spill fra toppen av listen vil bli forsøkt utvunnet først, før de lenger ned på listen.\n5. Behold \"Prioritetsmodus\" satt til \"Kun prioritetsliste\" for å unngå å utvinne spill som ikke er på prioritetslisten. Eller ikke - det er opp til deg.\n6. Bruk \"Ekskluder\"-listen for å fortelle applikasjonen hvilke spill som aldri skal utvinnes.\n7. Endring av innholdet i en av listene, eller endring av \"Prioritetsmodus\", krever at du trykker på \"Last inn på nytt\" for at endringene skal tre i kraft.",
+            "getting_started_text": "1. Logg inn på Twitch.\n2. Koble til kampanjene du ønsker, fra Twitchs Drops-sider.\n3. Velg en prioritetsmodus, og legg til spill i Prioritet eller Ekskluder ved behov.\n4. Trykk på Last inn på nytt etter at du har endret prioriteringer eller ekskluderinger.\n5. Gå tilbake til Oversikt og la programmet kjøre mens det samler Drops.",
             "invalidate": {
                 "button": "Ugyldiggjør",
                 "text": "Ugyldiggjør autentiserings-tokenen (logg ut):"

@@ -141,7 +141,7 @@
                 "warning_text": "Ezek az opciók hibás működést okozhatnak az alkalmazásban.\nHa problémákba ütközik, győződjön meg róla, hogy ezek az opciók letiltva vannak.",
                 "enable_badges_emotes": "Jelvények és emote-ok részleges támogatása: ",
                 "available_drops_check": "Extra ellenőrzés az elérhető dropokhoz: ",
-                "experimental_dual_watch": "Kísérleti két áram nézése (lehet, hogy nem mindkét jutalmat nyeri): "
+                "experimental_dual_watch": "Két stream kísérleti egyidejű nézése (előfordulhat, hogy nem szerzi meg mindkét jutalmat): "
             },
             "priority_modes": {
                 "priority_only": "Csak a prioritási lista",
@@ -155,7 +155,7 @@
             "reload_text": "A legtöbb módosítás életbe lépéséhez újratöltés szükséges: "
         },
         "text": {
-            "device_authorization": "Hitelesítse az alkalmazást a Twitch biztonságos eszköz-kódos流程ával.",
+            "device_authorization": "Engedélyezze ezt az alkalmazást a Twitch biztonságos eszközkód-folyamatával.",
             "enter_device_code": "Adja meg az eszköz-kódot: {code}",
             "device_code": "Eszköz-kód: {code}",
             "brand_name": "TDM",
@@ -173,7 +173,7 @@
             "status_scanning_detail": "A jutalomkampánylista és a sugárzó csatornák szkennelése. Ez általában néhány másodperc alatt befejeződik.",
             "status_switching_detail": "A stream-nézési sorrend újraértékelése, hogy a következő perc a legjobb jogosult csatornának legyen jóváírva.",
             "status_idle_detail": "Jelenleg nincs sugárzó jogosult csatorna. Az alkalmazás vár és automatikusan folytatódik.",
-            "status_watching_detail": "Kiválasztott a közvetített csatorna; a Twitch nézés percjei automatikusan beküldésre kerülnek.",
+            "status_watching_detail": "Ki van választva egy élő csatorna; a Twitch-nézési percek automatikusan beküldésre kerülnek.",
             "status_waiting_detail": "Az alkalmazás csatlakozott és várja a következő háttérfrissítést.",
             "websocket_waiting": "WebSocket: —",
             "websocket_summary": "WS {index}: {status} · {topics} témák",
@@ -254,7 +254,7 @@
             "session_running": "FUT",
             "session_stopped": "LEÁLLÍTVA",
             "session_failed": "SIKERTELEN",
-            "session_interrupted": "SZÜNETELT",
+            "session_interrupted": "MEGSZAKÍTVA",
             "session_in_progress": "folyamatban",
             "session_summary": "{start} → {end} · {duration} · {claims} beváltott jutalom · {syncs} jutalomlista-szinkronizálás",
             "clear_completed": "Befejezett munkamenetek eltávolítása",
@@ -288,9 +288,9 @@
                 "campaigns": "Összes kampány megtekintése és a fiók-összekapcsolások kezelése"
             },
             "how_it_works": "Hogyan működik",
-            "how_it_works_text": "Az alkalmazás néhány másodpercenként úgy tesz, mintha nézne egy adott streamet: lekéri a stream metaadatait – ennyi elég a dropok gyűjtéséhez. Így egyáltalán nem kell letölteni a tényleges videó- és hangfolyamot. A csatornák állapotának (ONLINE vagy OFFLINE) naprakészen tartásához websocket-kapcsolat épül ki, amelyen keresztül az alkalmazás értesül a streamek indulásáról és leállásáról, valamint a nézőszám változásairól.",
+            "how_it_works_text": "A Twitch Drops Miner a stream metaadatainak ellenőrzésével növeli a Drops előrehaladását; nem tölt le és nem játszik le videót vagy hangot. Amikor egy kampány aktív, készenlétben tartja a kiválasztott csatornát és fiókot, hogy a haladás folytatódhasson.",
             "getting_started": "Első lépések",
-            "getting_started_text": "1. Jelentkezz be az alkalmazásba.\n2. Győződj meg róla, hogy a Twitch-fiókod össze van kapcsolva minden olyan kampánnyal, amelyet bányászni szeretnél.\n3. Ha mindent bányásznál, ami csak lehetséges, állítsd a Prioritási módot bármire a „Csak a prioritási lista” kivételével, majd nyomd meg az „Újratöltés” gombot.\n4. Ha bizonyos játékokat előbb szeretnél bányászni, a „Prioritás” listában állíts össze egy sorrendet a kívánt játékokból. A lista tetején lévő játékokat az alkalmazás előbb próbálja bányászni, mint a lejjebb lévőket.\n5. Hagyd a „Prioritási módot” a „Csak a prioritási lista” beállításon, ha nem szeretnél a listán nem szereplő játékokat bányászni. Vagy mégis – ahogy szeretnéd.\n6. A „Kizárás” listával adhatod meg, mely játékokat ne bányássza soha az alkalmazás.\n7. A listák tartalmának vagy a „Prioritási mód” módosítása után nyomd meg az „Újratöltés” gombot, hogy a változtatások életbe lépjenek.",
+            "getting_started_text": "1. Jelentkezzen be a Twitchre.\n2. Kapcsolja össze a kívánt kampányokat a Twitch Drops oldalain.\n3. Válasszon prioritási módot, majd szükség esetén adjon játékokat a Prioritás vagy Kizárás listához.\n4. A prioritások vagy kizárások módosítása után nyomja meg az Újratöltés gombot.\n5. Térjen vissza az Áttekintéshez, és hagyja futni az alkalmazást, amíg az begyűjti a Drops jutalmakat.",
             "invalidate": {
                 "button": "Érvénytelenítés",
                 "text": "Az hitelesítési jelvény érvénytelenítése (kijelentkezés):"

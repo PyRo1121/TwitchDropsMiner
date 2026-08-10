@@ -252,9 +252,9 @@
             "diagnostics": "diagnostics",
             "session_title": "Session · {time}",
             "session_running": "EN COURS",
-            "session_stopped": "ARRÊTÉ",
+            "session_stopped": "ARRÊTÉE",
             "session_failed": "ÉCHEC",
-            "session_interrupted": "INTERROMPU",
+            "session_interrupted": "INTERROMPUE",
             "session_in_progress": "en cours",
             "session_summary": "{start} → {end} · {duration} · {claims} récompenses récupérées · {syncs} synchronisations de la liste des récompenses",
             "clear_completed": "Supprimer les sessions terminées",
@@ -288,9 +288,9 @@
                 "campaigns": "Afficher toutes les campagnes et gérer les comptes associés"
             },
             "how_it_works": "Comment ça fonctionne",
-            "how_it_works_text": "Toutes les quelques secondes, l'application fait semblant de regarder un flux particulier en récupérant les métadonnées du flux - ce qui suffit pour faire avancer les drops. Notez que cela contourne complètement le besoin de télécharger la vidéo et le son du flux réel. Pour maintenir à jour le statut (EN LIGNE ou HORS LIGNE) des chaînes, une connexion websocket est établie pour recevoir des événements sur les flux qui montent ou descendent, ou des mises à jour concernant le nombre actuel de spectateurs.",
+            "how_it_works_text": "Twitch Drops Miner fait progresser les Drops en vérifiant les métadonnées du stream ; il ne télécharge ni ne lit de vidéo ou d’audio. Lorsqu’une campagne est active, il garde la chaîne et le compte sélectionnés prêts afin que la progression puisse continuer.",
             "getting_started": "Premiers pas",
-            "getting_started_text": "1. Connectez-vous à l'application.\n2. Assurez-vous que votre compte Twitch est lié à toutes les campagnes qui vous intéressent.\n3. Si vous souhaitez miner tout ce qui est possible, modifiez le mode de priorité en autre chose que \"Liste de priorité uniquement\" et appuyez sur \"Recharger\".\n4. Si vous souhaitez miner certains jeux en priorité, utilisez la liste \"Priorité\" pour définir un ordre de préférence des jeux de votre choix. Les jeux en haut de la liste seront minés en premier, avant ceux qui se trouvent plus bas dans la liste.\n5. Gardez le mode de priorité sur \"Liste de priorité uniquement\" pour éviter de miner des jeux qui ne sont pas dans la liste de priorité. Ou pas - c'est à vous de décider.\n6. Utilisez la liste \"Exclure\" pour indiquer à l'application les jeux qui ne doivent jamais être minés.\n7. Toute modification du contenu des listes ou du mode de priorité nécessite d'appuyer sur \"Recharger\" pour que les changements prennent effet.",
+            "getting_started_text": "1. Connectez-vous à Twitch.\n2. Liez les campagnes souhaitées depuis les pages Drops de Twitch.\n3. Choisissez un mode de priorité, puis ajoutez si nécessaire des jeux à Priorité ou Exclure.\n4. Appuyez sur Recharger après avoir modifié les priorités ou les exclusions.\n5. Revenez à l’Aperçu et laissez l’application fonctionner pendant qu’elle collecte les Drops.",
             "invalidate": {
                 "button": "Invalider",
                 "text": "Invalider le jeton d'authentification (déconnexion) :"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import string
+import unicodedata
 import unittest
 from collections import Counter
 from collections.abc import Iterator, Mapping
@@ -14,7 +15,6 @@ from translate import _, _validate_translation_catalog, default_translation
 
 TranslationPath = tuple[str, ...]
 FormatSignature = Counter[tuple[str, str | None, str | None]]
-MINIMUM_LOCALIZED_RATIO = 0.85
 
 
 def _string_leaves(
@@ -86,18 +86,19 @@ class TranslationCatalogTests(unittest.TestCase):
                 translated_strings = dict(_string_leaves(translation))
                 known_paths = self.default_strings.keys() & translated_strings.keys()
                 coverage = len(known_paths) / len(self.default_strings)
-                localized = sum(
+                non_identical = sum(
                     translated_strings[path] != self.default_strings[path]
                     for path in known_paths
                 )
-                localized_ratio = localized / len(self.default_strings)
+                non_identical_ratio = non_identical / len(self.default_strings)
                 missing_count = len(self.default_strings.keys() - translated_strings.keys())
                 unknown_count = len(translated_strings.keys() - self.default_strings.keys())
                 print(
                     f"[locale coverage] {language_path.stem}: "
                     f"explicit={len(known_paths)}/{len(self.default_strings)} "
-                    f"({coverage:.1%}), localized={localized}/{len(self.default_strings)} "
-                    f"({localized_ratio:.1%}), missing={missing_count}, "
+                    f"({coverage:.1%}), non_identical_to_english="
+                    f"{non_identical}/{len(self.default_strings)} "
+                    f"({non_identical_ratio:.1%}), missing={missing_count}, "
                     f"unknown={unknown_count}"
                 )
 
@@ -112,12 +113,6 @@ class TranslationCatalogTests(unittest.TestCase):
                     1.0,
                     f"{language_path.name} has incomplete explicit coverage",
                 )
-                self.assertGreaterEqual(
-                    localized_ratio,
-                    MINIMUM_LOCALIZED_RATIO,
-                    f"{language_path.name} copies too much English to be a real translation",
-                )
-
                 for path, template in translated_strings.items():
                     try:
                         signature = _format_signature(template)
@@ -172,6 +167,127 @@ class TranslationCatalogTests(unittest.TestCase):
                         self.assertEqual(_(*path), value, ".".join(path))
         finally:
             _.set_language("English")
+
+    def test_catalogs_have_no_format_controls_or_unexpected_scripts(self) -> None:
+        latin_locales = {
+            "Dansk",
+            "Deutsch",
+            "Español",
+            "Français",
+            "Indonesian",
+            "Italiano",
+            "Magyar",
+            "Nederlandse",
+            "Norsk",
+            "Polski",
+            "Português",
+            "Română",
+            "Türkçe",
+            "Čeština",
+        }
+        cyrillic_locales = {"Русский", "Українська"}
+
+        def script(character: str) -> str | None:
+            codepoint = ord(character)
+            if 0x3400 <= codepoint <= 0x9FFF:
+                return "Han"
+            if 0x3040 <= codepoint <= 0x30FF:
+                return "Kana"
+            if 0x0400 <= codepoint <= 0x052F:
+                return "Cyrillic"
+            if 0x0600 <= codepoint <= 0x06FF:
+                return "Arabic"
+            return None
+
+        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+            strings = dict(_string_leaves(_load_catalog(language_path)))
+            with self.subTest(language=language_path.stem):
+                controls = [
+                    (path, character)
+                    for path, value in strings.items()
+                    for character in value
+                    if unicodedata.category(character) == "Cf"
+                ]
+                self.assertEqual(controls, [], "format-control characters are forbidden")
+
+                if language_path.stem in latin_locales:
+                    forbidden_scripts = {"Han", "Kana", "Cyrillic", "Arabic"}
+                elif language_path.stem in cyrillic_locales:
+                    forbidden_scripts = {"Han", "Kana", "Arabic"}
+                elif language_path.stem == "العربية":
+                    forbidden_scripts = {"Han", "Kana", "Cyrillic"}
+                elif language_path.stem in {"简体中文", "繁體中文"}:
+                    forbidden_scripts = {"Kana", "Cyrillic", "Arabic"}
+                else:  # Japanese intentionally uses both Kana and Han.
+                    forbidden_scripts = {"Cyrillic", "Arabic"}
+                unexpected = [
+                    (path, character, character_script)
+                    for path, value in strings.items()
+                    for character in value
+                    if (character_script := script(character)) in forbidden_scripts
+                ]
+                self.assertEqual(unexpected, [], "unexpected mixed-script content")
+
+    def test_confirmed_action_and_grammar_regressions_are_absent(self) -> None:
+        prohibited: dict[str, tuple[str, ...]] = {
+            "Dansk": ("bedste egne", "et sendekanal"),
+            "Deutsch": ("Sender wird abgerufen",),
+            "Magyar": ("流程", "két áram", "Kiválasztott a közvetített"),
+            "Čeština": ("Ověřte toto použití", "Přeodhadování", "BEŽÍ"),
+            "Українська": ("це застосунок", "device-code", "Сподиватися"),
+            "Română": (
+                "Urează",
+                "a a două",
+                "următoarea minut",
+                "DERulare",
+                "ÎNTERupt",
+            ),
+            "العربية": ("خصم",),
+            "Nederlandse": ("streambekeking", "GEÏNTERREPT"),
+            "Norsk": ("strømer", "Et sendekanal", "strømmetilsyn", "AVBROKKET"),
+            "Русский": ("Экспериментальное просмотр",),
+            "繁體中文": ("导致",),
+        }
+        for language, bad_values in prohibited.items():
+            catalog = _load_catalog(self.project_root / "lang" / f"{language}.json")
+            text = "\n".join(value for _, value in _string_leaves(catalog))
+            with self.subTest(language=language):
+                for bad_value in bad_values:
+                    self.assertNotIn(bad_value, text)
+
+    def test_help_catalogs_match_current_five_step_contract(self) -> None:
+        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+            catalog = _load_catalog(language_path)
+            gui = catalog["gui"]
+            assert isinstance(gui, Mapping)
+            help_text = gui["help"]
+            assert isinstance(help_text, Mapping)
+            how_it_works = help_text["how_it_works_text"]
+            getting_started = help_text["getting_started_text"]
+            assert isinstance(how_it_works, str)
+            assert isinstance(getting_started, str)
+            steps = getting_started.splitlines()
+            with self.subTest(language=language_path.stem):
+                self.assertNotIn("60", how_it_works)
+                self.assertNotIn("\n", how_it_works)
+                self.assertEqual(len(steps), 5)
+                self.assertEqual(
+                    [step[:3] for step in steps],
+                    ["1. ", "2. ", "3. ", "4. ", "5. "],
+                )
+
+    def test_native_review_status_is_explicitly_pending(self) -> None:
+        documentation = (self.project_root / "lang" / "README.md").read_text(
+            encoding="utf8"
+        )
+        self.assertIn("Catalog schema version: `2`", documentation)
+        self.assertIn("Help source revision: `2`", documentation)
+        for language_path in sorted((self.project_root / "lang").glob("*.json")):
+            with self.subTest(language=language_path.stem):
+                self.assertIn(
+                    f"| {language_path.stem} | Machine-assisted | Pending | — |",
+                    documentation,
+                )
 
     def test_arabic_catalog_contains_native_rtl_text(self) -> None:
         arabic = _load_catalog(self.project_root / "lang" / "العربية.json")

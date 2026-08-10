@@ -141,7 +141,7 @@
                 "warning_text": "Disse indstillinger kan få applikationen til at opføre sig forkert.\nHvis du oplever problemer, sørg for at deaktivere alle disse indstillinger.",
                 "enable_badges_emotes": "Aktiver delvis understøttelse af badges og emotes: ",
                 "available_drops_check": "Aktiver ekstra tjek af tilgængelige drops: ",
-                "experimental_dual_watch": "Eksperimentel visning af to streams (kan ikke give begge belønninger): "
+                "experimental_dual_watch": "Eksperimentel visning af to streams (giver muligvis ikke begge belønninger): "
             },
             "priority_modes": {
                 "priority_only": "Kun prioritet: ",
@@ -171,9 +171,9 @@
             "status_attention": "Opmærksomhed",
             "status_error_detail": "Applikationen kræver opmærksomhed. Åbn begivenhedsloggen for præcise oplysninger om anmodning eller login.",
             "status_scanning_detail": "Scanner belønningskampagneliste og udsendingskanaler. Dette tager typisk få sekunder.",
-            "status_switching_detail": "Genvurderer køen af stream-visning, så næste minut krediteres til den bedste egne kanal.",
+            "status_switching_detail": "Genvurderer køen til streamvisning, så det næste minut tilskrives den bedst egnede kanal.",
             "status_idle_detail": "Ingen egnet kanal udsender lige nu. Applikationen venter og vil genoptage automatisk.",
-            "status_watching_detail": "Der er valgt et sendekanal; Twitch-se-minutter indsendes automatisk.",
+            "status_watching_detail": "Der er valgt en livekanal; Twitch-visningsminutter indsendes automatisk.",
             "status_waiting_detail": "Programmet er forbundet og venter på næste opdatering fra serveren.",
             "websocket_waiting": "WebSocket: —",
             "websocket_summary": "WS {index}: {status} · {topics} emner",
@@ -288,9 +288,9 @@
                 "campaigns": "Se alle kampagner og administrer kontolinks"
             },
             "how_it_works": "Hvordan virker det?",
-            "how_it_works_text": "Hvert ~60. sekund sender applikationen en \"set minut\"-begivenhed til den kanal, der i øjeblikket bliver set - dette er nok til at øge faldet. Bemærk, at dette helt omgår behovet for at downloade enhver faktisk stream video og lyd. For at holde status (ONLINE eller OFFLINE) for kanalerne opdateret, er der etableret en websocket-forbindelse, der modtager begivenheder om streams, der går op eller ned, eller opdateringer vedrørende det aktuelle antal seere.",
+            "how_it_works_text": "Twitch Drops Miner øger Drops-fremdriften ved at kontrollere streammetadata; programmet downloader eller afspiller hverken video eller lyd. Når en kampagne er aktiv, holder det den valgte kanal og konto klar, så fremdriften kan fortsætte.",
             "getting_started": "Kom igang",
-            "getting_started_text": "1. Log ind på applikationen.\n2. Sørg for, at din Twitch-konto er linket til alle kampagner, du er interesseret i at mine.\n3. Hvis du bare er interesseret i at mine alt, skal du fjerne markeringen i \"Kun prioritet\" og trykke på \"Genindlæs\".\n4. Hvis du ønsker at mine specifikke spil først, skal du bruge listen \"Prioritet\" til at opsætte en ordnet liste over spil efter eget valg. Spil fra toppen af ​​listen vil blive forsøgt at blive minet først, før dem nederst på listen.\n5. Hold indstillingen \"Kun prioritet\" markeret for at undgå at mine spil, der ikke er på prioritetslisten. Eller ej - det er op til dig.\n6. Brug listen \"Ekskluder\" til at fortælle applikationen, hvilke spil der aldrig bør mines.\n7. Ændring af indholdet af en af ​​listerne eller ændring af tilstanden for \"Kun prioritet\"-indstillingen kræver, at du trykker på \"Genindlæs\" for at ændringerne træder i kraft.",
+            "getting_started_text": "1. Log ind på Twitch.\n2. Tilknyt de ønskede kampagner fra Twitchs Drops-sider.\n3. Vælg en prioritetstilstand, og føj om nødvendigt spil til Prioritet eller Udelukke.\n4. Tryk på Genindlæs, når du har ændret prioriteter eller udelukkelser.\n5. Gå tilbage til Oversigt, og lad programmet køre, mens det indsamler Drops.",
             "invalidate": {
                 "button": "Gyldiggør",
                 "text": "Gyldiggør autentiserings-token (log ud):"
