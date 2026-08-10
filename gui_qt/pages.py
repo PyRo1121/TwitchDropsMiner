@@ -1037,7 +1037,6 @@ class InventoryPage(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(30_000)
         self._refresh_timer.timeout.connect(self.refresh)
-        self._refresh_timer.start()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(14)
@@ -1087,6 +1086,10 @@ class InventoryPage(QWidget):
 
     def set_refresh_callback(self, callback: Any) -> None:
         self._refresh_button.clicked.connect(callback)
+
+    def start(self) -> None:
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
 
     def stop(self) -> None:
         self._refresh_timer.stop()

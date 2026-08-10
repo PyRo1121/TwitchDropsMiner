@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from unittest.mock import AsyncMock, Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QThread, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
@@ -133,6 +134,89 @@ class QtUiTests(unittest.TestCase):
         self.assertTrue(manager._tray_requested)
         self.assertEqual(manager._nav_buttons["help"].text(), "Help && About")
 
+    def test_constructor_is_inert_and_runtime_start_stop_is_symmetric(self) -> None:
+        manager = self.make_manager()
+        application_logger = logging.getLogger("TwitchDrops")
+
+        self.assertFalse(manager.running)
+        self.assertTrue(manager.isHidden())
+        self.assertFalse(manager._metrics_timer.isActive())
+        self.assertFalse(manager.inventory_page._refresh_timer.isActive())
+        self.assertNotIn(manager._log_handler, application_logger.handlers)
+        self.assertFalse(manager.tray._icon.isVisible())
+
+        manager.start()
+        manager.start()
+        self.app.processEvents()
+
+        self.assertTrue(manager.running)
+        self.assertFalse(manager.isHidden())
+        self.assertTrue(manager._metrics_timer.isActive())
+        self.assertTrue(manager.inventory_page._refresh_timer.isActive())
+        self.assertEqual(application_logger.handlers.count(manager._log_handler), 1)
+
+        asyncio.run(manager.stop())
+
+        self.assertFalse(manager.running)
+        self.assertTrue(manager._runtime.stopped)
+        self.assertFalse(manager._metrics_timer.isActive())
+        self.assertFalse(manager.inventory_page._refresh_timer.isActive())
+        self.assertNotIn(manager._log_handler, application_logger.handlers)
+        self.assertIsNone(manager._page_animation)
+        self.assertEqual(manager._tasks._tasks, set())
+
+    def test_stop_runs_every_persistence_stage_after_a_failure(self) -> None:
+        manager = self.make_manager()
+        manager.start()
+
+        with patch.object(
+            manager._steam_metadata,
+            "save",
+            side_effect=OSError("read-only"),
+        ) as metadata_save, patch.object(
+            manager._image_cache,
+            "save",
+        ) as image_save:
+            with self.assertRaisesRegex(OSError, "read-only"):
+                asyncio.run(manager.stop())
+
+        metadata_save.assert_called_once_with(force=False)
+        image_save.assert_called_once_with(force=False)
+        self.assertTrue(manager._runtime.stopped)
+        self.assertFalse(manager._metrics_timer.isActive())
+        self.assertNotIn(
+            manager._log_handler,
+            logging.getLogger("TwitchDrops").handlers,
+        )
+
+    def test_worker_thread_logs_are_delivered_on_the_qt_thread(self) -> None:
+        manager = self.make_manager()
+        manager.start()
+        delivered: list[tuple[str, QThread]] = []
+        original_print = manager.output.print
+
+        def capture(message: str) -> None:
+            delivered.append((message, QThread.currentThread()))
+            original_print(message)
+
+        manager.output.print = capture  # type: ignore[method-assign]
+        worker = threading.Thread(
+            target=lambda: logging.getLogger("TwitchDrops").error(
+                "worker-thread-log"
+            )
+        )
+        worker.start()
+        worker.join()
+        for _ in range(20):
+            self.app.processEvents()
+            if delivered:
+                break
+
+        self.assertEqual(len(delivered), 1)
+        self.assertIn("worker-thread-log", delivered[0][0])
+        self.assertEqual(delivered[0][1], self.app.thread())
+        asyncio.run(manager.stop())
+
     def test_failed_remote_revocation_still_performs_local_logout(self) -> None:
         manager = self.make_manager()
         auth_state = SimpleNamespace(
@@ -159,14 +243,22 @@ class QtUiTests(unittest.TestCase):
 
     def test_modern_shell_navigation_and_command_palette(self) -> None:
         manager = self.make_manager()
+        manager.start()
+        self.app.processEvents()
         self.assertEqual(manager._nav_buttons["overview"].objectName(), "nav")
         self.assertNotIn("inventory", manager._nav_buttons)
         self.assertFalse(manager.websocket_label.isHidden())
         self.assertFalse(manager._nav_buttons["overview"].icon().isNull())
         manager._command.setText("settings")
+        manager._command.setFocus()
         manager._submit_command()
-        self.assertIs(manager.stack.currentWidget(), manager.pages["settings"])
+        self.app.processEvents()
+        settings_page = manager.pages["settings"]
+        self.assertIs(manager.stack.currentWidget(), settings_page)
         self.assertEqual(manager._page_context.text(), "Preferences")
+        self.assertEqual(settings_page.accessibleName(), "Preferences")
+        self.assertIs(self.app.focusWidget(), settings_page)
+        asyncio.run(manager.stop())
 
     def test_repeated_navigation_cleans_replaced_page_animation(self) -> None:
         manager = self.make_manager()
@@ -533,6 +625,51 @@ class QtUiTests(unittest.TestCase):
             manager._close_requested.set()
             with self.assertRaisesRegex(RuntimeError, "work failed"):
                 await manager.coro_unless_closed(fail())
+
+        asyncio.run(exercise())
+
+    def test_close_wins_simultaneous_successful_work_race(self) -> None:
+        manager = self.make_manager()
+
+        async def exercise() -> None:
+            manager._close_requested.set()
+            with self.assertRaises(ExitRequest):
+                await manager.coro_unless_closed(asyncio.sleep(0, result=True))
+
+        asyncio.run(exercise())
+
+    def test_stop_cancels_and_drains_active_game_context(self) -> None:
+        async def exercise() -> None:
+            manager = self.make_manager()
+            manager.start()
+            started = asyncio.Event()
+            finalized = asyncio.Event()
+
+            async def blocked_metadata(_game_name: str) -> object:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    finalized.set()
+
+            drop = SimpleNamespace(
+                campaign=SimpleNamespace(
+                    game=SimpleNamespace(name="Example Game", slug="example-game"),
+                    image_url="",
+                )
+            )
+            with patch.object(
+                manager._steam_metadata,
+                "get",
+                side_effect=blocked_metadata,
+            ):
+                manager._game_context.display(cast(Any, drop))
+                await started.wait()
+                await manager.stop()
+
+            self.assertTrue(finalized.is_set())
+            self.assertEqual(manager._tasks._tasks, set())
+            self.assertIsNone(manager._game_context.task)
 
         asyncio.run(exercise())
 

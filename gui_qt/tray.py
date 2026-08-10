@@ -1,6 +1,7 @@
 """System tray for the Qt UI — QSystemTrayIcon with generated state icons."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from PySide6.QtCore import Qt
@@ -38,9 +39,16 @@ def _state_icon(state: str) -> QIcon:
 
 
 class QtTray:
-    def __init__(self, manager: Any, parent: Any):
-        self._manager = manager
+    def __init__(
+        self,
+        parent: Any,
+        *,
+        close: Callable[[], object],
+        notifications_enabled: Callable[[], bool],
+    ) -> None:
         self._parent = parent
+        self._close = close
+        self._notifications_enabled = notifications_enabled
         self.available = QSystemTrayIcon.isSystemTrayAvailable()
         self._icon = QSystemTrayIcon(parent)
         self._icon.setIcon(_state_icon("pickaxe"))
@@ -71,7 +79,7 @@ class QtTray:
         self._parent.activateWindow()
 
     def quit(self) -> None:
-        self._manager.close()
+        self._close()
 
     def change_icon(self, state: str) -> None:
         self._icon.setIcon(_state_icon(state))
@@ -87,7 +95,7 @@ class QtTray:
         if not (
             self.available
             and QSystemTrayIcon.supportsMessages()
-            and getattr(self._manager._twitch.settings, "tray_notifications", True)
+            and self._notifications_enabled()
         ):
             return False
         message_icon = {

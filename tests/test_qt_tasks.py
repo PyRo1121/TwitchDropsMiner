@@ -30,6 +30,34 @@ class QtTaskRegistryTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_cancel_finalizer_cannot_escape_registry_ownership(self) -> None:
+        async def exercise() -> None:
+            registry = QtTaskRegistry()
+            started = asyncio.Event()
+            finalized = asyncio.Event()
+
+            async def child() -> None:
+                await asyncio.sleep(0)
+
+            async def parent() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    with self.assertRaisesRegex(RuntimeError, "closed"):
+                        registry.create(child())
+                    finalized.set()
+
+            task = registry.create(parent())
+            await started.wait()
+            await registry.cancel_and_wait()
+
+            self.assertTrue(task.cancelled())
+            self.assertTrue(finalized.is_set())
+            self.assertEqual(registry._tasks, set())
+
+        asyncio.run(exercise())
+
     def test_task_failures_are_logged_and_removed(self) -> None:
         async def fail() -> None:
             raise RuntimeError("boom")
