@@ -28,6 +28,14 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("TwitchDrops")
+_SETTINGS_PATTERN = re.compile(
+    r'src="(https://[\w.-]+/config/settings\.[0-9a-f]{32}\.js)"',
+    re.IGNORECASE,
+)
+_SPADE_PATTERN = re.compile(
+    r'"spade_?url"\s*:\s*"(https://[^"]+)"',
+    re.IGNORECASE,
+)
 
 
 class Stream:
@@ -259,16 +267,14 @@ class Channel:
 
         For mobile view, spade_url is available immediately from the page, skipping step #2.
         """
-        SETTINGS_PATTERN: str = r'src="(https://[\w.-]+/config/settings\.[0-9a-f]{32}\.js)"'
-        SPADE_PATTERN: str = r'"spade_?url"\s*:\s*"(https://[^"]+)"'
         try:
             async with self._twitch.transport.request("GET", self.url) as response1:
                 streamer_html: str = await response1.text(encoding="utf8")
         except UnicodeError as exc:
             raise MinerException("Invalid Twitch channel page encoding") from exc
-        match = re.search(SPADE_PATTERN, streamer_html, re.I)
+        match = _SPADE_PATTERN.search(streamer_html)
         if not match:
-            match = re.search(SETTINGS_PATTERN, streamer_html, re.I)
+            match = _SETTINGS_PATTERN.search(streamer_html)
             if not match:
                 raise MinerException("Error while spade_url extraction: step #1")
             streamer_settings = match.group(1)
@@ -280,7 +286,7 @@ class Channel:
                     settings_js: str = await response2.text(encoding="utf8")
             except UnicodeError as exc:
                 raise MinerException("Invalid Twitch settings encoding") from exc
-            match = re.search(SPADE_PATTERN, settings_js, re.I)
+            match = _SPADE_PATTERN.search(settings_js)
             if not match:
                 raise MinerException("Error while spade_url extraction: step #2")
         try:
@@ -371,7 +377,11 @@ class Channel:
         """
         old_stream = self._stream
         self._stream = await self.get_stream()
-        self._twitch.on_channel_update(self, old_stream, self._stream)
+        self._twitch.channel_event_service.on_channel_update(
+            self,
+            old_stream,
+            self._stream,
+        )
         return self._stream is not None
 
     async def _online_delay(self):
@@ -386,11 +396,11 @@ class Channel:
                 await asyncio.sleep(delay)
                 try:
                     await self.update_stream()
-                except (ExitRequest, ReloadRequest):
-                    # A delayed probe is detached from the state loop; shutdown
-                    # and reload requests are normal cancellation signals here.
-                    return
-                except Exception:
+                except Exception as exc:
+                    if isinstance(exc, (ExitRequest, ReloadRequest)):
+                        # Detached probes treat shutdown and reload requests as
+                        # normal cancellation signals.
+                        return
                     logger.exception(
                         "Delayed online check %s/%s failed for channel %s",
                         attempt,
@@ -435,8 +445,13 @@ class Channel:
         if self.online:
             old_stream = self._stream
             self._stream = None
-            self._twitch.on_channel_update(self, old_stream, self._stream)
-            needs_display = False  # calling on_channel_update always does a display at the end
+            self._twitch.channel_event_service.on_channel_update(
+                self,
+                old_stream,
+                self._stream,
+            )
+            # The channel event service always displays after a transition.
+            needs_display = False
         if needs_display:
             self.display()
 

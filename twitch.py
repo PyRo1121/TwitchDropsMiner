@@ -14,6 +14,7 @@ import aiohttp
 from translate import _
 from auth import AuthState
 from channel import Channel
+from channel_event_service import ChannelEventService
 from websocket import WebsocketPool
 from watch_service import WatchService
 from inventory import DropsCampaign
@@ -34,14 +35,12 @@ from utils import (
     chunk,
     timestamp,
     cancel_tasks,
-    task_wrapper,
     AwaitableValue,
     redact_log_value,
     extract_available_drops,
     require_int,
 )
 from constants import (
-    CALL,
     MAX_INT,
     DUMP_PATH,
     MAX_CHANNELS,
@@ -58,7 +57,6 @@ from constants import (
 if TYPE_CHECKING:
     from game import Game
     from gui_port import GuiPort
-    from channel import Stream
     from settings import Settings
     from inventory import TimedDrop
     from constants import ClientInfo, JsonType, GQLOperation
@@ -104,6 +102,7 @@ class Twitch:
         self._auth_state = AuthState(self)
         self.inventory_service = InventoryService(self)
         self.drop_event_service = DropEventService(self)
+        self.channel_event_service = ChannelEventService(self)
         self.gui: GuiPort = gui_factory(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
@@ -698,12 +697,18 @@ class Twitch:
         for channel_id in channels:
             to_add_topics.append(
                 WebsocketTopic(
-                    "Channel", "StreamState", channel_id, self.process_stream_state
+                    "Channel",
+                    "StreamState",
+                    channel_id,
+                    self.channel_event_service.process_stream_state,
                 )
             )
             to_add_topics.append(
                 WebsocketTopic(
-                    "Channel", "StreamUpdate", channel_id, self.process_stream_update
+                    "Channel",
+                    "StreamUpdate",
+                    channel_id,
+                    self.channel_event_service.process_stream_update,
                 )
             )
         self.websocket.add_topics(to_add_topics)
@@ -725,116 +730,6 @@ class Twitch:
             to_add_topics,
             ordered_channels,
         )
-
-    @task_wrapper
-    async def process_stream_state(self, channel_id: int, message: JsonType):
-        msg_type = message["type"]
-        channel = self.channels.get(channel_id)
-        if channel is None:
-            logger.error(f"Stream state change for a non-existing channel: {channel_id}")
-            return
-        if msg_type == "viewcount":
-            if not channel.online:
-                # if it's not online for some reason, set it so
-                channel.check_online()
-            else:
-                try:
-                    viewers = require_int(
-                        message["viewers"],
-                        "Invalid viewer count",
-                    )
-                except (KeyError, ValueError):
-                    logger.warning("Ignoring invalid viewer count for %s", channel.name)
-                    return
-                if viewers < 0:
-                    logger.warning("Ignoring invalid viewer count for %s", channel.name)
-                    return
-                channel.viewers = viewers
-                channel.display()
-                # logger.debug(f"{channel.name} viewers: {viewers}")
-        elif msg_type == "stream-down":
-            channel.set_offline()
-        elif msg_type == "stream-up":
-            channel.check_online()
-        elif msg_type != "commercial":
-            logger.warning(f"Unknown stream state: {msg_type}")
-
-    @task_wrapper
-    async def process_stream_update(self, channel_id: int, message: JsonType):
-        # message = {
-        #     "channel_id": "12345678",
-        #     "type": "broadcast_settings_update",
-        #     "channel": "channel._login",
-        #     "old_status": "Old title",
-        #     "status": "New title",
-        #     "old_game": "Old game name",
-        #     "game": "New game name",
-        #     "old_game_id": 123456,
-        #     "game_id": 123456
-        # }
-        channel = self.channels.get(channel_id)
-        if channel is None:
-            logger.error(f"Broadcast settings update for a non-existing channel: {channel_id}")
-            return
-        if message["old_game"] != message["game"]:
-            game_change = f", game changed: {message['old_game']} -> {message['game']}"
-        else:
-            game_change = ''
-        logger.log(CALL, f"Channel update from websocket: {channel.name}{game_change}")
-        # There's no information about channel tags here, but this event is triggered
-        # when the tags change. We can use this to just update the stream data after the change.
-        # Use 'check_online' to introduce a delay, allowing for multiple title and tags
-        # changes before we update. This eventually calls 'on_channel_update' below.
-        channel.check_online()
-
-    def on_channel_update(
-        self, channel: Channel, stream_before: Stream | None, stream_after: Stream | None
-    ):
-        """
-        Called by a Channel when it's status is updated (ONLINE, OFFLINE, title/tags change).
-
-        NOTE: 'stream_before' gets dealocated once this function finishes.
-        """
-        if stream_before is None:
-            if stream_after is not None:
-                # Channel going ONLINE
-                if self.watch_service.should_switch(channel):
-                    # we can watch the channel, and we should
-                    self.print(_("status", "goes_online").format(channel=channel.name))
-                    self.watch_service.watch(channel)
-                else:
-                    logger.info(f"{channel.name} goes ONLINE")
-            else:
-                # Channel was OFFLINE and stays that way
-                logger.log(CALL, f"{channel.name} stays OFFLINE")
-        else:
-            is_watching = channel.id in self._watching_channels
-            if is_watching:
-                if not self.watch_service.can_watch(channel):
-                    if stream_after is None:
-                        self.print(_("status", "goes_offline").format(channel=channel.name))
-                    else:
-                        logger.info(
-                            f"{channel.name} status has been updated, switching... "
-                            f"(🎁: {self._drops_marker(stream_before)} -> "
-                            f"{self._drops_marker(stream_after)})"
-                        )
-                    self.change_state(State.CHANNEL_SWITCH)
-            elif stream_after is None:
-                logger.info(f"{channel.name} goes OFFLINE")
-            else:
-                logger.info(
-                    f"{channel.name} status has been updated "
-                    f"(🎁: {self._drops_marker(stream_before)} -> "
-                    f"{self._drops_marker(stream_after)})"
-                )
-                if self.watch_service.should_switch(channel):
-                    self.watch_service.watch(channel)
-        channel.display()
-
-    @staticmethod
-    def _drops_marker(stream: Stream | None) -> str:
-        return "✔" if stream is not None and stream.drops_enabled else "❌"
 
     async def get_auth(self) -> AuthState:
         await self._auth_state.validate()

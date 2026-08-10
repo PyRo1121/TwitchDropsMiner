@@ -7,6 +7,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from auth import AuthState
+from channel_event_service import ChannelEventService
 from constants import State
 from drop_event_service import DropEventService
 from exceptions import MinerException, RequestException
@@ -158,6 +159,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(miner.transport, HttpTransport)
             self.assertIsInstance(miner._auth_state, AuthState)
             self.assertIsInstance(miner.drop_event_service, DropEventService)
+            self.assertIsInstance(miner.channel_event_service, ChannelEventService)
             gui = cast(_Gui, miner.gui)
 
             statuses: list[str] = []
