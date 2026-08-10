@@ -34,6 +34,7 @@ STATE_VERSION: Final = 2
 LOGOUT_MARKER_VERSION: Final = 1
 VAULT_SERVICE: Final = "io.github.devilxd.twitchdropsminer.oauth"
 VAULT_ACCOUNT: Final = "twitch-session"
+VAULT_LOGOUT_ACCOUNT: Final = "twitch-session-logout"
 _MAX_CREDENTIAL_BYTES: Final = 1024 * 1024
 _MAX_STATE_BYTES: Final = 16 * 1024
 _LOCK_TIMEOUT_SECONDS: Final = 30.0
@@ -222,17 +223,34 @@ class OAuthTokenStore:
         with self._transaction():
             state, tombstone_persisted = self._read_cleanup_state()
             pending = replace(state, cleanup=_CLEANUP_PENDING)
+            file_marker_written = False
             try:
                 self._write_logout_marker()
             except (CredentialStorageError, OSError):
-                pass
+                file_marker_written = False
             else:
+                file_marker_written = True
+            if file_marker_written:
                 tombstone_persisted = True
+
+            state_marker_written = False
             try:
                 self._write_state(pending)
             except (CredentialStorageError, OSError):
-                pass
+                state_marker_written = False
             else:
+                state_marker_written = True
+            if state_marker_written:
+                tombstone_persisted = True
+
+            vault_marker_written = False
+            try:
+                self._write_vault_logout_marker()
+            except CredentialStorageError:
+                vault_marker_written = False
+            else:
+                vault_marker_written = True
+            if vault_marker_written:
                 tombstone_persisted = True
             self._complete_cleanup(
                 pending,
@@ -487,7 +505,11 @@ class OAuthTokenStore:
     def _read_cleanup_state(self) -> tuple[_StorageState, bool]:
         state = self._read_state()
         marker_exists = self._read_logout_marker()
-        if marker_exists:
+        try:
+            vault_marker_exists = self._read_vault_logout_marker()
+        except CredentialVaultUnavailableError:
+            vault_marker_exists = False
+        if marker_exists or vault_marker_exists:
             return replace(state, cleanup=_CLEANUP_PENDING), True
         return state, state.cleanup != _CLEANUP_NONE
 
@@ -542,6 +564,20 @@ class OAuthTokenStore:
                 marker_pending = os.path.lexists(self._logout_marker_path)
             except OSError:
                 marker_pending = True
+
+        if (
+            not state_pending
+            and not vault_pending
+            and not file_pending
+            and not marker_pending
+        ):
+            try:
+                self._delete_vault_logout_marker()
+            except CredentialStorageError as exc:
+                if not isinstance(exc, CredentialVaultUnavailableError):
+                    marker_pending = True
+                elif state.vault_provisioned:
+                    marker_pending = True
 
         if vault_pending or file_pending or state_pending or marker_pending:
             raise CredentialCleanupError(
@@ -710,6 +746,41 @@ class OAuthTokenStore:
     def _delete_file(self) -> None:
         remove_file(self._path)
 
+    @staticmethod
+    def _encode_logout_marker() -> str:
+        return json.dumps(
+            {"logout": True, "version": LOGOUT_MARKER_VERSION},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    @staticmethod
+    def _validate_logout_marker(encoded: str, *, source: str) -> None:
+        try:
+            payload: Any = json.loads(encoded)
+        except (TypeError, ValueError):
+            raise CredentialStorageError(
+                f"{source} logout marker is malformed"
+            ) from None
+        if not isinstance(payload, dict):
+            raise CredentialStorageError(f"{source} logout marker is malformed")
+        version = payload.get("version")
+        if type(version) is not int:
+            raise CredentialStorageError(
+                f"{source} logout marker has an invalid version"
+            )
+        if version > LOGOUT_MARKER_VERSION:
+            raise UnsupportedCredentialVersionError(
+                f"{source} logout marker uses a newer version"
+            )
+        logout = payload.get("logout")
+        if (
+            version != LOGOUT_MARKER_VERSION
+            or type(logout) is not bool
+            or not logout
+        ):
+            raise CredentialStorageError(f"{source} logout marker is malformed")
+
     def _read_logout_marker(self) -> bool:
         encoded = self._read_bounded_text(
             self._logout_marker_path,
@@ -719,42 +790,47 @@ class OAuthTokenStore:
         )
         if encoded is None:
             return False
-        try:
-            payload: Any = json.loads(encoded)
-        except (TypeError, ValueError):
-            raise CredentialStorageError(
-                "OAuth logout marker is malformed"
-            ) from None
-        if not isinstance(payload, dict):
-            raise CredentialStorageError("OAuth logout marker is malformed")
-        version = payload.get("version")
-        if type(version) is not int:
-            raise CredentialStorageError(
-                "OAuth logout marker has an invalid version"
-            )
-        if version > LOGOUT_MARKER_VERSION:
-            raise UnsupportedCredentialVersionError(
-                "OAuth logout marker uses a newer version"
-            )
-        logout = payload.get("logout")
-        if (
-            version != LOGOUT_MARKER_VERSION
-            or type(logout) is not bool
-            or not logout
-        ):
-            raise CredentialStorageError("OAuth logout marker is malformed")
+        self._validate_logout_marker(encoded, source="OAuth file")
         return True
 
     def _write_logout_marker(self) -> None:
-        encoded = json.dumps(
-            {"logout": True, "version": LOGOUT_MARKER_VERSION},
-            separators=(",", ":"),
-            sort_keys=True,
+        self._atomic_text(
+            self._logout_marker_path,
+            self._encode_logout_marker(),
         )
-        self._atomic_text(self._logout_marker_path, encoded)
 
     def _delete_logout_marker(self) -> None:
         remove_file(self._logout_marker_path)
+
+    def _read_vault_logout_marker(self) -> bool:
+        encoded = self._vault_get(VAULT_LOGOUT_ACCOUNT)
+        if encoded is None:
+            return False
+        self._validate_logout_marker(encoded, source="OAuth vault")
+        return True
+
+    def _write_vault_logout_marker(self) -> None:
+        encoded = self._encode_logout_marker()
+        existing = self._vault_get(VAULT_LOGOUT_ACCOUNT)
+        if existing is not None:
+            self._validate_logout_marker(existing, source="OAuth vault")
+            return
+        self._vault_set(encoded, VAULT_LOGOUT_ACCOUNT)
+        if self._vault_get(VAULT_LOGOUT_ACCOUNT) != encoded:
+            raise CredentialVaultError(
+                "OS credential vault logout marker verification failed"
+            )
+
+    def _delete_vault_logout_marker(self) -> None:
+        existing = self._vault_get(VAULT_LOGOUT_ACCOUNT)
+        if existing is None:
+            return
+        self._validate_logout_marker(existing, source="OAuth vault")
+        self._vault_delete(VAULT_LOGOUT_ACCOUNT)
+        if self._vault_get(VAULT_LOGOUT_ACCOUNT) is not None:
+            raise CredentialVaultError(
+                "OS credential vault logout marker deletion failed"
+            )
 
     def _read_state(self) -> _StorageState:
         encoded = self._read_bounded_text(
@@ -839,9 +915,9 @@ class OAuthTokenStore:
             flags |= os.O_NOFOLLOW
         try:
             descriptor = os.open(path, flags)
-        except FileNotFoundError:
-            return None
-        except OSError:
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError):
+                return None
             raise CredentialStorageError(
                 f"{label} could not be opened safely"
             ) from None
@@ -869,18 +945,18 @@ class OAuthTokenStore:
             raise CredentialStorageError(f"{label} exceeds the supported size")
         return encoded
 
-    def _vault_get(self) -> str | None:
+    def _vault_get(self, account: str = VAULT_ACCOUNT) -> str | None:
         if self._vault is None:
             raise CredentialVaultUnavailableError(
                 "No native credential vault is available"
             )
         try:
-            value = self._vault.get_password(VAULT_SERVICE, VAULT_ACCOUNT)
-        except NoKeyringError:
-            raise CredentialVaultUnavailableError(
-                "No native credential vault is available"
-            ) from None
-        except Exception:
+            value = self._vault.get_password(VAULT_SERVICE, account)
+        except Exception as exc:
+            if isinstance(exc, NoKeyringError):
+                raise CredentialVaultUnavailableError(
+                    "No native credential vault is available"
+                ) from None
             raise CredentialVaultError("OS credential vault read failed") from None
         if value is not None and not isinstance(value, str):
             raise CredentialVaultError(
@@ -888,32 +964,36 @@ class OAuthTokenStore:
             )
         return value
 
-    def _vault_set(self, encoded: str) -> None:
+    def _vault_set(
+        self,
+        encoded: str,
+        account: str = VAULT_ACCOUNT,
+    ) -> None:
         if self._vault is None:
             raise CredentialVaultUnavailableError(
                 "No native credential vault is available"
             )
         try:
-            self._vault.set_password(VAULT_SERVICE, VAULT_ACCOUNT, encoded)
-        except NoKeyringError:
-            raise CredentialVaultUnavailableError(
-                "No native credential vault is available"
-            ) from None
-        except Exception:
+            self._vault.set_password(VAULT_SERVICE, account, encoded)
+        except Exception as exc:
+            if isinstance(exc, NoKeyringError):
+                raise CredentialVaultUnavailableError(
+                    "No native credential vault is available"
+                ) from None
             raise CredentialVaultError("OS credential vault write failed") from None
 
-    def _vault_delete(self) -> None:
+    def _vault_delete(self, account: str = VAULT_ACCOUNT) -> None:
         if self._vault is None:
             raise CredentialVaultUnavailableError(
                 "No native credential vault is available"
             )
         try:
-            self._vault.delete_password(VAULT_SERVICE, VAULT_ACCOUNT)
-        except NoKeyringError:
-            raise CredentialVaultUnavailableError(
-                "No native credential vault is available"
-            ) from None
-        except Exception:
+            self._vault.delete_password(VAULT_SERVICE, account)
+        except Exception as exc:
+            if isinstance(exc, NoKeyringError):
+                raise CredentialVaultUnavailableError(
+                    "No native credential vault is available"
+                ) from None
             raise CredentialVaultError(
                 "OS credential vault deletion failed"
             ) from None
@@ -937,13 +1017,14 @@ class OAuthTokenStore:
                 raise CredentialConflictError(
                     "Vault changed during write verification"
                 )
-        except CredentialVaultUnavailableError:
-            raise
-        except CredentialConflictError:
-            raise
         except CredentialStorageError as exc:
+            if isinstance(
+                exc,
+                (CredentialVaultUnavailableError, CredentialConflictError),
+            ):
+                raise
             self._rollback_vault(previous, encoded)
-            raise exc
+            raise
         return None
 
     def _rollback_vault(
@@ -967,9 +1048,9 @@ class OAuthTokenStore:
                 raise CredentialVaultError(
                     "OS credential vault rollback verification failed"
                 )
-        except CredentialConflictError:
-            raise
-        except CredentialStorageError:
+        except CredentialStorageError as exc:
+            if isinstance(exc, CredentialConflictError):
+                raise
             raise CredentialVaultError(
                 "OS credential vault rollback failed; state is uncertain"
             ) from None

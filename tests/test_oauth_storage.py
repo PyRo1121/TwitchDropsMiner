@@ -13,6 +13,7 @@ import oauth_storage
 from oauth_storage import (
     CREDENTIAL_VERSION,
     VAULT_ACCOUNT,
+    VAULT_LOGOUT_ACCOUNT,
     VAULT_SERVICE,
     CredentialMigrationError,
     CredentialStorageError,
@@ -62,14 +63,22 @@ def _hold_interprocess_lock(
 class _MemoryVault:
     def __init__(self, value: str | None = None) -> None:
         self.value = value
+        self.marker_value: str | None = None
         self.get_error: Exception | None = None
         self.set_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.marker_get_error: Exception | None = None
+        self.marker_set_error: Exception | None = None
+        self.marker_delete_error: Exception | None = None
         self.corrupt_writes = False
         self.calls: list[tuple[str, str, str]] = []
 
     def get_password(self, service: str, username: str) -> str | None:
         self.calls.append(("get", service, username))
+        if username == VAULT_LOGOUT_ACCOUNT:
+            if self.marker_get_error is not None:
+                raise self.marker_get_error
+            return self.marker_value
         if self.get_error is not None:
             raise self.get_error
         return self.value
@@ -81,12 +90,22 @@ class _MemoryVault:
         password: str,
     ) -> None:
         self.calls.append(("set", service, username))
+        if username == VAULT_LOGOUT_ACCOUNT:
+            if self.marker_set_error is not None:
+                raise self.marker_set_error
+            self.marker_value = password
+            return
         if self.set_error is not None:
             raise self.set_error
         self.value = "corrupt" if self.corrupt_writes else password
 
     def delete_password(self, service: str, username: str) -> None:
         self.calls.append(("delete", service, username))
+        if username == VAULT_LOGOUT_ACCOUNT:
+            if self.marker_delete_error is not None:
+                raise self.marker_delete_error
+            self.marker_value = None
+            return
         if self.delete_error is not None:
             raise self.delete_error
         self.value = None
@@ -234,6 +253,26 @@ class OAuthTokenStoreTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
             self.assertFalse(any(call[0] == "set" for call in vault.calls))
+
+    def test_forward_vault_logout_marker_blocks_every_load(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            credential = _current_record("client-a", "vault-secret", vault=True)
+            vault = _MemoryVault(credential)
+            future_marker = json.dumps(
+                {
+                    "logout": True,
+                    "version": oauth_storage.LOGOUT_MARKER_VERSION + 1,
+                }
+            )
+            vault.marker_value = future_marker
+            store = OAuthTokenStore(path, vault=vault)
+
+            with self.assertRaises(UnsupportedCredentialVersionError):
+                store.load("client-a")
+
+            self.assertEqual(vault.value, credential)
+            self.assertEqual(vault.marker_value, future_marker)
 
     def test_forward_file_version_is_rejected_and_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -397,6 +436,55 @@ class OAuthTokenStoreTests(unittest.TestCase):
             self.assertIsNone(fresh.load("client-a"))
             self.assertIsNone(vault.value)
             self.assertFalse(path.with_name("oauth.json.logout").exists())
+
+    def test_vault_marker_survives_correlated_file_marker_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault()
+            store = OAuthTokenStore(path, vault=vault)
+            store.save("client-a", "vault-secret")
+            vault.delete_error = RuntimeError("vault locked")
+
+            with (
+                patch.object(
+                    store,
+                    "_write_logout_marker",
+                    side_effect=OSError("directory read-only"),
+                ),
+                patch.object(
+                    store,
+                    "_write_state",
+                    side_effect=OSError("directory read-only"),
+                ),
+            ):
+                with self.assertRaises(
+                    oauth_storage.CredentialCleanupError
+                ) as raised:
+                    store.clear()
+
+            self.assertTrue(raised.exception.tombstone_persisted)
+            self.assertTrue(raised.exception.vault_pending)
+            self.assertLess(
+                vault.calls.index(
+                    ("set", VAULT_SERVICE, VAULT_LOGOUT_ACCOUNT)
+                ),
+                vault.calls.index(("delete", VAULT_SERVICE, VAULT_ACCOUNT)),
+            )
+            self.assertFalse(path.with_name("oauth.json.logout").exists())
+            self.assertIsNotNone(vault.value)
+            self.assertEqual(
+                _json_record(vault.marker_value or ""),
+                {
+                    "logout": True,
+                    "version": oauth_storage.LOGOUT_MARKER_VERSION,
+                },
+            )
+
+            vault.delete_error = None
+            fresh = OAuthTokenStore(path, vault=vault)
+            self.assertIsNone(fresh.load("client-a"))
+            self.assertIsNone(vault.value)
+            self.assertIsNone(vault.marker_value)
 
     def test_initial_tombstone_write_failure_blocks_fresh_fallback_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

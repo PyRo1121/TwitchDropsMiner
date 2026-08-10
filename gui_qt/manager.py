@@ -71,6 +71,7 @@ class QtGUIManager(QMainWindow):
         self._app = cast(QApplication, app)
         self._app.setQuitOnLastWindowClosed(False)
         self._close_requested = asyncio.Event()
+        self._close_inhibited = False
         self._closing = False
         self._theme_dark = bool(twitch.settings.dark_mode)
         self._theme = make_theme(self._theme_dark)
@@ -280,6 +281,15 @@ class QtGUIManager(QMainWindow):
     def close_requested(self) -> bool:
         return self._close_requested.is_set()
 
+    @property
+    def close_inhibited(self) -> bool:
+        return self._close_inhibited
+
+    def set_close_inhibited(self, inhibited: bool) -> None:
+        self._close_inhibited = inhibited
+        if inhibited:
+            self._close_requested.clear()
+
     async def wait_until_closed(self) -> None:
         await self._close_requested.wait()
 
@@ -313,14 +323,18 @@ class QtGUIManager(QMainWindow):
         await self._runtime.stop()
 
     def close(self) -> bool:
+        if self._close_inhibited:
+            self.grab_attention(sound=False)
+            return False
         self._close_requested.set()
         self._twitch.close()
         return True
 
     def closeEvent(self, event: Any) -> None:
-        if not self._closing:
-            self.close()
-        event.accept()
+        if self._closing or self.close():
+            event.accept()
+        else:
+            event.ignore()
 
     def close_window(self) -> None:
         self._closing = True

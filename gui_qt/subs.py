@@ -430,8 +430,7 @@ class QtHelp:
         else:
             self._twitch.change_state(State.RESTART)
         finally:
-            if block_exit_until_retry:
-                self._twitch.prevent_close()
+            self._manager.set_close_inhibited(block_exit_until_retry)
             self._invalidate_task = None
             self._invalidate_button.config(
                 state="normal" if retry_logout else "disabled"

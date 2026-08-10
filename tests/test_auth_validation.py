@@ -16,6 +16,7 @@ from oauth_storage import (
     CredentialCleanupError,
     CredentialStorageError,
     OAuthTokenStore,
+    VAULT_ACCOUNT,
 )
 from auth import (
     AUTH_VALIDATION_INTERVAL,
@@ -135,10 +136,27 @@ class AuthValidationTests(unittest.TestCase):
                     "client-a",
                     "refresh-secret",
                 )
+                vault_values = {VAULT_ACCOUNT: encoded}
+
+                def get_password(_service: str, account: str) -> str | None:
+                    return vault_values.get(account)
+
+                def set_password(
+                    _service: str,
+                    account: str,
+                    value: str,
+                ) -> None:
+                    vault_values[account] = value
+
+                def delete_password(_service: str, account: str) -> None:
+                    if account == VAULT_ACCOUNT:
+                        raise RuntimeError("locked")
+                    vault_values.pop(account, None)
+
                 vault = SimpleNamespace(
-                    get_password=Mock(return_value=encoded),
-                    set_password=Mock(),
-                    delete_password=Mock(side_effect=RuntimeError("locked")),
+                    get_password=get_password,
+                    set_password=set_password,
+                    delete_password=delete_password,
                 )
                 transport = SimpleNamespace(clear_cookies=Mock())
                 twitch = SimpleNamespace(

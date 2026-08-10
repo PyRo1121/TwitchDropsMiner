@@ -77,19 +77,15 @@ class FakeTwitch:
         self.inventory: list[Any] = []
         self.channels: dict[int, Any] = {}
         self.state_changes: list[Any] = []
-        self.close_prevented = False
 
     def close(self) -> None:
-        pass
+        self.change_state(State.EXIT)
 
     def state_change(self, state):
         return lambda: self.change_state(state)
 
     def change_state(self, state: Any) -> None:
         self.state_changes.append(state)
-
-    def prevent_close(self) -> None:
-        self.close_prevented = True
 
 
 class FakeWebSocket:
@@ -595,9 +591,9 @@ class QtUiTests(unittest.TestCase):
         self.assertFalse(
             manager.help._invalidate_button.widget.isEnabled()
         )
-        self.assertFalse(twitch.close_prevented)
+        self.assertFalse(manager.close_inhibited)
 
-    def test_logout_without_persisted_marker_remains_retryable(self) -> None:
+    def test_real_manager_blocks_close_until_logout_retry_is_safe(self) -> None:
         manager = self.make_manager()
         auth_state = SimpleNamespace(
             _access_token=None,
@@ -621,7 +617,31 @@ class QtUiTests(unittest.TestCase):
         self.assertTrue(
             manager.help._invalidate_button.widget.isEnabled()
         )
-        self.assertTrue(twitch.close_prevented)
+        self.assertTrue(manager.close_inhibited)
+
+        with patch.object(manager, "grab_attention") as grab_attention:
+            self.assertFalse(manager.close())
+            self.assertFalse(manager.close_requested)
+            self.assertNotIn(State.EXIT, twitch.state_changes)
+
+            close_event = Mock()
+            manager.closeEvent(close_event)
+            close_event.ignore.assert_called_once_with()
+            close_event.accept.assert_not_called()
+            manager.tray.quit()
+            self.assertEqual(grab_attention.call_count, 3)
+        self.assertFalse(manager.close_requested)
+        self.assertNotIn(State.EXIT, twitch.state_changes)
+
+        auth_state.logout.side_effect = None
+        auth_state.logout.return_value = None
+        asyncio.run(manager.help._invalidate_token())
+        self.assertFalse(manager.close_inhibited)
+        self.assertIn(State.RESTART, twitch.state_changes)
+
+        self.assertTrue(manager.close())
+        self.assertTrue(manager.close_requested)
+        self.assertEqual(twitch.state_changes[-1], State.EXIT)
 
     def test_modern_shell_navigation_and_command_palette(self) -> None:
         manager = self.make_manager()
