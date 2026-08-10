@@ -110,6 +110,25 @@ class ClaimRequest:
                 raise ValueError(f"Claim {field} must be a non-empty string")
 
 
+@dataclass(frozen=True, slots=True)
+class InventoryDropIdentity:
+    """Inventory generation and object identity captured for one operation."""
+
+    generation: int
+    drop_id: str
+    drop: BaseDrop
+
+    @classmethod
+    def capture(cls, twitch: Twitch, drop: BaseDrop) -> InventoryDropIdentity:
+        return cls(twitch._inventory_generation, drop.id, drop)
+
+    def is_current(self, twitch: Twitch) -> bool:
+        return (
+            twitch._inventory_generation == self.generation
+            and twitch._drops.get(self.drop_id) is self.drop
+        )
+
+
 class DropClaimService:
     """Serializes and publishes claim transitions for one campaign generation."""
 
@@ -118,17 +137,27 @@ class DropClaimService:
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def generate_claim(self, drop: BaseDrop) -> None:
-        """Create a validated synthetic instance ID for a completed drop."""
-        auth_state = await self._twitch.get_auth()
-        user_id = auth_state.user_id
-        if type(user_id) is not int or user_id < 1:
-            raise RequestException("Cannot generate a Drop claim without a user ID")
-        drop.update_claim(f"{user_id}#{drop.campaign.id}#{drop.id}")
-
-    async def claim(self, drop: BaseDrop) -> bool:
-        """Attempt one serialized claim and commit its resulting state."""
+        """Create a synthetic instance ID only for the installed drop object."""
+        identity = InventoryDropIdentity.capture(self._twitch, drop)
         lock = self._locks.setdefault(drop.id, asyncio.Lock())
         async with lock:
+            if not identity.is_current(self._twitch):
+                return
+            auth_state = await self._twitch.get_auth()
+            if not identity.is_current(self._twitch):
+                return
+            user_id = auth_state.user_id
+            if type(user_id) is not int or user_id < 1:
+                raise RequestException("Cannot generate a Drop claim without a user ID")
+            drop.update_claim(f"{user_id}#{drop.campaign.id}#{drop.id}")
+
+    async def claim(self, drop: BaseDrop) -> bool:
+        """Attempt one serialized claim for the installed drop object."""
+        identity = InventoryDropIdentity.capture(self._twitch, drop)
+        lock = self._locks.setdefault(drop.id, asyncio.Lock())
+        async with lock:
+            if not identity.is_current(self._twitch):
+                return False
             if drop.is_claimed:
                 drop._apply_claim_result(True)
                 drop._present_claim_result()
@@ -137,6 +166,8 @@ class DropClaimService:
             request = self._request_for(drop)
             claim_attempted = request is not None
             result = request is not None and await self._submit(request)
+            if not identity.is_current(self._twitch):
+                return False
             drop._apply_claim_result(result)
             self._publish_result(drop, result, claim_attempted=claim_attempted)
             drop._present_claim_result()

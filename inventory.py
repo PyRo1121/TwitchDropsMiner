@@ -373,6 +373,10 @@ class TimedDrop(BaseDrop):
         if result:
             self.real_current_minutes = self.required_minutes
 
+    def _apply_claim_evidence(self) -> None:
+        self._claim_state = self._claim_state.claimed()
+        self.real_current_minutes = self.required_minutes
+
     def display(self, *, countdown: bool = True, subone: bool = False):
         self._twitch.gui.display_drop(self, countdown=countdown, subone=subone)
 
@@ -505,7 +509,8 @@ class DropsCampaign:
                 raise ValueError(f"Campaign contains duplicate drop ID: {drop_id}")
             self.timed_drops[drop_id] = TimedDrop(self, drop_data)
         self._validate_preconditions()
-        self._resolve_claim_evidence(claimed_benefits)
+        if claimed_benefits:
+            resolve_claim_evidence((self,), claimed_benefits)
 
     def _validate_preconditions(self) -> None:
         states: dict[str, int] = {}
@@ -528,38 +533,6 @@ class DropsCampaign:
 
         for drop_id in self.timed_drops:
             visit(drop_id)
-
-    def _resolve_claim_evidence(
-        self,
-        claimed_benefits: dict[str, datetime],
-    ) -> None:
-        """Conservatively assign non-authoritative benefit awards to drops.
-
-        An award remains valid through Twitch's campaign claim grace period.
-        Reused benefit IDs are intentionally left unresolved when one award can
-        belong to more than one drop; guessing would corrupt prerequisite state.
-        """
-        claim_deadline = self.ends_at + timedelta(hours=24)
-        candidates: dict[str, set[str]] = {}
-        for benefit_id, awarded_at in claimed_benefits.items():
-            candidates[benefit_id] = {
-                drop.id
-                for drop in self.drops
-                if drop.starts_at <= awarded_at < claim_deadline
-                and any(benefit.id == benefit_id for benefit in drop.benefits)
-            }
-
-        for drop in self.drops:
-            if drop._claim_state_authoritative or not drop.benefits:
-                continue
-            if all(
-                benefit.id in claimed_benefits
-                and candidates.get(benefit.id) == {drop.id}
-                for benefit in drop.benefits
-            ):
-                drop._claim_state = drop._claim_state.claimed()
-                if isinstance(drop, TimedDrop):
-                    drop.real_current_minutes = drop.required_minutes
 
     def _precondition_ids(self, drop: TimedDrop) -> set[str]:
         preconditions: set[str] = set()
@@ -702,3 +675,44 @@ class DropsCampaign:
             and self.starts_at < stamp
             and any(drop._can_earn_within(stamp) for drop in self.drops)
         )
+
+
+def resolve_claim_evidence(
+    campaigns: abc.Iterable[DropsCampaign],
+    claimed_benefits: dict[str, datetime],
+) -> None:
+    """Resolve account-wide benefit awards against one staged inventory.
+
+    Twitch's claimed-benefit feed is account-wide and benefit IDs can be reused.
+    An award is assigned only when its campaign/drop identity is unique across
+    every valid campaign whose claim grace window contains the award.
+    """
+    staged_campaigns = tuple(campaigns)
+    owners: dict[str, list[tuple[DropsCampaign, TimedDrop]]] = {}
+    for campaign in staged_campaigns:
+        for drop in campaign.drops:
+            for benefit in drop.benefits:
+                owners.setdefault(benefit.id, []).append((campaign, drop))
+
+    candidates: dict[str, set[tuple[str, str]]] = {}
+    for benefit_id, awarded_at in claimed_benefits.items():
+        candidates[benefit_id] = {
+            (campaign.id, drop.id)
+            for campaign, drop in owners.get(benefit_id, ())
+            if (
+                drop.starts_at
+                <= awarded_at
+                < campaign.ends_at + timedelta(hours=24)
+            )
+        }
+
+    for campaign in staged_campaigns:
+        for drop in campaign.drops:
+            if drop._claim_state_authoritative or not drop.benefits:
+                continue
+            identity = (campaign.id, drop.id)
+            if all(
+                candidates.get(benefit.id) == {identity}
+                for benefit in drop.benefits
+            ):
+                drop._apply_claim_evidence()

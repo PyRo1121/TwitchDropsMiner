@@ -273,6 +273,56 @@ class InventoryValidationTests(unittest.TestCase):
 
         self.assertFalse(any(drop.is_claimed for drop in campaign.drops))
 
+    def test_cross_campaign_grace_windows_leave_reused_benefit_ambiguous(self) -> None:
+        past = _campaign_data()
+        past["id"] = "past-campaign"
+        past["endAt"] = _stamp(-1)
+        past_drop = past["timeBasedDrops"][0]
+        past_drop["id"] = "past-drop"
+        past_drop["endAt"] = _stamp(-5)
+        past_drop["benefitEdges"] = [_benefit("shared")]
+        del past_drop["self"]
+
+        current = _campaign_data()
+        current["id"] = "current-campaign"
+        current_drop = current["timeBasedDrops"][0]
+        current_drop["id"] = "current-drop"
+        current_drop["benefitEdges"] = [_benefit("shared")]
+        del current_drop["self"]
+
+        unique = _campaign_data()
+        unique["id"] = "unique-campaign"
+        unique_drop = unique["timeBasedDrops"][0]
+        unique_drop["id"] = "unique-drop"
+        unique_drop["endAt"] = _stamp(-5)
+        unique_drop["benefitEdges"] = [_benefit("unique")]
+        del unique_drop["self"]
+
+        awarded_at = datetime.now(timezone.utc)
+        campaigns = build_campaigns(
+            cast(Any, _Twitch()),
+            {
+                "past-campaign": past,
+                "current-campaign": current,
+                "unique-campaign": unique,
+            },
+            {"shared": awarded_at, "unique": awarded_at},
+        )
+        claimed = {
+            (campaign.id, drop.id): drop.is_claimed
+            for campaign in campaigns
+            for drop in campaign.drops
+        }
+
+        self.assertEqual(
+            claimed,
+            {
+                ("past-campaign", "past-drop"): False,
+                ("current-campaign", "current-drop"): False,
+                ("unique-campaign", "unique-drop"): True,
+            },
+        )
+
     def test_rewardless_prerequisite_inherits_downstream_eligibility(self) -> None:
         data = _campaign_data()
         data["self"]["isAccountConnected"] = False

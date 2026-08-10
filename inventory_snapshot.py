@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from exceptions import MinerException, RequestException
-from inventory import DropsCampaign, TimedDrop
+from inventory import DropsCampaign, TimedDrop, resolve_claim_evidence
 from utils import merge_primary_json, timestamp
 
 if TYPE_CHECKING:
@@ -123,7 +123,9 @@ def build_campaigns(
     skipped_ids: list[str] = []
     for campaign_id, campaign_data in inventory_data.items():
         try:
-            campaign = DropsCampaign(twitch, campaign_data, claimed_benefits)
+            # Claimed-benefit evidence is account-wide. Defer it until every
+            # valid campaign has been staged so reused IDs remain ambiguous.
+            campaign = DropsCampaign(twitch, campaign_data, {})
             if campaign.id != campaign_id:
                 raise ValueError("campaign ID mismatch")
         except (KeyError, TypeError, ValueError) as exc:
@@ -143,6 +145,7 @@ def build_campaigns(
         )
     if inventory_data and not campaigns:
         raise RequestException("Every Twitch campaign in the snapshot was malformed")
+    resolve_claim_evidence(campaigns, claimed_benefits)
     campaigns.sort(key=lambda campaign: campaign.active, reverse=True)
     campaigns.sort(
         key=lambda campaign: campaign.upcoming

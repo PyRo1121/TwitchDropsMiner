@@ -62,10 +62,17 @@ class _Transport:
     def __init__(self) -> None:
         self.calls = 0
         self.status = "ELIGIBLE_FOR_ALL"
+        self.block_requests = False
+        self.request_started = asyncio.Event()
+        self.release_request = asyncio.Event()
 
     async def gql_request(self, _query: object) -> dict[str, object]:
         self.calls += 1
-        await asyncio.sleep(0)
+        self.request_started.set()
+        if self.block_requests:
+            await self.release_request.wait()
+        else:
+            await asyncio.sleep(0)
         return {
             "data": {
                 "claimDropRewards": {
@@ -80,6 +87,11 @@ class _Twitch:
         self.settings = SimpleNamespace(enable_badges_emotes=True)
         self.transport = _Transport()
         self.user_id: object = 42
+        self._inventory_generation = 0
+        self._drops: dict[str, object] = {}
+        self.block_auth = False
+        self.auth_started = asyncio.Event()
+        self.release_auth = asyncio.Event()
         self.history: list[str] = []
         self.prints: list[str] = []
         self.notifications: list[tuple[str, str]] = []
@@ -91,7 +103,14 @@ class _Twitch:
         )
 
     async def get_auth(self) -> object:
+        self.auth_started.set()
+        if self.block_auth:
+            await self.release_auth.wait()
         return SimpleNamespace(user_id=self.user_id)
+
+    def install(self, drop: object) -> None:
+        self._inventory_generation += 1
+        self._drops = {cast(Any, drop).id: drop}
 
     def history_event(self, kind: str, **_kwargs: object) -> None:
         self.history.append(kind)
@@ -115,6 +134,7 @@ class ClaimSerializationTests(unittest.IsolatedAsyncioTestCase):
         twitch = _Twitch()
         campaign = DropsCampaign(cast(Any, twitch), _campaign_data(), {})
         drop = next(iter(campaign.drops))
+        twitch.install(drop)
 
         first, second = await asyncio.gather(drop.claim(), drop.claim())
 
@@ -136,6 +156,7 @@ class ClaimSerializationTests(unittest.IsolatedAsyncioTestCase):
         twitch.transport.status = "INELIGIBLE"
         campaign = DropsCampaign(cast(Any, twitch), _campaign_data(), {})
         drop = next(iter(campaign.drops))
+        twitch.install(drop)
 
         claimed = await drop.claim()
 
@@ -154,6 +175,7 @@ class ClaimSerializationTests(unittest.IsolatedAsyncioTestCase):
         data["timeBasedDrops"][0]["self"].pop("dropInstanceID")
         campaign = DropsCampaign(cast(Any, twitch), data, {})
         drop = next(iter(campaign.drops))
+        twitch.install(drop)
 
         await drop.generate_claim()
 
@@ -169,12 +191,66 @@ class ClaimSerializationTests(unittest.IsolatedAsyncioTestCase):
                 data["timeBasedDrops"][0]["self"].pop("dropInstanceID")
                 campaign = DropsCampaign(cast(Any, twitch), data, {})
                 drop = next(iter(campaign.drops))
+                twitch.install(drop)
 
                 with self.assertRaisesRegex(RequestException, "user ID"):
                     await drop.generate_claim()
 
                 self.assertIsNone(drop.claim_id)
                 self.assertFalse(drop.can_claim)
+
+    async def test_blocked_auth_does_not_mutate_a_replaced_drop(self) -> None:
+        twitch = _Twitch()
+        twitch.block_auth = True
+        data = _campaign_data()
+        data["timeBasedDrops"][0]["self"].pop("dropInstanceID")
+        old_campaign = DropsCampaign(cast(Any, twitch), data, {})
+        old_drop = next(iter(old_campaign.drops))
+        twitch.install(old_drop)
+
+        generation = asyncio.create_task(old_drop.generate_claim())
+        await twitch.auth_started.wait()
+        new_campaign = DropsCampaign(cast(Any, twitch), data, {})
+        new_drop = next(iter(new_campaign.drops))
+        twitch.install(new_drop)
+        twitch.release_auth.set()
+        await generation
+
+        self.assertIsNone(old_drop.claim_id)
+        self.assertIsNone(new_drop.claim_id)
+        self.assertFalse(old_drop.is_claimed)
+        self.assertFalse(new_drop.is_claimed)
+        self.assertEqual(twitch.history, [])
+        self.assertEqual(twitch.notifications, [])
+        self.assertEqual(twitch.prints, [])
+        self.assertEqual(twitch.drop_updates, [])
+        self.assertEqual(twitch.outcome_order, [])
+
+    async def test_blocked_submit_does_not_publish_for_a_replaced_drop(self) -> None:
+        twitch = _Twitch()
+        twitch.transport.block_requests = True
+        old_campaign = DropsCampaign(cast(Any, twitch), _campaign_data(), {})
+        old_drop = next(iter(old_campaign.drops))
+        twitch.install(old_drop)
+
+        claim = asyncio.create_task(old_drop.claim())
+        await twitch.transport.request_started.wait()
+        new_campaign = DropsCampaign(cast(Any, twitch), _campaign_data(), {})
+        new_drop = next(iter(new_campaign.drops))
+        twitch.install(new_drop)
+        twitch.transport.release_request.set()
+        result = await claim
+
+        self.assertFalse(result)
+        self.assertFalse(old_drop.is_claimed)
+        self.assertFalse(new_drop.is_claimed)
+        self.assertEqual(old_drop.claim_id, "claim")
+        self.assertEqual(new_drop.claim_id, "claim")
+        self.assertEqual(twitch.history, [])
+        self.assertEqual(twitch.notifications, [])
+        self.assertEqual(twitch.prints, [])
+        self.assertEqual(twitch.drop_updates, [])
+        self.assertEqual(twitch.outcome_order, [])
 
     def test_claim_instance_state_rejects_empty_ids_and_can_be_cleared(self) -> None:
         twitch = _Twitch()
