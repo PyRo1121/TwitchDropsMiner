@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import abc
+from collections import abc, OrderedDict
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from channel import Channel
 from constants import (
     GQL_BATCH_SIZE,
     GQL_QUERIES,
+    MAX_CHANNELS,
     MAX_INT,
     GQLOperation,
     JsonType,
+    State,
     WebsocketTopic,
 )
 from exceptions import GQLException, MinerException
+from translate import _
 from utils import cancel_tasks, chunk, extract_available_drops, require_int
 
 if TYPE_CHECKING:
     from game import Game
+    from inventory import DropsCampaign
     from twitch import Twitch
 
 
@@ -26,7 +31,7 @@ logger = logging.getLogger("TwitchDrops")
 
 
 class ChannelDirectoryService:
-    """Discover, validate, and rank channels without owning watch policy."""
+    """Own channel discovery and registry reconciliation, not watch loops."""
 
     def __init__(self, twitch: Twitch) -> None:
         self._twitch = twitch
@@ -70,6 +75,126 @@ class ChannelDirectoryService:
                 )
             )
         return topics
+
+    async def cleanup_channels(
+        self,
+        channels: OrderedDict[int, Channel],
+        *,
+        full_cleanup: bool,
+    ) -> None:
+        self._twitch.gui.status.update(_("gui", "status", "cleanup"))
+        if not self._twitch.wanted_games or full_cleanup:
+            to_remove = list(channels.values())
+        else:
+            to_remove = [
+                channel
+                for channel in channels.values()
+                if not channel.acl_based
+                and (
+                    channel.offline
+                    or channel.game is None
+                    or channel.game not in self._twitch.wanted_games
+                )
+            ]
+        if to_remove:
+            await self._twitch.watch_service.stop_watching_and_wait()
+            self._twitch.websocket.remove_topics(
+                self.channel_state_topics(to_remove)
+            )
+            for channel in to_remove:
+                del channels[channel.id]
+                channel.remove()
+        if self._twitch.wanted_games:
+            self._twitch.change_state(State.CHANNELS_FETCH)
+        else:
+            self._twitch.print(_("status", "no_campaign"))
+            self._twitch.change_state(State.IDLE)
+
+    async def fetch_channels(
+        self,
+        channels: OrderedDict[int, Channel],
+    ) -> None:
+        # Quiesce old watch tasks before replacing their Channel objects.
+        await self._twitch.watch_service.stop_watching_and_wait()
+        self._twitch.gui.status.update(_("gui", "status", "gathering"))
+        new_channels = set(channels.values())
+        channels.clear()
+        self._twitch.gui.channels.clear()
+
+        no_acl: set[Game] = set()
+        acl_channels: set[Channel] = set()
+        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+        for campaign in self._twitch.inventory:
+            if (
+                campaign.game in self._twitch.wanted_games
+                and campaign.can_earn_within(next_hour)
+            ):
+                if campaign.allowed_channels:
+                    acl_channels.update(campaign.allowed_channels)
+                else:
+                    no_acl.add(campaign.game)
+
+        acl_channels.difference_update(new_channels)
+        await self.bulk_check_online(acl_channels)
+        new_channels.update(acl_channels)
+        new_channels.update(await self.fetch_live_streams_for_games(no_acl))
+        ordered = self.rank_channels(new_channels)
+        removed = ordered[MAX_CHANNELS:]
+        ordered = ordered[:MAX_CHANNELS]
+        if removed:
+            self._twitch.websocket.remove_topics(
+                self.channel_state_topics(removed)
+            )
+        for channel in ordered:
+            channels[channel.id] = channel
+            channel.display(add=True)
+
+        topics: list[WebsocketTopic] = []
+        for channel_id in channels:
+            topics.extend(
+                (
+                    WebsocketTopic(
+                        "Channel",
+                        "StreamState",
+                        channel_id,
+                        self._twitch.channel_event_service.process_stream_state,
+                    ),
+                    WebsocketTopic(
+                        "Channel",
+                        "StreamUpdate",
+                        channel_id,
+                        self._twitch.channel_event_service.process_stream_update,
+                    ),
+                )
+            )
+        self._twitch.websocket.add_topics(topics)
+
+        for channel in channels.values():
+            if not self._twitch.watch_service.can_watch(channel):
+                continue
+            active_campaign = self._get_active_campaign(channel)
+            if active_campaign is not None and active_campaign.first_drop is not None:
+                active_campaign.first_drop.display(countdown=False, subone=True)
+            break
+        self._twitch.change_state(State.CHANNEL_SWITCH)
+
+    def _get_active_campaign(
+        self,
+        channel: Channel | None = None,
+    ) -> DropsCampaign | None:
+        if not self._twitch.wanted_games:
+            return None
+        watching_channel = self._twitch.watching_channel.get_with_default(channel)
+        if watching_channel is None:
+            return None
+        campaigns = [
+            campaign
+            for campaign in self._twitch.inventory
+            if campaign.can_earn(watching_channel)
+        ]
+        if not campaigns:
+            return None
+        return min(campaigns, key=lambda campaign: campaign.remaining_minutes)
 
     async def get_live_streams(
         self,

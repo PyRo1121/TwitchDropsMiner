@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from channel import Channel
 from channel_directory_service import ChannelDirectoryService
+from constants import State
 from exceptions import MinerException
 from twitch import Twitch
 
@@ -41,6 +43,124 @@ class ChannelDirectoryServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(ranked, [primary_acl, primary, secondary])
+
+    async def test_cleanup_removes_stale_channels_and_advances_state(self) -> None:
+        game = object()
+        channel = cast(
+            Any,
+            SimpleNamespace(
+                id=7,
+                acl_based=False,
+                offline=True,
+                game=game,
+                remove=Mock(),
+            ),
+        )
+        channels = OrderedDict(((channel.id, channel),))
+        states: list[State] = []
+        websocket = SimpleNamespace(remove_topics=Mock())
+        watch_service = SimpleNamespace(stop_watching_and_wait=AsyncMock())
+        twitch = cast(
+            Any,
+            SimpleNamespace(
+                wanted_games=[game],
+                gui=SimpleNamespace(
+                    status=SimpleNamespace(update=Mock()),
+                ),
+                websocket=websocket,
+                watch_service=watch_service,
+                change_state=states.append,
+                print=Mock(),
+            ),
+        )
+        service = ChannelDirectoryService(twitch)
+
+        await service.cleanup_channels(channels, full_cleanup=False)
+
+        self.assertEqual(channels, {})
+        watch_service.stop_watching_and_wait.assert_awaited_once_with()
+        channel.remove.assert_called_once_with()
+        websocket.remove_topics.assert_called_once_with(
+            [
+                "video-playback-by-id.7",
+                "broadcast-settings-update.7",
+            ]
+        )
+        self.assertEqual(states, [State.CHANNELS_FETCH])
+
+    async def test_fetch_reinstalls_registry_and_channel_topics(self) -> None:
+        game = object()
+        channel = Mock()
+        channel.id = 7
+        channel.game = game
+        channel.viewers = 10
+        channel.acl_based = False
+        channels = cast(
+            OrderedDict[int, Channel],
+            OrderedDict(((channel.id, channel),)),
+        )
+        states: list[State] = []
+        fast_drop = Mock()
+        slow_drop = Mock()
+        campaigns = [
+            SimpleNamespace(
+                game=game,
+                allowed_channels=(channel,),
+                can_earn_within=Mock(return_value=True),
+                can_earn=Mock(return_value=True),
+                remaining_minutes=20,
+                first_drop=slow_drop,
+            ),
+            SimpleNamespace(
+                game=game,
+                allowed_channels=(channel,),
+                can_earn_within=Mock(return_value=True),
+                can_earn=Mock(return_value=True),
+                remaining_minutes=5,
+                first_drop=fast_drop,
+            ),
+        ]
+        websocket = SimpleNamespace(
+            add_topics=Mock(),
+            remove_topics=Mock(),
+        )
+        watch_service = SimpleNamespace(
+            stop_watching_and_wait=AsyncMock(),
+            can_watch=Mock(return_value=True),
+        )
+        twitch = cast(
+            Any,
+            SimpleNamespace(
+                wanted_games=[game],
+                inventory=campaigns,
+                watching_channel=SimpleNamespace(
+                    get_with_default=lambda default: default,
+                ),
+                gui=SimpleNamespace(
+                    status=SimpleNamespace(update=Mock()),
+                    channels=SimpleNamespace(clear=Mock()),
+                ),
+                websocket=websocket,
+                watch_service=watch_service,
+                channel_event_service=SimpleNamespace(
+                    process_stream_state=AsyncMock(),
+                    process_stream_update=AsyncMock(),
+                ),
+                change_state=states.append,
+            ),
+        )
+        service = ChannelDirectoryService(twitch)
+
+        await service.fetch_channels(channels)
+
+        self.assertEqual(list(channels), [channel.id])
+        watch_service.stop_watching_and_wait.assert_awaited_once_with()
+        channel.display.assert_called_once_with(add=True)
+        topics = websocket.add_topics.call_args.args[0]
+        self.assertEqual(len(topics), 2)
+        fast_drop.display.assert_called_once_with(countdown=False, subone=True)
+        slow_drop.display.assert_not_called()
+        self.assertEqual(states, [State.CHANNEL_SWITCH])
 
     async def test_directory_root_schema_is_required(self) -> None:
         transport = SimpleNamespace(gql_request=AsyncMock(return_value={"data": {}}))
@@ -150,6 +270,9 @@ class ChannelDirectoryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(Twitch, "_rank_channels"))
         self.assertFalse(hasattr(Twitch, "get_live_streams"))
         self.assertFalse(hasattr(Twitch, "bulk_check_online"))
+        self.assertFalse(hasattr(Twitch, "_cleanup_channels_state"))
+        self.assertFalse(hasattr(Twitch, "_fetch_channels"))
+        self.assertFalse(hasattr(Twitch, "get_active_campaign"))
 
 
 if __name__ == "__main__":
