@@ -292,8 +292,8 @@
             "getting_started": "Kom igang",
             "getting_started_text": "1. Log ind på Twitch.\n2. Tilknyt de ønskede kampagner fra Twitchs Drops-sider.\n3. Vælg en prioritetstilstand, og føj om nødvendigt spil til Prioritet eller Udelukke.\n4. Tryk på Genindlæs, når du har ændret prioriteter eller udelukkelser.\n5. Gå tilbage til Oversigt, og lad programmet køre, mens det indsamler Drops.",
             "invalidate": {
-                "button": "Gyldiggør",
-                "text": "Gyldiggør autentiserings-token (log ud):"
+                "button": "Ugyldiggør",
+                "text": "Ugyldiggør godkendelsestokenet (log ud):"
             }
         }
     }

@@ -293,7 +293,7 @@
             "getting_started_text": "1. Jelentkezzen be a Twitchre.\n2. Kapcsolja össze a kívánt kampányokat a Twitch Drops oldalain.\n3. Válasszon prioritási módot, majd szükség esetén adjon játékokat a Prioritás vagy Kizárás listához.\n4. A prioritások vagy kizárások módosítása után nyomja meg az Újratöltés gombot.\n5. Térjen vissza az Áttekintéshez, és hagyja futni az alkalmazást, amíg az begyűjti a Drops jutalmakat.",
             "invalidate": {
                 "button": "Érvénytelenítés",
-                "text": "Az hitelesítési jelvény érvénytelenítése (kijelentkezés):"
+                "text": "A hitelesítési token érvénytelenítése (kijelentkezés):"
             }
         }
     }

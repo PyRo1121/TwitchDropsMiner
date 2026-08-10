@@ -230,11 +230,26 @@ class TranslationCatalogTests(unittest.TestCase):
 
     def test_confirmed_action_and_grammar_regressions_are_absent(self) -> None:
         prohibited: dict[str, tuple[str, ...]] = {
-            "Dansk": ("bedste egne", "et sendekanal"),
+            "Dansk": (
+                "bedste egne",
+                "et sendekanal",
+                "Gyldiggør",
+                "Gyldiggør autentiserings-token (log ud):",
+            ),
             "Deutsch": ("Sender wird abgerufen",),
-            "Magyar": ("流程", "két áram", "Kiválasztott a közvetített"),
+            "Magyar": (
+                "流程",
+                "két áram",
+                "Kiválasztott a közvetített",
+                "Az hitelesítési jelvény érvénytelenítése (kijelentkezés):",
+            ),
             "Čeština": ("Ověřte toto použití", "Přeodhadování", "BEŽÍ"),
-            "Українська": ("це застосунок", "device-code", "Сподиватися"),
+            "Українська": (
+                "це застосунок",
+                "device-code",
+                "Сподиватися",
+                "Скасувати токен авторизації (вийти в систему):",
+            ),
             "Română": (
                 "Urează",
                 "a a două",
