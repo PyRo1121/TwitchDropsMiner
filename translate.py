@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections import abc
-from typing import Any, TypedDict, TYPE_CHECKING, cast
+from collections import Counter, abc
+from string import Formatter
+from typing import Any, Mapping, TypedDict, TYPE_CHECKING, cast
 
 from exceptions import MinerException
 from utils import json_load
@@ -683,6 +684,70 @@ default_translation: Translation = {
 }
 
 
+_TranslationPath = tuple[str, ...]
+_FormatSignature = Counter[tuple[str, str | None, str | None]]
+_FORMATTER = Formatter()
+
+
+def _format_signature(template: str) -> _FormatSignature:
+    try:
+        return Counter(
+            (field_name, conversion, format_spec)
+            for _, field_name, format_spec, conversion in _FORMATTER.parse(template)
+            if field_name is not None
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid format string: {exc}") from exc
+
+
+def _validate_translation_catalog(
+    translation: Mapping[str, Any],
+    default: Mapping[str, Any] = default_translation,
+    *,
+    language: str,
+    path: _TranslationPath = (),
+) -> None:
+    """Require a locale catalog to match the English schema exactly."""
+    location = ".".join(path) or "<root>"
+    missing = sorted(default.keys() - translation.keys())
+    unknown = sorted(translation.keys() - default.keys())
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"missing keys: {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown keys: {', '.join(unknown)}")
+        raise ValueError(f"{language}:{location}: {'; '.join(details)}")
+
+    for key, default_value in default.items():
+        value = translation[key]
+        item_path = (*path, key)
+        item_location = f"{language}:{'.'.join(item_path)}"
+        if isinstance(default_value, Mapping):
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{item_location}: expected an object")
+            _validate_translation_catalog(
+                value,
+                default_value,
+                language=language,
+                path=item_path,
+            )
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"{item_location}: expected a string")
+        if not value.strip():
+            raise ValueError(f"{item_location}: translation cannot be empty")
+        try:
+            default_signature = _format_signature(default_value)
+            translated_signature = _format_signature(value)
+        except ValueError as exc:
+            raise ValueError(f"{item_location}: {exc}") from exc
+        if translated_signature != default_signature:
+            raise ValueError(
+                f"{item_location}: placeholders do not match the English schema"
+            )
+
+
 class Translator:
     def __init__(self) -> None:
         self._langs: list[str] = []
@@ -711,7 +776,7 @@ class Translator:
     def current(self) -> str:
         return self._lang_name()
 
-    def set_language(self, language: str):
+    def set_language(self, language: str) -> None:
         if language not in self._langs:
             raise ValueError("Unrecognized language")
         elif self._lang_name() == language:
@@ -721,11 +786,15 @@ class Translator:
             # default language selected - use the memory value
             self._translation = self._new_default()
         else:
-            self._translation = json_load(
-                LANG_PATH.joinpath(f"{language}.json"), default_translation
+            loaded = json_load(
+                LANG_PATH.joinpath(f"{language}.json"),
+                default_translation,
+                merge=False,
             )
-            if "language_name" in self._translation:
+            if "language_name" in loaded:
                 raise ValueError("Translations cannot define 'language_name'")
+            _validate_translation_catalog(loaded, language=language)
+            self._translation = loaded
         self._translation["language_name"] = language
 
     def __call__(self, *path: str) -> str:

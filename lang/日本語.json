@@ -1,142 +1,300 @@
 {
-  "english_name": "Japanese",
-  "status": {
-    "terminated": "\nアプリケーションが終了しました。\nウィンドウを閉じてアプリケーションを終了します。",
-    "watching": "{channel} を視聴中",
-    "goes_online": "{channel} がオンラインになりました。切り替え中...",
-    "goes_offline": "{channel} がオフラインになりました。切り替え中...",
-    "claimed_drop": "ドロップを取得しました：{drop}",
-    "no_channel": "視聴可能なチャンネルがありません。オンラインになるチャンネルを待機中...",
-    "no_campaign": "マイニングするドロップがないアクティブなキャンペーンはありません。アクティブなキャンペーンを待機中..."
-  },
-  "login": {
-    "unexpected_content": "予期しないコンテンツタイプが返されました。リダイレクトされたためかもしれません。インターネットアクセスのためにログインが必要ですか？"
-  },
-  "error": {
-    "site_down": "Twitchがダウンしています。{seconds}秒後に再試行します...",
-    "no_connection": "Twitchに接続できません。{seconds}秒後に再試行します... ({url})"
-  },
-  "gui": {
-    "output": "出力",
+    "english_name": "Japanese",
     "status": {
-      "name": "ステータス",
-      "idle": "アイドル",
-      "exiting": "終了しています...",
-      "terminated": "終了",
-      "cleanup": "チャンネルをクリーンアップ中...",
-      "gathering": "チャンネルを収集中...",
-      "switching": "チャンネルを切り替え中...",
-      "fetching_inventory": "インベントリを取得中...",
-      "fetching_campaigns": "キャンペーンを取得中...",
-      "adding_campaigns": "キャンペーンをインベントリに追加中... {counter}"
-    },
-    "tabs": {
-      "main": "メイン",
-      "inventory": "インベントリ",
-      "settings": "設定",
-      "help": "ヘルプ"
-    },
-    "tray": {
-      "notification_title": "ドロップを取得しました",
-      "minimize": "トレイに最小化",
-      "show": "表示",
-      "quit": "終了"
+        "terminated": "\nアプリケーションが終了しました。\nウィンドウを閉じてアプリケーションを終了します。",
+        "watching": "{channel} を視聴中",
+        "goes_online": "{channel} がオンラインになりました。切り替え中...",
+        "goes_offline": "{channel} がオフラインになりました。切り替え中...",
+        "claimed_drop": "ドロップを取得しました：{drop}",
+        "no_channel": "視聴可能なチャンネルがありません。オンラインになるチャンネルを待機中...",
+        "no_campaign": "マイニングするドロップがないアクティブなキャンペーンはありません。アクティブなキャンペーンを待機中..."
     },
     "login": {
-      "name": "ログインフォーム",
-      "logged_in": "ログイン済み",
-      "logged_out": "ログアウト済み",
-      "logging_in": "ログイン中...",
-      "button": "ログイン"
+        "unexpected_content": "予期しないコンテンツタイプが返されました。リダイレクトされたためかもしれません。インターネットアクセスのためにログインが必要ですか？"
     },
-    "websocket": {
-      "name": "Websocketステータス",
-      "websocket": "Websocket #{id}：",
-      "initializing": "初期化中...",
-      "connected": "接続済み",
-      "disconnected": "切断されました",
-      "connecting": "接続中...",
-      "disconnecting": "切断中...",
-      "reconnecting": "再接続中..."
+    "error": {
+        "site_down": "Twitchがダウンしています。{seconds}秒後に再試行します...",
+        "no_connection": "Twitchに接続できません。{seconds}秒後に再試行します... ({url})"
     },
-    "progress": {
-      "name": "キャンペーン進行状況",
-      "drop": "ドロップ：",
-      "game": "ゲーム：",
-      "campaign": "キャンペーン：",
-      "remaining": "残り時間：{time}",
-      "drop_progress": "進行状況：",
-      "campaign_progress": "進行状況："
+    "notifications": {
+        "auth_required_title": "Twitch の認証が必要です",
+        "auth_required_message": "Twitch Drops Miner を開き、ログインして報酬の収集を再開してください。",
+        "inventory_failed_title": "報酬リストの更新に失敗しました",
+        "inventory_failed_message": "Twitch の報酬リストを更新できませんでした。アプリの報酬ステータスが古くなっている可能性があります。",
+        "watch_unavailable_title": "対象となる配信チャンネルがありません",
+        "watch_unavailable_message": "対象となる配信チャンネルが利用可能になるまで、アプリは待機しています。",
+        "session_failed_title": "アプリが予期せず停止しました",
+        "session_failed_message": "イベントログを開いて失敗内容を調べ、アプリを再起動してください。",
+        "campaign_deadline_title": "報酬キャンペーンが終了間近です",
+        "campaign_deadline_message": "完了していない報酬キャンペーンが期限に近づいています。",
+        "claim_unconfirmed_title": "報酬の受け取りを確認する必要があります",
+        "claim_unconfirmed_message": "再試行しても報酬の受け取りを確認できませんでした。アプリが再度確認します。",
+        "attention": "注意：{title} — {message}"
     },
-    "channels": {
-      "name": "チャンネル",
-      "switch": "切り替え",
-      "online": "オンライン ✔",
-      "pending": "オフライン中 ⏳",
-      "offline": "オフライン ❌",
-      "headings": {
-        "channel": "チャンネル",
-        "status": "ステータス",
-        "game": "ゲーム",
-        "viewers": "視聴者数"
-      }
-    },
-    "inventory": {
-      "filter": {
-        "name": "フィルター",
-        "show": "表示：",
-        "not_linked": "リンクなし",
-        "upcoming": "予定",
-        "expired": "期限切れ",
-        "excluded": "除外",
-        "finished": "終了",
-        "refresh": "更新"
-      },
-      "status": {
-        "linked": "リンク済み ✔",
-        "not_linked": "リンクされていない ❌",
-        "active": "アクティブ ✔",
-        "upcoming": "予定 ⏳",
-        "expired": "期限切れ ❌",
-        "claimed": "受け取り済み ✔",
-        "ready_to_claim": "受け取り準備完了 ⏳"
-      },
-      "starts": "開始：{time}",
-      "ends": "終了：{time}",
-      "allowed_channels": "許可されたチャンネル：",
-      "all_channels": "全て",
-      "and_more": "その他 {amount} 件...",
-      "percent_progress": "{minutes} 分のうち {percent}",
-      "minutes_progress": "{minutes} 分"
-    },
-    "settings": {
-      "general": {
-        "name": "一般",
-        "autostart": "自動起動：",
-        "tray": "トレイに自動起動：",
-        "tray_notifications": "トレイ通知：",
-        "dark_mode": "ダークモード：",
-        "proxy": "プロキシ（再起動が必要）："
-      },
-      "game_name": "ゲーム名",
-      "priority": "優先度",
-      "exclude": "除外",
-      "reload": "再読み込み",
-      "reload_text": "ほとんどの変更は即時に反映されるために再読み込みが必要です：",
-      "priority_modes": {
-        "priority_only": "優先のみ："
-      }
-    },
-    "help": {
-      "links": {
-        "name": "役立つリンク",
-        "inventory": "Twitchインベントリを表示",
-        "campaigns": "すべてのキャンペーンを表示してアカウントリンクを管理"
-      },
-      "how_it_works": "動作原理",
-      "how_it_works_text": "数秒ごとに、アプリケーションは特定のストリームを視聴しているかのように振る舞い、ストリームメタデータを取得します。これにより、ドロップが進むことが可能です。実際のビデオや音声ストリームをダウンロードする必要はないことに注意してください。チャンネルのステータス（オンラインまたはオフライン）を最新の状態に保つために、ストリームがオンラインまたはオフラインになったり、視聴者数が更新されたりするイベントを受け取るためのwebsocket接続が確立されます。",
-      "getting_started": "始め方",
-      "getting_started_text": "1. アプリケーションにログインします。\n2. Twitchアカウントが関連付けられていることを確認し、マイニングしたいすべてのキャンペーンにリンクされていることを確認します。\n3. すべてをマイニングしたい場合は、「優先のみ」をチェックせずに「再読み込み」を押します。\n4. 特定のゲームを最初にマイニングしたい場合は、「優先度」リストを使用して選択したゲームの順序付きリストを設定します。リストの先頭にあるゲームが、リストの下にあるゲームよりも優先してマイニングされます。\n5. マイニングしたくないゲームを避けるためには「優先のみ」オプションをチェックしたままにします。または、チェックを外してもかまいません。選択はあなた次第です。\n6. 「除外」リストを使用して、アプリケーションにマイニングを行ってはいけないゲームを指定します。\n7. リストの内容を変更したり、「優先のみ」オプションのステータスを変更したりすると、変更を反映させるために「再読み込み」ボタンを押す必要があります。"
+    "gui": {
+        "output": "出力",
+        "status": {
+            "name": "ステータス",
+            "idle": "アイドル",
+            "exiting": "終了しています...",
+            "terminated": "終了",
+            "cleanup": "チャンネルをクリーンアップ中...",
+            "gathering": "チャンネルを収集中...",
+            "switching": "チャンネルを切り替え中...",
+            "fetching_inventory": "インベントリを取得中...",
+            "inventory_retry": "報酬リストの更新に失敗しました。{seconds} 秒後に再試行中...",
+            "fetching_campaigns": "キャンペーンを取得中...",
+            "adding_campaigns": "キャンペーンをインベントリに追加中... {counter}"
+        },
+        "tabs": {
+            "main": "メイン",
+            "inventory": "インベントリ",
+            "settings": "設定",
+            "help": "ヘルプ"
+        },
+        "tray": {
+            "notification_title": "ドロップを取得しました",
+            "minimize": "トレイに最小化",
+            "show": "表示",
+            "quit": "終了"
+        },
+        "login": {
+            "name": "ログインフォーム",
+            "logged_in": "ログイン済み",
+            "logged_out": "ログアウト済み",
+            "logging_in": "ログイン中...",
+            "button": "ログイン"
+        },
+        "websocket": {
+            "name": "Websocketステータス",
+            "websocket": "Websocket #{id}：",
+            "initializing": "初期化中...",
+            "connected": "接続済み",
+            "disconnected": "切断されました",
+            "connecting": "接続中...",
+            "disconnecting": "切断中...",
+            "reconnecting": "再接続中..."
+        },
+        "progress": {
+            "name": "キャンペーン進行状況",
+            "drop": "ドロップ：",
+            "game": "ゲーム：",
+            "campaign": "キャンペーン：",
+            "remaining": "残り時間：{time}",
+            "drop_progress": "進行状況：",
+            "campaign_progress": "進行状況："
+        },
+        "channels": {
+            "name": "チャンネル",
+            "switch": "切り替え",
+            "online": "オンライン ✔",
+            "pending": "オフライン中 ⏳",
+            "offline": "オフライン ❌",
+            "headings": {
+                "channel": "チャンネル",
+                "status": "ステータス",
+                "game": "ゲーム",
+                "viewers": "視聴者数"
+            }
+        },
+        "inventory": {
+            "filter": {
+                "name": "フィルター",
+                "show": "表示：",
+                "not_linked": "リンクなし",
+                "upcoming": "予定",
+                "expired": "期限切れ",
+                "excluded": "除外",
+                "finished": "終了",
+                "refresh": "更新"
+            },
+            "status": {
+                "linked": "リンク済み ✔",
+                "not_linked": "リンクされていない ❌",
+                "active": "アクティブ ✔",
+                "upcoming": "予定 ⏳",
+                "expired": "期限切れ ❌",
+                "claimed": "受け取り済み ✔",
+                "ready_to_claim": "受け取り準備完了 ⏳"
+            },
+            "starts": "開始：{time}",
+            "ends": "終了：{time}",
+            "allowed_channels": "許可されたチャンネル：",
+            "all_channels": "全て",
+            "and_more": "その他 {amount} 件...",
+            "percent_progress": "{minutes} 分のうち {percent}",
+            "minutes_progress": "{minutes} 分"
+        },
+        "settings": {
+            "general": {
+                "name": "一般",
+                "autostart": "自動起動：",
+                "tray": "トレイに自動起動：",
+                "tray_notifications": "トレイ通知：",
+                "dark_mode": "ダークモード：",
+                "priority_mode": "優先モード： ",
+                "proxy": "プロキシ（再起動が必要）："
+            },
+            "advanced": {
+                "name": "詳細設定",
+                "warning": "警告！",
+                "warning_text": "これらのオプションは、アプリの動作に異常を招く可能性があります。\n問題が発生した場合は、これらのオプションをすべて無効にしてください。",
+                "enable_badges_emotes": "バッジと絵文字の部分的なサポートを有効化： ",
+                "available_drops_check": "追加の利用可能 Drops チェックを有効化： ",
+                "experimental_dual_watch": "実験的な 2 つのストリームの同時視聴（両方の報酬を獲得できない場合があります）： "
+            },
+            "priority_modes": {
+                "priority_only": "優先のみ：",
+                "ending_soonest": "終了間近",
+                "low_availability": "利用可能性が低い順"
+            },
+            "game_name": "ゲーム名",
+            "priority": "優先度",
+            "exclude": "除外",
+            "reload": "再読み込み",
+            "reload_text": "ほとんどの変更は即時に反映されるために再読み込みが必要です："
+        },
+        "text": {
+            "device_authorization": "Twitch の安全なデバイスコードフローを使用して、このアプリケーションを認証してください。",
+            "enter_device_code": "デバイスコードを入力：{code}",
+            "device_code": "デバイスコード：{code}",
+            "brand_name": "TDM",
+            "brand_subtitle": "ドロップデッキ",
+            "control_center": "コントロールセンター",
+            "deck_title": "ドロップデッキ",
+            "search_placeholder": "検索  ·  Ctrl K",
+            "overview_kicker": "概要  /  ライブコントロール",
+            "overview_subtitle": "自動収集しているすべてのものを管理する、落ち着いたダッシュボードです。",
+            "starting": "起動中",
+            "status_live": "ライブ",
+            "status_error": "エラー",
+            "status_attention": "注意",
+            "status_error_detail": "アプリに注意が必要です。詳細なリクエスト情報やログイン情報を確認するには、イベントログを開いてください。",
+            "status_scanning_detail": "報酬キャンペーンリストと配信チャンネルをスキャンしています。通常、数秒で完了します。",
+            "status_switching_detail": "次の 1 分を最も適格なチャンネルに割り当てるため、ストリーム視聴キューを再評価しています。",
+            "status_idle_detail": "現在、対象となる配信チャンネルはありません。アプリは待機しており、自動的に再開します。",
+            "status_watching_detail": "配信チャンネルが選択されており、視聴分が自動的に提出されています。",
+            "status_waiting_detail": "アプリケーションは接続されており、次のバックエンド更新を待機しています。",
+            "websocket_waiting": "WebSocket: —",
+            "websocket_summary": "WS {index}: {status} · {topics} トピック",
+            "claims_automatic": "アプリケーションの動作中は、報酬が自動的に受け取られます。",
+            "jump_anywhere": "Ctrl K  ·  任意の場所へジャンプ",
+            "state_readout": "ステータス表示",
+            "warming_up": "報酬ダッシュボードの準備中…",
+            "quick_steering": "クイックステアリング",
+            "keep_moving": "アプリケーションを稼働させ続けてください",
+            "overview": "概要",
+            "history": "履歴",
+            "preferences": "設定",
+            "help_about": "{help} とこのアプリケーションに関する情報",
+            "event_log_command": "イベントログ",
+            "account": "アカウント",
+            "campaign_metric": "キャンペーン",
+            "drop_metric": "ドロップ",
+            "session_watch_metric": "今回のセッションの視聴時間",
+            "live_channels_metric": "ライブチャンネル",
+            "campaigns_metric": "キャンペーン",
+            "claimed_drops_metric": "受け取り済みの報酬",
+            "view_channels": "チャンネルを表示",
+            "browse_drops": "ドロップを検索",
+            "open_preferences": "設定を開く",
+            "channels_kicker": "チャンネル / 視聴リスト",
+            "channels_subtitle": "次に視聴するチャンネルを選択してください。",
+            "history_kicker": "履歴 / 実行台帳",
+            "history_title": "セッション履歴",
+            "history_subtitle": "意味のある報酬収集セッションとその結果のローカル記録です。",
+            "inventory_kicker": "報酬 / 報酬トラッカー",
+            "inventory_title": "報酬",
+            "inventory_subtitle": "報酬キャンペーンは、次に受け取れる報酬順に並んでいます。",
+            "help_kicker": "ヘルプ / フィールドガイド",
+            "help_title": "{help} とこのアプリケーションに関する情報",
+            "help_subtitle": "アプリケーションの操作方法に関する簡潔な回答です。",
+            "settings_kicker": "設定 / コントロールパネル",
+            "settings_subtitle": "このダッシュボードから離れずにアプリケーションを設定します。",
+            "live_target": "アクティブなターゲット / 現在収集中",
+            "idle": "アイドル",
+            "no_active_campaign": "アクティブなキャンペーンなし",
+            "no_active_drop": "アクティブな報酬なし",
+            "no_active_watch": "アクティブな配信視聴なし",
+            "game_intel_waiting": "ゲーム情報  ·  ターゲットを待機中",
+            "game_intel_unavailable": "ゲーム情報  ·  Steam シグナル不可用  ·  検索リンク準備完了",
+            "game_intel_no_match": "ゲーム情報  ·  正確な Steam 一致なし  ·  検索リンク準備完了",
+            "players_playing": "{players} 名が現在プレイ中",
+            "price_us": "{price} ドル",
+            "free_to_play": "無料プレイ",
+            "steam_listing_found": "Steam ストアページが見つかりました",
+            "steam_intel": "STEAM 情報  ·  {details}",
+            "logging_level": "ログレベル：{level}",
+            "fatal_error": "致命的なエラーが発生しました:\n",
+            "settings_error": "設定エラー",
+            "startup_error": "起動エラー",
+            "art_placeholder": "アート",
+            "watching_channel": "視聴中の配信 / @{name}{suffix}",
+            "campaign_remaining": "キャンペーン残り：{time}",
+            "drop_remaining": "残り報酬時間：{time}",
+            "idle_badge": "アイドル",
+            "pending_badge": "オンライン？",
+            "live_badge": "ライブ",
+            "offline_badge": "オフライン",
+            "drops_badge": "報酬",
+            "watching_badge": "配信視聴中",
+            "open": "開く",
+            "open_channel": "Twitch で {channel} を開く",
+            "select_channel": "{channel} を視聴",
+            "monitored": "{count} チャンネルを監視中",
+            "monitored_live": "{count} チャンネルを監視中  ·  {live} 生配信",
+            "filter_channels": "チャンネルをフィルタ  ·  名前またはゲーム",
+            "no_channels": "まだチャンネルがありません",
+            "no_channels_body": "アプリケーションはここで監視中のチャンネルをリストアップします。",
+            "dismiss": "閉じる",
+            "latest_signals": "最新の状態更新",
+            "event_log": "イベントログ",
+            "diagnostics": "診断情報",
+            "session_title": "セッション  ·  {time}",
+            "session_running": "実行中",
+            "session_stopped": "停止",
+            "session_failed": "失敗",
+            "session_interrupted": "中断",
+            "session_in_progress": "進行中",
+            "session_summary": "{start} → {end} · {duration} · {claims} 件の報酬を受け取り · {syncs} 件の報酬リスト同期",
+            "clear_completed": "完了したセッションを削除",
+            "no_sessions": "記録されたセッションはありません",
+            "no_sessions_body": "セッション履歴は、アプリケーションを起動した後に表示されます。",
+            "image_placeholder": "画像",
+            "link_campaign": "Twitch でキャンペーンをリンク",
+            "claimed_summary": "{progress} · {claimed}/{total} 受け取り済み",
+            "no_campaigns": "キャンペーンはありません",
+            "no_campaigns_body": "Twitch のデータが読み込まれた後に報酬キャンペーンが表示されます。",
+            "app_name": "Twitch Drops Miner",
+            "app_description": "バックグラウンドで動作し、期間限定の Twitch 報酬を収集するアプリケーションです。",
+            "open_repository": "プロジェクトリポジトリを開く",
+            "open_event_log": "イベントログを開く",
+            "add": "追加",
+            "remove": "削除",
+            "remove_selected": "選択したものを削除",
+            "language_restart": "言語（再起動が必要）",
+            "history_retention": "履歴保持期間",
+            "days": "{days} 日間",
+            "token_revoke_http": "トークンの取り消しに失敗しました：HTTP {status}",
+            "token_revoke_error": "トークンの取り消しに失敗しました：{error}",
+            "startup_saved": "起動設定が保存されました。",
+            "startup_failed": "起動設定に失敗しました：{error}",
+            "reload_requested": "キャンペーンの再読み込みをリクエストしました。"
+        },
+        "help": {
+            "links": {
+                "name": "役立つリンク",
+                "inventory": "Twitchインベントリを表示",
+                "campaigns": "すべてのキャンペーンを表示してアカウントリンクを管理"
+            },
+            "how_it_works": "動作原理",
+            "how_it_works_text": "数秒ごとに、アプリケーションは特定のストリームを視聴しているかのように振る舞い、ストリームメタデータを取得します。これにより、ドロップが進むことが可能です。実際のビデオや音声ストリームをダウンロードする必要はないことに注意してください。チャンネルのステータス（オンラインまたはオフライン）を最新の状態に保つために、ストリームがオンラインまたはオフラインになったり、視聴者数が更新されたりするイベントを受け取るためのwebsocket接続が確立されます。",
+            "getting_started": "始め方",
+            "getting_started_text": "1. アプリケーションにログインします。\n2. Twitchアカウントが関連付けられていることを確認し、マイニングしたいすべてのキャンペーンにリンクされていることを確認します。\n3. すべてをマイニングしたい場合は、「優先のみ」をチェックせずに「再読み込み」を押します。\n4. 特定のゲームを最初にマイニングしたい場合は、「優先度」リストを使用して選択したゲームの順序付きリストを設定します。リストの先頭にあるゲームが、リストの下にあるゲームよりも優先してマイニングされます。\n5. マイニングしたくないゲームを避けるためには「優先のみ」オプションをチェックしたままにします。または、チェックを外してもかまいません。選択はあなた次第です。\n6. 「除外」リストを使用して、アプリケーションにマイニングを行ってはいけないゲームを指定します。\n7. リストの内容を変更したり、「優先のみ」オプションのステータスを変更したりすると、変更を反映させるために「再読み込み」ボタンを押す必要があります。",
+            "invalidate": {
+                "button": "無効化",
+                "text": "認証トークンを無効化（ログアウト）："
+            }
+        }
     }
-  }
 }
