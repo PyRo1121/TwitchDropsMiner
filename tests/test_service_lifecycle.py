@@ -5,12 +5,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from auth import AuthState
 from channel_directory_service import ChannelDirectoryService
 from channel_event_service import ChannelEventService
-from constants import State
+from constants import PriorityMode, State
 from drop_event_service import DropEventService
 from exceptions import MinerException, RequestException
 from http_transport import HttpTransport
@@ -150,6 +150,69 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(service._retry_task)
             self.assertEqual(service._retry_attempt, 0)
 
+    async def test_game_selection_is_atomic_and_does_not_reorder_inventory(self) -> None:
+        class GameStub:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+        game_a = GameStub("A")
+        game_b = GameStub("B")
+        game_c = GameStub("C")
+        claimable = SimpleNamespace(
+            id="drop",
+            can_claim=True,
+            claim=AsyncMock(return_value=True),
+        )
+        campaign_a = SimpleNamespace(
+            game=game_a,
+            upcoming=False,
+            drops=[claimable],
+            ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            availability=10,
+            can_earn_within=Mock(return_value=True),
+        )
+        campaign_c = SimpleNamespace(
+            game=game_c,
+            upcoming=False,
+            drops=[],
+            ends_at=datetime.now(timezone.utc) + timedelta(hours=2),
+            availability=20,
+            can_earn_within=Mock(return_value=True),
+        )
+        campaign_b = SimpleNamespace(
+            game=game_b,
+            upcoming=False,
+            drops=[],
+            ends_at=datetime.now(timezone.utc) + timedelta(hours=3),
+            availability=30,
+            can_earn_within=Mock(return_value=True),
+        )
+        inventory = [campaign_a, campaign_c, campaign_b]
+        completed = Mock()
+        miner = cast(
+            Any,
+            SimpleNamespace(
+                inventory=inventory,
+                wanted_games=[GameStub("old")],
+                settings=SimpleNamespace(
+                    exclude=["C"],
+                    priority=["B"],
+                    priority_mode=PriorityMode.ENDING_SOONEST,
+                ),
+                watch_service=SimpleNamespace(
+                    _mark_watch_completed_drop=completed,
+                ),
+            ),
+        )
+        service = InventoryService(miner)
+
+        await service.update_wanted_games()
+
+        self.assertEqual(miner.wanted_games, [game_b, game_a])
+        self.assertEqual(inventory, [campaign_a, campaign_c, campaign_b])
+        claimable.claim.assert_awaited_once_with()
+        completed.assert_called_once_with("drop")
+
     def test_campaign_deadline_alerts_are_deduplicated_per_session(self) -> None:
         events: list[str] = []
         campaign = SimpleNamespace(
@@ -181,6 +244,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(Twitch, "_retry_inventory_after"))
         self.assertFalse(hasattr(Twitch, "_fetch_inventory_state"))
         self.assertFalse(hasattr(Twitch, "_record_campaign_deadlines"))
+        self.assertFalse(hasattr(Twitch, "_update_games_state"))
 
     async def test_inventory_to_shutdown_smoke_has_no_loop_errors(self) -> None:
         loop_errors: list[dict[str, Any]] = []

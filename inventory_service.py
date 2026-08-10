@@ -16,6 +16,8 @@ from constants import (
     GQL_QUERIES,
     INVENTORY_RETRY_BASE,
     INVENTORY_RETRY_MAX,
+    MAX_INT,
+    PriorityMode,
     State,
 )
 from exceptions import (
@@ -165,6 +167,45 @@ class InventoryService:
         self._twitch.save()
         if self._twitch._state_generation == state_generation:
             self._twitch.change_state(State.GAMES_UPDATE)
+
+    async def update_wanted_games(self) -> None:
+        for campaign in self._twitch.inventory:
+            if campaign.upcoming:
+                continue
+            for drop in campaign.drops:
+                if drop.can_claim and await drop.claim():
+                    self._twitch.watch_service._mark_watch_completed_drop(drop.id)
+
+        exclude = self._twitch.settings.exclude
+        priority = self._twitch.settings.priority
+        priority_mode = self._twitch.settings.priority_mode
+        priority_only = priority_mode is PriorityMode.PRIORITY_ONLY
+        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
+        campaigns = list(self._twitch.inventory)
+        if not priority_only:
+            if priority_mode is PriorityMode.ENDING_SOONEST:
+                campaigns.sort(key=lambda campaign: campaign.ends_at)
+            elif priority_mode is PriorityMode.LOW_AVBL_FIRST:
+                campaigns.sort(key=lambda campaign: campaign.availability)
+        campaigns.sort(
+            key=lambda campaign: (
+                priority.index(campaign.game.name)
+                if campaign.game.name in priority
+                else MAX_INT
+            )
+        )
+
+        wanted_games = []
+        for campaign in campaigns:
+            game = campaign.game
+            if (
+                game not in wanted_games
+                and game.name not in exclude
+                and (not priority_only or game.name in priority)
+                and campaign.can_earn_within(next_hour)
+            ):
+                wanted_games.append(game)
+        self._twitch.wanted_games[:] = wanted_games
 
     @staticmethod
     def _merge_data(primary_data: JsonType, secondary_data: JsonType) -> JsonType:

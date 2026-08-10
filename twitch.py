@@ -6,7 +6,7 @@ from time import monotonic
 from functools import partial
 from collections import abc, deque, OrderedDict
 from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Literal, Final, TYPE_CHECKING
 
 import aiohttp
@@ -37,10 +37,8 @@ from utils import (
     redact_log_value,
 )
 from constants import (
-    MAX_INT,
     State,
     ClientType,
-    PriorityMode,
     WebsocketTopic,
 )
 
@@ -314,7 +312,7 @@ class Twitch:
             elif self._state is State.INVENTORY_FETCH:
                 await self.inventory_service.sync_state()
             elif self._state is State.GAMES_UPDATE:
-                await self._update_games_state()
+                await self.inventory_service.update_wanted_games()
                 full_cleanup = True
                 self.watch_service.restart_watching()
                 self.change_state(State.CHANNELS_CLEANUP)
@@ -337,45 +335,6 @@ class Twitch:
                 # we've been requested to exit the application
                 break
             await self._state_change.wait()
-
-    async def _update_games_state(self) -> None:
-        # claim drops from expired and active campaigns
-        for campaign in self.inventory:
-            if not campaign.upcoming:
-                for drop in campaign.drops:
-                    if drop.can_claim and await drop.claim():
-                        self.watch_service._mark_watch_completed_drop(drop.id)
-        # figure out which games we want
-        self.wanted_games.clear()
-        exclude = self.settings.exclude
-        priority = self.settings.priority
-        priority_mode = self.settings.priority_mode
-        priority_only = priority_mode is PriorityMode.PRIORITY_ONLY
-        next_hour = datetime.now(timezone.utc) + timedelta(hours=1)
-        # sorted_campaigns: list[DropsCampaign] = list(self.inventory)
-        sorted_campaigns: list[DropsCampaign] = self.inventory
-        if not priority_only:
-            if priority_mode is PriorityMode.ENDING_SOONEST:
-                sorted_campaigns.sort(key=lambda c: c.ends_at)
-            elif priority_mode is PriorityMode.LOW_AVBL_FIRST:
-                sorted_campaigns.sort(key=lambda c: c.availability)
-        sorted_campaigns.sort(
-            key=lambda c: (
-                priority.index(c.game.name) if c.game.name in priority else MAX_INT
-            )
-        )
-        for campaign in sorted_campaigns:
-            game: Game = campaign.game
-            if (
-                game not in self.wanted_games  # isn't already there
-                # and isn't excluded by list or priority mode
-                and game.name not in exclude
-                and (not priority_only or game.name in priority)
-                # and can be progressed within the next hour
-                and campaign.can_earn_within(next_hour)
-            ):
-                # non-excluded games with no priority are placed last, below priority ones
-                self.wanted_games.append(game)
 
     def _handle_idle_state(self) -> bool:
         if self.settings.dump:
