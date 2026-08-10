@@ -40,6 +40,55 @@ def _load_fallback_in_fresh_process(
     Path(result_path).write_text(json.dumps(result), encoding="utf8")
 
 
+def _load_after_transient_marker_outage(
+    credential_path: str,
+    vault_value: str,
+    vault_marker: str,
+    result_path: str,
+) -> None:
+    class _RecoveringVault:
+        def __init__(self) -> None:
+            self.first_marker_read = True
+            self.credential_reads = 0
+
+        def get_password(self, service: str, username: str) -> str | None:
+            del service
+            if username == VAULT_LOGOUT_ACCOUNT:
+                if self.first_marker_read:
+                    self.first_marker_read = False
+                    raise oauth_storage.NoKeyringError(
+                        "provider recovered after marker read"
+                    )
+                return vault_marker
+            self.credential_reads += 1
+            return vault_value
+
+        def set_password(
+            self,
+            service: str,
+            username: str,
+            password: str,
+        ) -> None:
+            del service, username, password
+            raise AssertionError("load must not write the native vault")
+
+        def delete_password(self, service: str, username: str) -> None:
+            del service, username
+            raise AssertionError("unknown marker must not trigger deletion")
+
+    vault = _RecoveringVault()
+    try:
+        value = OAuthTokenStore(
+            Path(credential_path),
+            vault=vault,
+        ).load("client-a")
+        result: dict[str, object] = {"value": value}
+    except Exception as exc:
+        result = {"error": type(exc).__name__}
+    result["credential_reads"] = vault.credential_reads
+    Path(result_path).write_text(json.dumps(result), encoding="utf8")
+
+
 def _hold_interprocess_lock(
     lock_path: str,
     ready_path: str,
@@ -485,6 +534,127 @@ class OAuthTokenStoreTests(unittest.TestCase):
             self.assertIsNone(fresh.load("client-a"))
             self.assertIsNone(vault.value)
             self.assertIsNone(vault.marker_value)
+
+    def test_transient_marker_outage_never_returns_native_credential(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            result_path = path.with_name("transient-result.json")
+            vault = _MemoryVault()
+            store = OAuthTokenStore(path, vault=vault)
+            store.save("client-a", "native-secret")
+            vault.delete_error = RuntimeError("native deletion blocked")
+
+            with (
+                patch.object(
+                    store,
+                    "_write_logout_marker",
+                    side_effect=OSError("directory read-only"),
+                ),
+                patch.object(
+                    store,
+                    "_write_state",
+                    side_effect=OSError("directory read-only"),
+                ),
+            ):
+                with self.assertRaises(
+                    oauth_storage.CredentialCleanupError
+                ) as raised:
+                    store.clear()
+
+            self.assertTrue(raised.exception.tombstone_persisted)
+            self.assertIsNotNone(vault.value)
+            self.assertIsNotNone(vault.marker_value)
+            process = multiprocessing.get_context("spawn").Process(
+                target=_load_after_transient_marker_outage,
+                args=(
+                    str(path),
+                    vault.value or "",
+                    vault.marker_value or "",
+                    str(result_path),
+                ),
+            )
+            process.start()
+            process.join(5)
+
+            self.assertEqual(process.exitcode, 0)
+            self.assertEqual(
+                _json_record(result_path.read_text(encoding="utf8")),
+                {
+                    "credential_reads": 0,
+                    "error": "CredentialVaultUnavailableError",
+                },
+            )
+
+            vault.delete_error = None
+            self.assertIsNone(OAuthTokenStore(path, vault=vault).load("client-a"))
+            self.assertIsNone(vault.value)
+            self.assertIsNone(vault.marker_value)
+
+    def test_native_marker_continuous_outage_recovers_into_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault()
+            store = OAuthTokenStore(path, vault=vault)
+            store.save("client-a", "native-secret")
+            vault.delete_error = RuntimeError("native deletion blocked")
+
+            with (
+                patch.object(
+                    store,
+                    "_write_logout_marker",
+                    side_effect=OSError("directory read-only"),
+                ),
+                patch.object(
+                    store,
+                    "_write_state",
+                    side_effect=OSError("directory read-only"),
+                ),
+            ):
+                with self.assertRaises(oauth_storage.CredentialCleanupError):
+                    store.clear()
+
+            outage = oauth_storage.NoKeyringError("provider unavailable")
+            vault.marker_get_error = outage
+            vault.get_error = outage
+            during_outage = OAuthTokenStore(path, vault=vault)
+            with self.assertRaises(
+                oauth_storage.CredentialVaultUnavailableError
+            ):
+                during_outage.load("client-a")
+
+            vault.marker_get_error = None
+            vault.get_error = None
+            vault.delete_error = None
+            self.assertIsNone(during_outage.load("client-a"))
+            self.assertIsNone(vault.value)
+            self.assertIsNone(vault.marker_value)
+
+    def test_transient_marker_outage_keeps_eligible_file_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            vault = _MemoryVault()
+            outage = oauth_storage.NoKeyringError("provider unavailable")
+            vault.marker_get_error = outage
+            vault.get_error = outage
+            store = OAuthTokenStore(
+                path,
+                vault=vault,
+                allow_file_fallback=True,
+            )
+            store.save("client-a", "fallback-secret")
+
+            vault.get_error = None
+            vault.value = _current_record(
+                "client-a",
+                "unrelated-native-secret",
+                vault=True,
+            )
+            vault.calls.clear()
+            self.assertEqual(store.load("client-a"), "fallback-secret")
+            self.assertNotIn(
+                ("get", VAULT_SERVICE, VAULT_ACCOUNT),
+                vault.calls,
+            )
 
     def test_vault_marker_alone_does_not_guard_retained_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

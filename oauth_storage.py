@@ -17,6 +17,7 @@ import threading
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Iterator, Protocol, cast
 
@@ -132,13 +133,19 @@ class _StorageState:
     cleanup: str = _CLEANUP_NONE
 
 
+class _VaultMarkerStatus(Enum):
+    ABSENT = "absent"
+    PRESENT = "present"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True)
 class _CleanupTombstones:
     """Durable logout evidence grouped by its availability boundary."""
 
     state: bool = False
     file: bool = False
-    vault: bool = False
+    vault: _VaultMarkerStatus = _VaultMarkerStatus.ABSENT
 
     def safe_to_close(
         self,
@@ -151,7 +158,10 @@ class _CleanupTombstones:
         return (
             self.state
             or self.file
-            or (self.vault and not fallback_credential_pending)
+            or (
+                self.vault is _VaultMarkerStatus.PRESENT
+                and not fallback_credential_pending
+            )
         )
 
 
@@ -274,7 +284,10 @@ class OAuthTokenStore:
             else:
                 vault_marker_written = True
             if vault_marker_written:
-                tombstones = replace(tombstones, vault=True)
+                tombstones = replace(
+                    tombstones,
+                    vault=_VaultMarkerStatus.PRESENT,
+                )
             self._complete_cleanup(
                 pending,
                 tombstones=tombstones,
@@ -315,6 +328,11 @@ class OAuthTokenStore:
             )
             return None
 
+        if tombstones.vault is _VaultMarkerStatus.UNAVAILABLE:
+            # Keep the first marker observation authoritative for this entire
+            # transaction. A provider recovery before the credential lookup
+            # must not expose a credential hidden behind an unknown marker.
+            return self._load_fallback_or_fail(state, client_id)
         if self._vault is None:
             return self._load_fallback_or_fail(state, client_id)
         try:
@@ -397,7 +415,10 @@ class OAuthTokenStore:
                     "Logout tombstone rejected automatic credential reuse"
                 )
 
-        if self._vault is None:
+        if (
+            tombstones.vault is _VaultMarkerStatus.UNAVAILABLE
+            or self._vault is None
+        ):
             self._save_fallback_or_fail(
                 state,
                 client_id,
@@ -533,13 +554,22 @@ class OAuthTokenStore:
         try:
             vault_marker_exists = self._read_vault_logout_marker()
         except CredentialVaultUnavailableError:
-            vault_marker_exists = False
+            vault_marker_status = _VaultMarkerStatus.UNAVAILABLE
+        else:
+            vault_marker_status = (
+                _VaultMarkerStatus.PRESENT
+                if vault_marker_exists
+                else _VaultMarkerStatus.ABSENT
+            )
         tombstones = _CleanupTombstones(
             state=state.cleanup != _CLEANUP_NONE,
             file=file_marker_exists,
-            vault=vault_marker_exists,
+            vault=vault_marker_status,
         )
-        if file_marker_exists or vault_marker_exists:
+        if (
+            file_marker_exists
+            or vault_marker_status is _VaultMarkerStatus.PRESENT
+        ):
             state = replace(state, cleanup=_CLEANUP_PENDING)
         return state, tombstones
 
