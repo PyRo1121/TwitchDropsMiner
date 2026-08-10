@@ -41,6 +41,8 @@ class QtGameContextController:
         return self._task
 
     def display(self, drop: TimedDrop) -> None:
+        if not self._tasks.accepting:
+            return
         campaign = drop.campaign
         game = campaign.game
         game_name = str(game.name)

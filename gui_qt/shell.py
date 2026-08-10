@@ -51,12 +51,14 @@ class QtWindowShell:
         settings: Any,
         theme: Theme,
         *,
+        can_interact: Callable[[], bool],
         clear_history: Callable[[], None],
         reload_inventory: Callable[[], None],
         switch_channel: Callable[[], None],
     ) -> None:
         self._window = window
         self._theme = theme
+        self._can_interact = can_interact
         self._page_animation: QPropertyAnimation | None = None
         self._animation_page: QWidget | None = None
         self._active_page = "overview"
@@ -475,11 +477,18 @@ class QtWindowShell:
             page.setAccessibleName(titles[key])
             page.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def set_interactive(self, enabled: bool) -> None:
+        self._command_shortcut.setEnabled(enabled)
+
     def focus_command(self) -> None:
+        if not self._can_interact():
+            return
         self.command.setFocus()
         self.command.selectAll()
 
     def submit_command(self) -> None:
+        if not self._can_interact():
+            return
         query = self.command.text().strip().lower()
         aliases = {
             "home": "overview",
@@ -515,6 +524,8 @@ class QtWindowShell:
         self.navigate(target)
 
     def navigate(self, key: str) -> None:
+        if not self._can_interact():
+            return
         self._select_page(key, animate=True, focus_page=True)
 
     def _select_page(

@@ -36,6 +36,14 @@ class QtTaskRegistry:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._closed = False
 
+    @property
+    def accepting(self) -> bool:
+        return not self._closed
+
+    @property
+    def drained(self) -> bool:
+        return self._closed and not self._tasks
+
     def create(self, coroutine: Coroutine[Any, Any, _T]) -> asyncio.Task[_T]:
         if self._closed:
             coroutine.close()
@@ -72,21 +80,42 @@ class QtTaskRegistry:
 
 
 class _QtLogBridge(QObject):
-    """Queue log delivery onto the QApplication thread."""
+    """Queue current-generation log delivery onto the QApplication thread."""
 
-    message = Signal(str)
+    message = Signal(int, str)
 
     def __init__(self, console: QtConsole) -> None:
         super().__init__()
         self._console = console
+        self._active = False
+        self._generation = 0
         self.message.connect(
             self._deliver,
             Qt.ConnectionType.QueuedConnection,
         )
 
-    @Slot(str)
-    def _deliver(self, message: str) -> None:
-        self._console.print(message)
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def activate(self) -> None:
+        self._generation += 1
+        self._active = True
+
+    def deactivate(self) -> None:
+        # Incrementing invalidates records queued by every earlier activation,
+        # even if a recoverable start later activates the bridge again.
+        self._active = False
+        self._generation += 1
+
+    def enqueue(self, message: str) -> None:
+        if self._active:
+            self.message.emit(self._generation, message)
+
+    @Slot(int, str)
+    def _deliver(self, generation: int, message: str) -> None:
+        if self._active and generation == self._generation:
+            self._console.print(message)
 
 
 class QtLogHandler(logging.Handler):
@@ -96,13 +125,23 @@ class QtLogHandler(logging.Handler):
         super().__init__()
         self._bridge = _QtLogBridge(console)
 
+    @property
+    def active(self) -> bool:
+        return self._bridge.active
+
+    def activate(self) -> None:
+        self._bridge.activate()
+
+    def deactivate(self) -> None:
+        self._bridge.deactivate()
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
             message = self.format(record)
         except Exception:  # pragma: no cover - logging's defensive contract
             self.handleError(record)
             return
-        self._bridge.message.emit(message)
+        self._bridge.enqueue(message)
 
 
 class QtPresentationRuntime:
@@ -141,8 +180,10 @@ class QtPresentationRuntime:
         self._log_handler.setFormatter(OUTPUT_FORMATTER)
         self._handler_installed = False
         self._started = False
+        self._stopping = False
         self._stopped = False
         self._sync_closed = False
+        self._stop_complete = asyncio.Event()
 
     @property
     def started(self) -> bool:
@@ -156,17 +197,44 @@ class QtPresentationRuntime:
     def log_handler(self) -> QtLogHandler:
         return self._log_handler
 
+    @property
+    def accepting_actions(self) -> bool:
+        return (
+            not self._stopping
+            and not self._stopped
+            and not self._sync_closed
+            and self._tasks.accepting
+        )
+
+    def _set_interactive(self, enabled: bool) -> None:
+        central = self._window.centralWidget()
+        if central is not None:
+            central.setEnabled(enabled)
+        self._shell.set_interactive(enabled)
+
+    def _begin_shutdown(self) -> None:
+        # This method must remain synchronous: no user action may race the
+        # registry closing or any cancellation/persistence await below.
+        self._stopping = True
+        self._started = False
+        self._set_interactive(False)
+        self._window.hide()
+
     def start(self) -> None:
         if self._started:
             return
-        if self._stopped or self._sync_closed:
+        if self._stopping or self._stopped or self._sync_closed:
             raise RuntimeError("Qt presentation runtime is closed")
+        central = self._window.centralWidget()
+        was_enabled = central is None or central.isEnabled()
+        was_visible = self._window.isVisible()
         try:
             self._apply_application_theme()
             self._install_log_handler()
             self._dashboard.start()
             self._inventory_page.start()
             self._tray.start()
+            self._set_interactive(True)
             if self._tray_requested and self._tray.available:
                 self._window.hide()
             else:
@@ -176,13 +244,22 @@ class QtPresentationRuntime:
         except Exception:
             failures: list[BaseException] = []
             self._quiesce(failures)
+            self._set_interactive(was_enabled)
+            if was_visible:
+                self._window.show()
+            else:
+                self._window.hide()
             raise
         self._started = True
 
     async def stop(self) -> None:
         if self._stopped:
             return
-        self._started = False
+        if self._stopping:
+            await self._stop_complete.wait()
+            return
+
+        self._begin_shutdown()
         failures: list[BaseException] = []
         self._quiesce(failures)
         try:
@@ -192,27 +269,22 @@ class QtPresentationRuntime:
             failures.append(exc)
         self._save_into(failures, force=False)
         self._stopped = True
+        self._stopping = False
+        self._stop_complete.set()
         if failures:
             raise failures[0]
 
     def close_sync(self) -> None:
-        """Best-effort fallback when the window is finally destroyed.
-
-        Normal shutdown calls :meth:`stop` first so task finalizers are awaited.
-        This fallback still stops every timer/animation and cancels task owners
-        before the Qt event loop can disappear.
-        """
+        """Force-save and release widgets after asynchronous task drainage."""
+        if self._sync_closed:
+            return
+        if not self._stopped or not self._tasks.drained:
+            raise RuntimeError(
+                "Qt presentation must be stopped and drained before window close"
+            )
         failures: list[BaseException] = []
-        self._started = False
         self._sync_closed = True
         self._quiesce(failures)
-        try:
-            self._tasks.cancel_all()
-        except Exception as exc:
-            app_logger.exception(
-                "Unable to cancel Qt tasks during window cleanup"
-            )
-            failures.append(exc)
         self._save_into(failures, force=True)
         for failure in failures:
             app_logger.warning(
@@ -229,10 +301,14 @@ class QtPresentationRuntime:
     def _install_log_handler(self) -> None:
         if self._handler_installed:
             return
+        self._log_handler.activate()
         app_logger.addHandler(self._log_handler)
         self._handler_installed = True
 
     def _remove_log_handler(self) -> None:
+        # Deactivate first so records already queued in Qt are stale before the
+        # Python logger can lose its final reference to this handler.
+        self._log_handler.deactivate()
         if not self._handler_installed:
             return
         app_logger.removeHandler(self._log_handler)

@@ -96,7 +96,8 @@ class QtLoginForm:
         self._card.on_submit.connect(self._on_submit)
 
     def _on_submit(self) -> None:
-        self._confirm.set()
+        if self._manager.accepting_actions:
+            self._confirm.set()
 
     async def wait_for_login_press(self) -> None:
         self._confirm.clear()
@@ -366,6 +367,8 @@ class QtHelp:
         )
 
     def invalidate_token(self) -> None:
+        if not self._manager.accepting_actions:
+            return
         if self._invalidate_task is not None and not self._invalidate_task.done():
             return
         self._invalidate_button.config(state="disabled")
@@ -417,6 +420,13 @@ class QtSettings:
         self._game_names: set[str] = set()
         self._build(page)
 
+    def _actions_enabled(self) -> bool:
+        return bool(self._manager.accepting_actions)
+
+    def _set_boolean(self, name: str, value: bool) -> None:
+        if self._actions_enabled():
+            setattr(self._settings, name, value)
+
     def _build(self, page: QWidget) -> None:
         layout = QVBoxLayout(page)
         layout.setContentsMargins(28, 24, 28, 24)
@@ -462,7 +472,9 @@ class QtSettings:
         form.addRow(_("gui", "settings", "general", "tray"), self.tray)
         self.notifications = QCheckBox()
         self.notifications.setChecked(bool(self._settings.tray_notifications))
-        self.notifications.toggled.connect(lambda value: setattr(self._settings, "tray_notifications", value))
+        self.notifications.toggled.connect(
+            lambda value: self._set_boolean("tray_notifications", value)
+        )
         form.addRow(_("gui", "settings", "general", "tray_notifications"), self.notifications)
         self.history_retention = QComboBox()
         for days in (30, 90, 365):
@@ -486,11 +498,15 @@ class QtSettings:
         advanced.body().addWidget(SectionTitle(_("gui", "settings", "advanced", "name")))
         self.badges = QCheckBox(_("gui", "settings", "advanced", "enable_badges_emotes"))
         self.badges.setChecked(bool(self._settings.enable_badges_emotes))
-        self.badges.toggled.connect(lambda value: setattr(self._settings, "enable_badges_emotes", value))
+        self.badges.toggled.connect(
+            lambda value: self._set_boolean("enable_badges_emotes", value)
+        )
         advanced.body().addWidget(self.badges)
         self.available_check = QCheckBox(_("gui", "settings", "advanced", "available_drops_check"))
         self.available_check.setChecked(bool(self._settings.available_drops_check))
-        self.available_check.toggled.connect(lambda value: setattr(self._settings, "available_drops_check", value))
+        self.available_check.toggled.connect(
+            lambda value: self._set_boolean("available_drops_check", value)
+        )
         advanced.body().addWidget(self.available_check)
         self.dual_watch = QCheckBox(
             _("gui", "settings", "advanced", "experimental_dual_watch")
@@ -499,7 +515,7 @@ class QtSettings:
             bool(getattr(self._settings, "experimental_dual_watch", False))
         )
         self.dual_watch.toggled.connect(
-            lambda value: setattr(self._settings, "experimental_dual_watch", value)
+            lambda value: self._set_boolean("experimental_dual_watch", value)
         )
         advanced.body().addWidget(self.dual_watch)
         self.reload_status = QLabel()
@@ -564,9 +580,12 @@ class QtSettings:
         return card
 
     def _language_changed(self, language: str) -> None:
-        self._settings.language = language
+        if self._actions_enabled():
+            self._settings.language = language
 
     def _proxy_changed(self) -> None:
+        if not self._actions_enabled():
+            return
         try:
             proxy = parse_proxy(self.proxy.text().strip())
             self._settings.proxy = proxy
@@ -576,6 +595,8 @@ class QtSettings:
         self.proxy.setStyleSheet("")
 
     def _priority_mode_changed(self, label: str) -> None:
+        if not self._actions_enabled():
+            return
         for mode, name in self._priority_modes.items():
             if name == label:
                 self._settings.priority_mode = mode
@@ -583,10 +604,14 @@ class QtSettings:
                 return
 
     def _watch_preferences_changed(self) -> None:
+        if not self._actions_enabled():
+            return
         self._manager.inventory.refresh()
         self._twitch.change_state(State.GAMES_UPDATE)
 
     def _history_retention_changed(self, index: int) -> None:
+        if not self._actions_enabled():
+            return
         days = self.history_retention.itemData(index)
         if not isinstance(days, int):
             return
@@ -595,15 +620,21 @@ class QtSettings:
         self._manager.history_changed()
 
     def _dark_changed(self, value: bool) -> None:
+        if not self._actions_enabled():
+            return
         self._settings.dark_mode = value
         self._manager.apply_theme(value)
 
     def _tray_changed(self, value: bool) -> None:
+        if not self._actions_enabled():
+            return
         self._settings.autostart_tray = value
         if self.autostart.isChecked():
             self._autostart_changed(True)
 
     def _autostart_changed(self, value: bool) -> None:
+        if not self._actions_enabled():
+            return
         try:
             self._autostart.set_enabled(value, tray=self.tray.isChecked())
             self.reload_status.setText(_("gui", "text", "startup_saved"))
@@ -616,6 +647,8 @@ class QtSettings:
             )
 
     def _reload(self) -> None:
+        if not self._actions_enabled():
+            return
         self._twitch.change_state(State.INVENTORY_FETCH)
         self.reload_status.setText(_("gui", "text", "reload_requested"))
 
@@ -632,6 +665,8 @@ class QtSettings:
         self.exclude_entry.addItems(sorted(self._game_names - excluded))
 
     def _priority_add(self) -> None:
+        if not self._actions_enabled():
+            return
         name = self.priority_entry.currentText().strip()
         if not name or name in self._settings.priority:
             return
@@ -642,6 +677,8 @@ class QtSettings:
         self._watch_preferences_changed()
 
     def _priority_remove(self) -> None:
+        if not self._actions_enabled():
+            return
         row = self.priority_list.currentRow()
         if row < 0:
             return
@@ -652,6 +689,8 @@ class QtSettings:
         self._watch_preferences_changed()
 
     def _priority_move(self, amount: int) -> None:
+        if not self._actions_enabled():
+            return
         row = self.priority_list.currentRow()
         target = row + amount
         if row < 0 or target < 0 or target >= self.priority_list.count():
@@ -665,6 +704,8 @@ class QtSettings:
         self._watch_preferences_changed()
 
     def _exclude_add(self) -> None:
+        if not self._actions_enabled():
+            return
         name = self.exclude_entry.currentText().strip()
         if not name or name in self._settings.exclude:
             return
@@ -677,6 +718,8 @@ class QtSettings:
         self._watch_preferences_changed()
 
     def _exclude_remove(self) -> None:
+        if not self._actions_enabled():
+            return
         item = self.exclude_list.currentItem()
         if item is None:
             return

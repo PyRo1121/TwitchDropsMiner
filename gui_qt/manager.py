@@ -95,9 +95,10 @@ class QtGUIManager(QMainWindow):
             self,
             twitch.settings,
             self._theme,
+            can_interact=lambda: self.accepting_actions,
             clear_history=self._clear_history,
             reload_inventory=self._reload_inventory,
-            switch_channel=twitch.state_change(State.CHANNEL_SWITCH),
+            switch_channel=self._switch_channel,
         )
         self._expose_shell_contract()
         self._wire_backend()
@@ -253,8 +254,23 @@ class QtGUIManager(QMainWindow):
         self._shell.navigate(key)
 
     def _reload_inventory(self) -> None:
+        if not self.accepting_actions:
+            return
         self._twitch.change_state(State.INVENTORY_FETCH)
         self.print(_("gui", "text", "reload_requested"))
+
+    def _switch_channel(self) -> None:
+        if self.accepting_actions:
+            self._twitch.change_state(State.CHANNEL_SWITCH)
+
+    @property
+    def accepting_actions(self) -> bool:
+        runtime = getattr(self, "_runtime", None)
+        return (
+            self._tasks.accepting
+            if runtime is None
+            else runtime.accepting_actions
+        )
 
     @property
     def running(self) -> bool:
@@ -318,15 +334,19 @@ class QtGUIManager(QMainWindow):
         self._runtime.save(force=force)
 
     def grab_attention(self, *, sound: bool = True) -> None:
+        if not self.accepting_actions:
+            return
         self.tray.restore()
         if sound:
             QApplication.beep()
 
     def set_authenticated(self, authenticated: bool) -> None:
-        self.help.set_authenticated(authenticated)
+        if self.accepting_actions:
+            self.help.set_authenticated(authenticated)
 
     def set_games(self, games: set[Game]) -> None:
-        self.settings.set_games(games)
+        if self.accepting_actions:
+            self.settings.set_games(games)
 
     def display_drop(
         self,
@@ -335,11 +355,15 @@ class QtGUIManager(QMainWindow):
         countdown: bool = True,
         subone: bool = False,
     ) -> None:
+        if not self.accepting_actions:
+            return
         self.progress.display(drop, countdown=countdown, subone=subone)
         self._game_context.display(drop)
         self.tray.update_title(drop)
 
     def clear_drop(self) -> None:
+        if not self.accepting_actions:
+            return
         self.progress.display(None)
         self._game_context.clear()
         self.tray.update_title(None)
@@ -348,6 +372,8 @@ class QtGUIManager(QMainWindow):
         self.output.print(message)
 
     def _clear_history(self) -> None:
+        if not self.accepting_actions:
+            return
         answer = QMessageBox.question(
             self,
             "Clear completed history",

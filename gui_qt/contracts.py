@@ -12,6 +12,9 @@ _T = TypeVar("_T")
 class LoginManager(Protocol):
     """Backend-facing operations used by the login form."""
 
+    @property
+    def accepting_actions(self) -> bool: ...
+
     def grab_attention(self, *, sound: bool = True) -> None: ...
 
     def print(self, message: str) -> None: ...

@@ -106,6 +106,8 @@ class QtUiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         if self.manager is not None:
+            if not self.manager._runtime.stopped:
+                asyncio.run(self.manager.stop())
             self.manager.close_window()
             self.app.processEvents()
             self.manager = None
@@ -159,11 +161,56 @@ class QtUiTests(unittest.TestCase):
 
         self.assertFalse(manager.running)
         self.assertTrue(manager._runtime.stopped)
+        self.assertFalse(manager.accepting_actions)
+        self.assertTrue(manager.isHidden())
+        central = manager.centralWidget()
+        self.assertIsNotNone(central)
+        assert central is not None
+        self.assertFalse(central.isEnabled())
+        self.assertFalse(manager._shell._command_shortcut.isEnabled())
         self.assertFalse(manager._metrics_timer.isActive())
         self.assertFalse(manager.inventory_page._refresh_timer.isActive())
         self.assertNotIn(manager._log_handler, application_logger.handlers)
         self.assertIsNone(manager._page_animation)
         self.assertEqual(manager._tasks._tasks, set())
+
+    def test_recoverable_start_failure_restores_controls_for_retry(self) -> None:
+        manager = self.make_manager()
+        delivered: list[str] = []
+        manager.output.print = delivered.append  # type: ignore[method-assign]
+
+        def fail_after_queued_log() -> None:
+            worker = threading.Thread(
+                target=lambda: logging.getLogger("TwitchDrops").error(
+                    "stale-start-attempt"
+                )
+            )
+            worker.start()
+            worker.join()
+            raise RuntimeError("start failed")
+
+        with patch.object(
+            manager._dashboard,
+            "start",
+            side_effect=fail_after_queued_log,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                manager.start()
+
+        central = manager.centralWidget()
+        self.assertIsNotNone(central)
+        assert central is not None
+        self.assertTrue(manager.accepting_actions)
+        self.assertTrue(central.isEnabled())
+        self.assertTrue(manager._shell._command_shortcut.isEnabled())
+        self.assertTrue(manager.isHidden())
+        self.assertFalse(manager._log_handler.active)
+
+        manager.start()
+        self.app.processEvents()
+        self.assertTrue(manager.running)
+        self.assertEqual(delivered, [])
+        asyncio.run(manager.stop())
 
     def test_stop_runs_every_persistence_stage_after_a_failure(self) -> None:
         manager = self.make_manager()
@@ -216,6 +263,151 @@ class QtUiTests(unittest.TestCase):
         self.assertIn("worker-thread-log", delivered[0][0])
         self.assertEqual(delivered[0][1], self.app.thread())
         asyncio.run(manager.stop())
+
+    def test_queued_logs_are_discarded_after_bridge_deactivation(self) -> None:
+        manager = self.make_manager()
+        manager.start()
+        delivered: list[str] = []
+        manager.output.print = delivered.append  # type: ignore[method-assign]
+
+        worker = threading.Thread(
+            target=lambda: logging.getLogger("TwitchDrops").error(
+                "queued-before-stop"
+            )
+        )
+        worker.start()
+        worker.join()
+
+        asyncio.run(manager.stop())
+        self.assertFalse(manager._log_handler.active)
+        self.app.processEvents()
+
+        record = logging.LogRecord(
+            "TwitchDrops",
+            logging.ERROR,
+            __file__,
+            0,
+            "direct-after-stop",
+            (),
+            None,
+        )
+        manager._log_handler.emit(record)
+        self.app.processEvents()
+        self.assertEqual(delivered, [])
+
+    def test_actions_are_inert_during_and_after_stop(self) -> None:
+        async def exercise() -> None:
+            manager = self.make_manager()
+            manager.start()
+            manager.set_authenticated(True)
+            finalizer_started = asyncio.Event()
+            release_finalizer = asyncio.Event()
+
+            async def owned_work() -> None:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    finalizer_started.set()
+                    await release_finalizer.wait()
+
+            manager._tasks.create(owned_work())
+            stop_task = asyncio.create_task(manager.stop())
+            await finalizer_started.wait()
+
+            central = manager.centralWidget()
+            self.assertIsNotNone(central)
+            assert central is not None
+            self.assertFalse(manager.accepting_actions)
+            self.assertTrue(manager.isHidden())
+            self.assertFalse(central.isEnabled())
+            self.assertFalse(manager._shell._command_shortcut.isEnabled())
+
+            twitch = cast(FakeTwitch, manager._twitch)
+            initial_page = manager.stack.currentWidget()
+            initial_notifications = twitch.settings.tray_notifications
+            manager.login._confirm.clear()
+            manager.settings.priority_entry.setEditText("Blocked Game")
+
+            def attempt_actions() -> None:
+                manager.help.invalidate_token()
+                manager._reload_inventory()
+                manager._switch_channel()
+                manager._navigate("settings")
+                manager.settings._priority_add()
+                manager.settings.notifications.setChecked(
+                    not manager.settings.notifications.isChecked()
+                )
+                manager.login._on_submit()
+
+            attempt_actions()
+            self.assertIsNone(manager.help._invalidate_task)
+            self.assertEqual(twitch.state_changes, [])
+            self.assertEqual(twitch.settings.priority, [])
+            self.assertEqual(
+                twitch.settings.tray_notifications,
+                initial_notifications,
+            )
+            self.assertIs(manager.stack.currentWidget(), initial_page)
+            self.assertFalse(manager.login._confirm.is_set())
+
+            release_finalizer.set()
+            await stop_task
+            attempt_actions()
+            self.assertIsNone(manager.help._invalidate_task)
+            self.assertEqual(twitch.state_changes, [])
+            self.assertEqual(twitch.settings.priority, [])
+            self.assertIs(manager.stack.currentWidget(), initial_page)
+
+        asyncio.run(exercise())
+
+    def test_cancel_finalizer_precedes_normal_and_forced_persistence(self) -> None:
+        async def exercise() -> None:
+            manager = self.make_manager()
+            manager.start()
+            state = {"finalized": False}
+            observations: list[tuple[str, bool, bool]] = []
+            started = asyncio.Event()
+
+            async def owned_work() -> None:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    state["finalized"] = True
+
+            def record_save(name: str, *, force: bool = False) -> None:
+                observations.append((name, force, state["finalized"]))
+
+            manager._tasks.create(owned_work())
+            await started.wait()
+            with patch.object(
+                manager._steam_metadata,
+                "save",
+                side_effect=lambda *, force=False: record_save(
+                    "metadata", force=force
+                ),
+            ), patch.object(
+                manager._image_cache,
+                "save",
+                side_effect=lambda *, force=False: record_save(
+                    "images", force=force
+                ),
+            ):
+                await manager.stop()
+                manager.close_window()
+
+            self.assertTrue(state["finalized"])
+            self.assertEqual(
+                observations,
+                [
+                    ("metadata", False, True),
+                    ("images", False, True),
+                    ("metadata", True, True),
+                    ("images", True, True),
+                ],
+            )
+
+        asyncio.run(exercise())
 
     def test_failed_remote_revocation_still_performs_local_logout(self) -> None:
         manager = self.make_manager()
@@ -573,8 +765,16 @@ class QtUiTests(unittest.TestCase):
             _("gui", "settings", "priority_modes", "priority_only"),
         )
 
+    def test_close_window_requires_drained_runtime(self) -> None:
+        manager = self.make_manager()
+        with self.assertRaisesRegex(RuntimeError, "stopped and drained"):
+            manager.close_window()
+        self.assertFalse(manager._closing)
+        self.assertIsNotNone(manager.centralWidget())
+
     def test_close_window_survives_presentation_cache_errors(self) -> None:
         manager = self.make_manager()
+        asyncio.run(manager.stop())
         with patch.object(manager._steam_metadata, "save", side_effect=OSError("read-only")), patch.object(
             manager._image_cache, "save", side_effect=ValueError("bad cache")
         ):
