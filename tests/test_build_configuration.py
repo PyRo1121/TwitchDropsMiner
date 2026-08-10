@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,25 @@ def _pins(name: str) -> dict[str, str]:
 
 
 class BuildConfigurationTests(unittest.TestCase):
+    def test_frozen_self_test_does_not_touch_legacy_bundle_state(self) -> None:
+        import qt_main
+
+        legacy_lock = qt_main.WORKING_DIR / "lock.file"
+        self.assertEqual(
+            qt_main._startup_lock_paths(self_test=True),
+            (qt_main.LOCK_PATH,),
+        )
+        self.assertEqual(
+            qt_main._startup_lock_paths(self_test=False),
+            (legacy_lock, qt_main.LOCK_PATH),
+        )
+
+        with patch.object(qt_main, "migrate_legacy_data") as migrate:
+            qt_main._migrate_legacy_state(self_test=True)
+            migrate.assert_not_called()
+            qt_main._migrate_legacy_state(self_test=False)
+            migrate.assert_called_once_with()
+
     def test_release_dependency_files_are_hash_locked(self) -> None:
         for name in (
             "requirements-bootstrap.txt",

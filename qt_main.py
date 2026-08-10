@@ -14,6 +14,7 @@ import logging
 import argparse
 import warnings
 import traceback
+from pathlib import Path
 from typing import NoReturn
 
 try:
@@ -225,6 +226,16 @@ async def _main(settings: Settings, args: ParsedArgs) -> int:
     return exit_status
 
 
+def _startup_lock_paths(*, self_test: bool) -> tuple[Path, ...]:
+    legacy_lock_path = WORKING_DIR / "lock.file"
+    return (LOCK_PATH,) if self_test else (legacy_lock_path, LOCK_PATH)
+
+
+def _migrate_legacy_state(*, self_test: bool) -> None:
+    if not self_test:
+        migrate_legacy_data()
+
+
 def main() -> int:
     warnings.simplefilter("default", ResourceWarning)
 
@@ -235,9 +246,11 @@ def main() -> int:
     # Older binaries know only the first path; retaining both locks for this
     # process lifetime prevents old/new credential and settings writers from
     # running concurrently during or after migration.
-    legacy_lock_path = WORKING_DIR / "lock.file"
+    # A frozen self-test must not alter the signed application bundle. It does
+    # not run the backend or migrate legacy state, so only lock the user profile.
+    lock_paths = _startup_lock_paths(self_test=args.self_test)
     try:
-        success, lock_files = lock_file_set((legacy_lock_path, LOCK_PATH))
+        success, lock_files = lock_file_set(lock_paths)
     except OSError:
         _show_error(_("gui", "text", "startup_error"), traceback.format_exc())
         return 1
@@ -246,7 +259,7 @@ def main() -> int:
 
     try:
         try:
-            migrate_legacy_data()
+            _migrate_legacy_state(self_test=args.self_test)
         except DataMigrationError:
             _show_error(_("gui", "text", "startup_error"), traceback.format_exc())
             return 1
