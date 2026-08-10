@@ -450,6 +450,7 @@ jobs:
             --no-index --no-deps --no-build-isolation \
             .release-tools/appimage-builder
           appimage-builder --version
+          python3 -m unittest -v tests.test_appimage_recipe
 
       - name: Create AppImage
         env:

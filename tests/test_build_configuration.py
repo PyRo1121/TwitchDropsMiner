@@ -293,6 +293,10 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("{{APP_VERSION}}-Linux-AppImage-{{ARCH}}.AppImage", recipe)
         self.assertIn("SETUPTOOLS_SCM_PRETEND_VERSION_FOR_APPIMAGE_BUILDER", workflow)
         self.assertIn("requirements-appimage-source.txt", workflow)
+        self.assertIn(
+            "python3 -m unittest -v tests.test_appimage_recipe",
+            workflow,
+        )
         self.assertIn("--no-index --no-deps --no-build-isolation", workflow)
         self.assertIn("apprun_3/helpers/__init__.py", workflow)
         self.assertIn("FUSE_PACKAGE:", workflow)
