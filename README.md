@@ -81,15 +81,17 @@ This project is an independent, unofficial client and is not affiliated with or 
 
 The project deliberately excludes multi-account farming, hosted operation, password/manual-token authentication, channel-points or chat automation, and request-volume-increasing features. Progress shown as authoritative comes only from Twitch responses; the application does not report estimated progress as confirmed credit.
 
-## Verifying a release
+## Binary publication hold and verification
 
-Every published development release includes immutable commit-addressed artifacts, `SHA256SUMS`, an SPDX JSON software bill of materials, and GitHub provenance plus SBOM attestations. Verify the checksum before running an artifact. With the GitHub CLI installed, provenance can also be checked with:
+Public binary releases of the current private-interface runtime are on hold. The native matrix still creates short-lived GitHub Actions artifacts for internal validation, including one same-basename SPDX SBOM per ZIP and a verified checksum manifest, but ordinary pushes and pull requests do not create or update a GitHub Release. Publication requires a manual request plus explicit repository and protected-environment approval that defaults off; it must not be enabled without a documented Twitch policy exception or an official-API-only runtime.
+
+If an exceptional release is approved, verify its checksum before running it. With the GitHub CLI installed, verify repository/workflow provenance with:
 
 ```bash
 gh attestation verify <downloaded-artifact> --repo PyRo1121/TwitchDropsMiner
 ```
 
-Current Windows, macOS, and AppImage builds do not carry platform-native trusted publisher signatures; checksum and GitHub-attestation verification is therefore especially important. See [the release engineering guide](docs/RELEASE.md) for exact guarantees and signing blockers.
+Current Windows, macOS, and AppImage builds do not carry platform-native trusted publisher signatures; checksum and GitHub-attestation verification is therefore especially important. See [the release engineering guide](docs/RELEASE.md) for the publication gate, exact validation guarantees, and signing blockers.
 
 Security vulnerabilities should be submitted through the [private vulnerability-reporting form](https://github.com/PyRo1121/TwitchDropsMiner/security/advisories/new), not a public issue. See [SECURITY.md](SECURITY.md) for the response policy.
 

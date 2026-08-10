@@ -1,8 +1,37 @@
 # Release engineering and signing readiness
 
-This document describes the development-release pipeline on `master`. It is a
-security boundary: changes to workflows, lock files, the PyInstaller spec, or the
-AppImage recipe require review as release changes.
+This document describes the native build-validation pipeline on `master`. It is
+a security boundary: changes to workflows, lock files, the PyInstaller spec, or
+the AppImage recipe require review as release changes.
+
+## Publication hold
+
+Public binary publication is **disabled by default**. The current runtime relies
+on Twitch viewer-presence, campaign, progress, claim, and legacy PubSub
+interfaces that are not part of Twitch's documented public developer surface.
+Native archives remain available as short-lived GitHub Actions artifacts for
+internal matrix validation, but ordinary pushes and pull requests never create
+or update a GitHub Release.
+
+The `publish_release` job is an exceptional hold-release path, not an automatic
+development-release channel. It runs only when all of the following are true:
+
+1. a maintainer manually dispatches the workflow with
+   `publish_private_runtime=true` (default: `false`);
+2. the repository variable `ENABLE_PRIVATE_RUNTIME_PUBLICATION` is explicitly
+   set to `true`;
+3. the `private-runtime-publication` environment has been configured with
+   required reviewers and a `master` deployment-branch restriction;
+4. an environment-scoped `APPROVE_PRIVATE_RUNTIME_PUBLICATION=true` variable is
+   present; and
+5. an authorized reviewer approves that protected-environment deployment.
+
+Do not configure those opt-ins for the current private-interface runtime. They
+exist only for a documented policy exception, such as prior written Twitch
+permission covering the exact interfaces and binary distribution, or after the
+runtime has been replaced by the official-API-only companion described in the
+policy review. Repository secrets or variables must not be used to bypass the
+protected environment.
 
 ## What the pipeline guarantees
 
@@ -13,9 +42,10 @@ Each native build uses CPython 3.10 and preserves the existing matrix:
 - Linux PyInstaller x86-64 and aarch64; and
 - Linux AppImage x86-64 and aarch64.
 
-Release filenames have the form
+Internal validation filenames have the form
 `Twitch.Drops.Miner-<version>.<short-commit>-<platform>-<architecture>.zip`.
-The commit-addressed release tag remains `dev-build-<full-commit>`.
+An explicitly approved exceptional publication uses the immutable,
+commit-addressed tag `dev-build-<full-commit>`.
 
 The build sets `PYTHONHASHSEED=0` and sets `SOURCE_DATE_EPOCH` to the source
 commit timestamp. A single Python archiver then sorts entries, normalizes ZIP
@@ -43,9 +73,13 @@ python -m pip install --require-hashes --only-binary=:all: -r requirements-build
 
 `requirements-release.txt` is a release-only, hash-locked mirror of the runtime
 pins in `requirements.txt`, plus explicitly pinned Python 3.10-only transitive
-dependencies; a regression test requires every runtime package/version to stay
-aligned and constrains the allowed extra set. It allows only the wheels selected
-for the five native OS/architecture targets. The AppImage builder graph is
+dependencies (`async-timeout` and `tomli`); a regression test requires every
+runtime package/version to stay aligned and constrains the allowed extra set.
+The validation job also runs pip's resolver from a clean CPython 3.10 virtual
+environment with `--dry-run --ignore-installed --require-hashes` so dependency
+metadata cannot introduce an undeclared transitive requirement. The lock allows
+only the wheels selected for the five native OS/architecture targets. The
+AppImage builder graph is
 separately locked in `requirements-appimage.txt`, and its source archive is locked in
 `requirements-appimage-source.txt`. Its two source-only dependencies and the
 commit-pinned appimage-builder archive have reviewed SHA-256 hashes. The
@@ -72,24 +106,29 @@ reviewed in Git.
 
 ## Checksums, SBOM, and provenance
 
-The privileged release job runs only for this repository's `master` branch. It:
+Each native build emits one ZIP and one same-basename SPDX JSON SBOM. Syft scans
+only that archive's expanded payload plus `requirements-release.txt` copied as
+the target-resolved runtime inventory. Bootstrap, PyInstaller, and
+appimage-builder toolchains are excluded from runtime SBOM inputs. No aggregate
+cross-platform or build-environment SBOM is currently published.
 
-1. downloads the uniquely named native archives;
-2. expands them beside the reviewed lock files for Syft discovery;
-3. emits `Twitch.Drops.Miner.spdx.json` in SPDX JSON format;
-4. emits and immediately verifies a sorted `SHA256SUMS` manifest;
-5. creates GitHub/Sigstore build-provenance and SBOM attestations for every ZIP;
-   and
-6. creates a new immutable, commit-addressed prerelease without deleting an old
-   release.
+The unprivileged `prepare_release_validation` job downloads all seven ZIP/SBOM
+pairs, rejects a missing or extra predicate, tests every ZIP, creates and
+immediately verifies a sorted `SHA256SUMS`, and uploads the complete set as the
+short-lived `release-validation-<commit>` workflow artifact. This internal
+validation runs without publication credentials.
 
-Actions are pinned to full 40-character commit IDs. The release job alone gets
+Only the protected, default-off `publish_release` job receives
 `contents: write`, `id-token: write`, `attestations: write`, and
-`artifact-metadata: write`; ordinary validation and native builds retain
-`contents: read` only. Checkout credentials are never persisted.
+`artifact-metadata: write`. If the publication hold is explicitly cleared, it
+creates provenance for the ZIPs and seven separate SBOM attestations, each with
+exactly one ZIP subject and that ZIP's same-basename predicate, then creates a
+new immutable commit-addressed prerelease. Ordinary validation and native builds
+retain `contents: read`; checkout credentials are never persisted. Actions are
+pinned to full 40-character commit IDs.
 
-Consumers should download a ZIP, `SHA256SUMS`, and the SPDX document from the
-same release, then run:
+For an exceptionally approved publication, consumers should download a ZIP,
+its same-basename `.spdx.json`, and `SHA256SUMS` from the same release, then run:
 
 ```bash
 sha256sum --check SHA256SUMS

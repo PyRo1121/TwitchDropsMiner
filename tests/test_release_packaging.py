@@ -45,19 +45,82 @@ class ReleasePackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             bundle = root / "Example.app"
-            versions = bundle / "Contents" / "Frameworks" / "Example.framework" / "Versions"
+            framework = bundle / "Contents" / "Frameworks" / "Example.framework"
+            versions = framework / "Versions"
             current = versions / "Current"
             target = versions / "A"
             target.mkdir(parents=True)
+            (target / "Example").write_bytes(b"framework")
             current.symlink_to("A", target_is_directory=True)
+            (framework / "Example").symlink_to("Versions/Current/Example")
             output = root / "bundle.zip"
 
             create_archive(output, [ArchiveEntry(bundle, PurePosixPath("Example.app"))], 0)
 
             with zipfile.ZipFile(output) as archive:
-                link = archive.getinfo("Example.app/Contents/Frameworks/Example.framework/Versions/Current")
-                self.assertTrue(stat.S_ISLNK(link.external_attr >> 16))
-                self.assertEqual(archive.read(link), b"A")
+                current_link = archive.getinfo(
+                    "Example.app/Contents/Frameworks/Example.framework/Versions/Current"
+                )
+                binary_link = archive.getinfo(
+                    "Example.app/Contents/Frameworks/Example.framework/Example"
+                )
+                self.assertTrue(stat.S_ISLNK(current_link.external_attr >> 16))
+                self.assertTrue(stat.S_ISLNK(binary_link.external_attr >> 16))
+                self.assertEqual(archive.read(current_link), b"A")
+                self.assertEqual(
+                    archive.read(binary_link),
+                    b"Versions/Current/Example",
+                )
+
+    @unittest.skipIf(os.name == "nt", "creating symlinks requires extra Windows privileges")
+    def test_archive_rejects_symlink_targets_outside_mapped_root(self) -> None:
+        unsafe_targets = (
+            "../outside",
+            "/absolute/outside",
+            "C:\\outside",
+            "C:drive-relative",
+            "..\\outside",
+        )
+        for target in unsafe_targets:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bundle = root / "bundle"
+                bundle.mkdir()
+                (bundle / "link").symlink_to(target)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "symlink target|escapes archive root",
+                ):
+                    create_archive(
+                        root / "unsafe.zip",
+                        [ArchiveEntry(bundle, PurePosixPath("bundle"))],
+                        0,
+                    )
+
+    @unittest.skipIf(os.name == "nt", "creating symlinks requires extra Windows privileges")
+    def test_archive_rejects_entries_beneath_symlink_ancestors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            target = bundle / "target"
+            target.mkdir(parents=True)
+            (bundle / "link").symlink_to("target", target_is_directory=True)
+            injected = root / "injected"
+            injected.write_text("outside mapping\n", encoding="utf8")
+
+            with self.assertRaisesRegex(ValueError, "symlink ancestor"):
+                create_archive(
+                    root / "unsafe.zip",
+                    [
+                        ArchiveEntry(bundle, PurePosixPath("bundle")),
+                        ArchiveEntry(
+                            injected,
+                            PurePosixPath("bundle/link/injected"),
+                        ),
+                    ],
+                    0,
+                )
 
     def test_entry_paths_reject_parent_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

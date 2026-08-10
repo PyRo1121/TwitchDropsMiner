@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import posixpath
 import shutil
 import stat
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterator, Sequence
 
 
@@ -67,20 +68,67 @@ def _mode_for(source: Path) -> int:
     return stat.S_IFREG | permissions
 
 
+def _validated_symlink_target(item: ArchiveEntry, archive_root: PurePosixPath) -> str:
+    target = os.readlink(item.source)
+    portable_target = target.replace("\\", "/")
+    if (
+        not target
+        or PurePosixPath(portable_target).is_absolute()
+        or PureWindowsPath(target).drive
+    ):
+        raise ValueError(
+            f"unsafe symlink target for {item.archive_name}: {target!r}"
+        )
+    resolved = PurePosixPath(
+        posixpath.normpath(
+            f"{item.archive_name.parent.as_posix()}/{portable_target}"
+        )
+    )
+    if resolved != archive_root and archive_root not in resolved.parents:
+        raise ValueError(
+            f"symlink target escapes archive root for {item.archive_name}: {target!r}"
+        )
+    return target
+
+
 def create_archive(output: Path, entries: Sequence[ArchiveEntry], epoch: int) -> None:
     if not entries:
         raise ValueError("at least one archive entry is required")
 
-    expanded = sorted(
-        (item for entry in entries for item in _walk(entry)),
-        key=lambda item: item.archive_name.as_posix(),
+    expanded_with_roots = sorted(
+        (
+            (item, entry.archive_name)
+            for entry in entries
+            for item in _walk(entry)
+        ),
+        key=lambda value: value[0].archive_name.as_posix(),
     )
+    expanded = [item for item, _archive_root in expanded_with_roots]
     seen: set[str] = set()
-    for item in expanded:
+    symlink_targets: dict[PurePosixPath, str] = {}
+    for item, archive_root in expanded_with_roots:
         folded_name = item.archive_name.as_posix().casefold()
         if folded_name in seen:
             raise ValueError(f"duplicate archive path: {item.archive_name}")
         seen.add(folded_name)
+        if item.source.is_symlink():
+            symlink_targets[item.archive_name] = _validated_symlink_target(
+                item,
+                archive_root,
+            )
+
+    symlink_names = {
+        archive_name.as_posix().casefold() for archive_name in symlink_targets
+    }
+    for item in expanded:
+        if any(
+            parent != PurePosixPath(".")
+            and parent.as_posix().casefold() in symlink_names
+            for parent in item.archive_name.parents
+        ):
+            raise ValueError(
+                f"archive path has a symlink ancestor: {item.archive_name}"
+            )
 
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -97,7 +145,17 @@ def create_archive(output: Path, entries: Sequence[ArchiveEntry], epoch: int) ->
         ) as archive:
             for item in expanded:
                 source = item.source
-                is_directory = source.is_dir() and not source.is_symlink()
+                target = symlink_targets.get(item.archive_name)
+                if target is not None:
+                    if not source.is_symlink() or os.readlink(source) != target:
+                        raise ValueError(
+                            f"symlink changed while packaging: {item.archive_name}"
+                        )
+                elif source.is_symlink():
+                    raise ValueError(
+                        f"source became a symlink while packaging: {item.archive_name}"
+                    )
+                is_directory = target is None and source.is_dir()
                 archive_name = item.archive_name.as_posix() + ("/" if is_directory else "")
                 info = zipfile.ZipInfo(archive_name, _zip_datetime(epoch))
                 info.create_system = 3
@@ -106,8 +164,8 @@ def create_archive(output: Path, entries: Sequence[ArchiveEntry], epoch: int) ->
                 if is_directory:
                     info.external_attr |= 0x10
                     archive.writestr(info, b"")
-                elif source.is_symlink():
-                    archive.writestr(info, os.readlink(source).encode("utf8"))
+                elif target is not None:
+                    archive.writestr(info, target.encode("utf8"))
                 else:
                     with source.open("rb") as input_file, archive.open(info, "w") as output_file:
                         shutil.copyfileobj(input_file, output_file, length=1024 * 1024)

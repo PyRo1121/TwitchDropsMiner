@@ -80,7 +80,19 @@ class BuildConfigurationTests(unittest.TestCase):
         runtime_pins = _pins("requirements.txt")
         release_pins = _pins("requirements-release.txt")
         self.assertEqual(runtime_pins, {name: release_pins[name] for name in runtime_pins})
-        self.assertEqual(set(release_pins) - set(runtime_pins), {"async-timeout"})
+        self.assertEqual(
+            set(release_pins) - set(runtime_pins),
+            {"async-timeout", "tomli"},
+        )
+        self.assertEqual(release_pins["tomli"], "2.4.1")
+        release_lock = (ROOT / "requirements-release.txt").read_text(
+            encoding="utf8"
+        )
+        self.assertIn('tomli==2.4.1; python_version < "3.11"', release_lock)
+        self.assertIn(
+            "sha256:0d85819802132122da43cb86656f8d1f8c6587d54ae7dcaf30e90533028b49fe",
+            release_lock,
+        )
 
     def test_ci_uses_hash_locks_and_real_frozen_self_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
@@ -94,6 +106,9 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count("--self-test"), 4)
         self.assertEqual(workflow.count("build_tools/package_release.py"), 4)
         self.assertIn("pyright@1.1.409", workflow)
+        self.assertIn("python -m venv .release-lock-check", workflow)
+        self.assertIn("--dry-run --ignore-installed", workflow)
+        self.assertIn("Resolve release lock metadata in clean CPython 3.10", workflow)
         self.assertIn("python -m venv .venv", workflow)
         self.assertIn('${PWD}/.venv/bin', workflow)
         self.assertIn('PYTHONHASHSEED: "0"', workflow)
@@ -105,6 +120,23 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("github.repository == 'PyRo1121/TwitchDropsMiner'", workflow)
         self.assertIn("github.ref == 'refs/heads/master'", workflow)
         self.assertIn('gh release create "dev-build-${GITHUB_SHA}"', workflow)
+        self.assertIn("publish_private_runtime:", workflow)
+        self.assertIn("default: false", workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
+        self.assertIn("inputs.publish_private_runtime == true", workflow)
+        self.assertIn(
+            "vars.ENABLE_PRIVATE_RUNTIME_PUBLICATION == 'true'",
+            workflow,
+        )
+        self.assertIn("name: private-runtime-publication", workflow)
+        self.assertIn("APPROVE_PRIVATE_RUNTIME_PUBLICATION", workflow)
+        self.assertNotIn("github.event_name != 'pull_request'", workflow)
+        self.assertEqual(workflow.count("gh release create"), 1)
+        self.assertEqual(workflow.count("contents: write"), 1)
+        publication = workflow.split("\n  publish_release:\n", 1)[1]
+        self.assertIn("workflow_dispatch", publication)
+        self.assertIn("private-runtime-publication", publication)
+        self.assertIn("gh release create", publication)
         self.assertIn("SHA256SUMS", workflow)
         self.assertNotIn("gh release delete", workflow)
         self.assertNotIn("Compress-Archive", workflow)
@@ -124,14 +156,65 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("attestations: write", workflow)
         self.assertIn("artifact-metadata: write", workflow)
         self.assertIn("id-token: write", workflow)
-        self.assertEqual(workflow.count("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"), 2)
-        self.assertIn("sbom-path: artifacts/Twitch.Drops.Miner.spdx.json", workflow)
-        self.assertIn("path: sbom-input", workflow)
+        self.assertEqual(
+            workflow.count(
+                "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
+            ),
+            8,
+        )
+        self.assertEqual(
+            workflow.count(
+                "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610"
+            ),
+            4,
+        )
+        self.assertEqual(workflow.count("sbom-path:"), 7)
+        self.assertEqual(workflow.count("subject-path:"), 8)
+        self.assertEqual(workflow.count("path: sbom-input"), 4)
+        self.assertEqual(
+            workflow.count(
+                "output-file: ${{steps.vars.outputs.artifact_name}}.spdx.json"
+            ),
+            4,
+        )
+        self.assertNotIn("Twitch.Drops.Miner.spdx.json", workflow)
+        self.assertNotIn("cp requirements*.txt", workflow)
+        self.assertNotIn("sbom-input/locks", workflow)
+        self.assertIn("Copy-Item requirements-release.txt", workflow)
+        self.assertEqual(
+            workflow.count(
+                "cp requirements-release.txt sbom-input/runtime/requirements.txt"
+            ),
+            3,
+        )
+        self.assertIn("Verify one-to-one archive and runtime SBOM mapping", workflow)
+        self.assertIn("test \"${#archives[@]}\" -eq 7", workflow)
         self.assertIn("subject-path: artifacts/*.zip", workflow)
+        for subject in (
+            "windows",
+            "macos_x86_64",
+            "macos_arm64",
+            "pyinstaller_x86_64",
+            "pyinstaller_aarch64",
+            "appimage_x86_64",
+            "appimage_aarch64",
+        ):
+            self.assertEqual(
+                workflow.count(
+                    f"sbom-path: ${{{{steps.subjects.outputs.{subject}_sbom}}}}"
+                ),
+                1,
+            )
+            self.assertEqual(
+                workflow.count(
+                    f"subject-path: ${{{{steps.subjects.outputs.{subject}_archive}}}}"
+                ),
+                1,
+            )
         self.assertIn("merge-multiple: true", workflow)
         self.assertIn("! -name SHA256SUMS", workflow)
-        self.assertEqual(workflow.count("retention-days: 7"), 4)
-        self.assertEqual(workflow.count("compression-level: 0"), 4)
+        self.assertEqual(workflow.count("retention-days: 7"), 5)
+        self.assertEqual(workflow.count("compression-level: 0"), 5)
         self.assertEqual(
             (workflow + codeql).count("actions/checkout@"),
             (workflow + codeql).count("persist-credentials: false"),
@@ -227,6 +310,10 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("not notarized", release)
         self.assertIn("not carry an embedded PGP signature", release)
         self.assertIn("--require-hashes", release)
+        self.assertIn("Public binary publication is **disabled by default**", release)
+        self.assertIn("private-runtime-publication", release)
+        self.assertIn("official-API-only", release)
+        self.assertIn("Public binary releases", readme)
 
 
 if __name__ == "__main__":

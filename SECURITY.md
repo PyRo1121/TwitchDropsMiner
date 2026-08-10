@@ -30,11 +30,13 @@ Twitch service outages, campaign eligibility disputes, unsupported Twitch API ch
 
 ## Release verification
 
-Published artifacts include a `SHA256SUMS` manifest, an SPDX JSON software bill of materials, and GitHub provenance plus SBOM attestations. Verify checksums before running a download. Where the GitHub CLI is available, verify provenance with:
+Public binary publication of the current private-interface runtime is on hold and disabled by default. Native archives, same-basename archive-specific SPDX SBOMs, and `SHA256SUMS` are retained only as short-lived workflow artifacts for internal validation. A GitHub Release requires a manual dispatch plus explicit repository and protected-environment approval; the gate must remain off without a documented Twitch policy exception or an official-API-only runtime.
+
+If an exceptional publication is approved, verify its checksums and repository/workflow provenance before running a download:
 
 ```bash
 sha256sum --check SHA256SUMS
 gh attestation verify <downloaded-artifact> --repo PyRo1121/TwitchDropsMiner
 ```
 
-Current Windows, macOS, and AppImage development artifacts do not have trusted platform-native publisher signatures. A matching checksum alone does not authenticate the publisher; use the GitHub attestation as the repository/workflow identity check. Signing and notarization blockers are tracked in [the release engineering guide](docs/RELEASE.md).
+Current Windows, macOS, and AppImage development artifacts do not have trusted platform-native publisher signatures. A matching checksum alone does not authenticate the publisher; use the GitHub attestation as the repository/workflow identity check. Publication controls, signing, and notarization blockers are tracked in [the release engineering guide](docs/RELEASE.md).

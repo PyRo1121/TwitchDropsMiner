@@ -6,6 +6,14 @@ on:
       - "master"
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_private_runtime:
+        description: >-
+          Request exceptional publication of the private-interface runtime.
+          Requires the protected environment and repository opt-in as well.
+        required: false
+        default: false
+        type: boolean
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -56,6 +64,17 @@ jobs:
         run: |
           sudo apt update
           sudo apt install xvfb libdbus-1-3 libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+
+      - name: Resolve release lock metadata in clean CPython 3.10
+        run: |
+          python -m venv .release-lock-check
+          .release-lock-check/bin/python -m pip install \
+            --require-hashes --only-binary=:all: \
+            -r requirements-bootstrap.txt
+          .release-lock-check/bin/python -m pip install \
+            --dry-run --ignore-installed \
+            --require-hashes --only-binary=:all: \
+            -r requirements-release.txt
 
       - name: Create validation environment and install hash-locked dependencies
         run: |
@@ -140,13 +159,32 @@ jobs:
             --entry "manual.txt=Twitch Drops Miner/manual.txt"
           python -m zipfile -t "$env:ARTIFACT_NAME.zip"
 
+      - name: Stage archive-specific runtime SBOM input
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          New-Item -ItemType Directory -Force sbom-input\archive, sbom-input\runtime
+          python -m zipfile -e "$env:ARTIFACT_NAME.zip" sbom-input\archive
+          Copy-Item requirements-release.txt sbom-input\runtime\requirements.txt
+
+      - name: Generate archive-specific SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          format: spdx-json
+          output-file: ${{steps.vars.outputs.artifact_name}}.spdx.json
+          path: sbom-input
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           compression-level: 0
           if-no-files-found: error
           name: ${{steps.vars.outputs.artifact_name}}
-          path: ${{steps.vars.outputs.artifact_name}}.zip
+          path: |
+            ${{steps.vars.outputs.artifact_name}}.zip
+            ${{steps.vars.outputs.artifact_name}}.spdx.json
           retention-days: 7
 
   macos:
@@ -218,13 +256,32 @@ jobs:
             --entry "manual.txt=Twitch Drops Miner/manual.txt"
           python3 -m zipfile -t "${ARTIFACT_NAME}.zip"
 
+      - name: Stage archive-specific runtime SBOM input
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          mkdir -p sbom-input/archive sbom-input/runtime
+          python3 -m zipfile -e "${ARTIFACT_NAME}.zip" sbom-input/archive
+          cp requirements-release.txt sbom-input/runtime/requirements.txt
+
+      - name: Generate archive-specific SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          format: spdx-json
+          output-file: ${{steps.vars.outputs.artifact_name}}.spdx.json
+          path: sbom-input
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           compression-level: 0
           if-no-files-found: error
           name: ${{steps.vars.outputs.artifact_name}}
-          path: ${{steps.vars.outputs.artifact_name}}.zip
+          path: |
+            ${{steps.vars.outputs.artifact_name}}.zip
+            ${{steps.vars.outputs.artifact_name}}.spdx.json
           retention-days: 7
 
   linux-pyinstaller:
@@ -298,13 +355,32 @@ jobs:
             --entry "manual.txt=Twitch Drops Miner/manual.txt"
           python3 -m zipfile -t "${ARTIFACT_NAME}.zip"
 
+      - name: Stage archive-specific runtime SBOM input
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          mkdir -p sbom-input/archive sbom-input/runtime
+          python3 -m zipfile -e "${ARTIFACT_NAME}.zip" sbom-input/archive
+          cp requirements-release.txt sbom-input/runtime/requirements.txt
+
+      - name: Generate archive-specific SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          format: spdx-json
+          output-file: ${{steps.vars.outputs.artifact_name}}.spdx.json
+          path: sbom-input
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           compression-level: 0
           if-no-files-found: error
           name: ${{steps.vars.outputs.artifact_name}}
-          path: ${{steps.vars.outputs.artifact_name}}.zip
+          path: |
+            ${{steps.vars.outputs.artifact_name}}.zip
+            ${{steps.vars.outputs.artifact_name}}.spdx.json
           retention-days: 7
 
   linux-appimage:
@@ -416,27 +492,95 @@ jobs:
             --entry "manual.txt=Twitch Drops Miner/manual.txt"
           python3 -m zipfile -t "${ARTIFACT_NAME}.zip"
 
+      - name: Stage archive-specific runtime SBOM input
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          mkdir -p sbom-input/archive sbom-input/runtime
+          python3 -m zipfile -e "${ARTIFACT_NAME}.zip" sbom-input/archive
+          cp requirements-release.txt sbom-input/runtime/requirements.txt
+
+      - name: Generate archive-specific SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          format: spdx-json
+          output-file: ${{steps.vars.outputs.artifact_name}}.spdx.json
+          path: sbom-input
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           compression-level: 0
           if-no-files-found: error
           name: ${{steps.vars.outputs.artifact_name}}
-          path: ${{steps.vars.outputs.artifact_name}}.zip
+          path: |
+            ${{steps.vars.outputs.artifact_name}}.zip
+            ${{steps.vars.outputs.artifact_name}}.spdx.json
           retention-days: 7
 
-  update_releases_page:
-    name: Upload builds to Releases
-    if: >-
-      github.repository == 'PyRo1121/TwitchDropsMiner' &&
-      github.ref == 'refs/heads/master' &&
-      github.event_name != 'pull_request'
+  prepare_release_validation:
+    name: Prepare internal release validation bundle
     needs:
       - windows
       - linux-pyinstaller
       - linux-appimage
       - macos
     runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download native archives and archive-specific SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - name: Verify one-to-one archive and runtime SBOM mapping
+        run: |
+          shopt -s nullglob
+          archives=(artifacts/*.zip)
+          sboms=(artifacts/*.spdx.json)
+          test "${#archives[@]}" -eq 7
+          test "${#sboms[@]}" -eq "${#archives[@]}"
+          for archive in "${archives[@]}"; do
+            sbom="${archive%.zip}.spdx.json"
+            test -s "$sbom"
+            python3 -m zipfile -t "$archive"
+          done
+          for sbom in "${sboms[@]}"; do
+            test -s "${sbom%.spdx.json}.zip"
+          done
+
+      - name: Generate and verify validation checksums
+        run: |
+          cd artifacts
+          export LC_ALL=C
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Upload internal release validation bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          compression-level: 0
+          if-no-files-found: error
+          name: release-validation-${{github.sha}}
+          path: artifacts
+          retention-days: 7
+
+  publish_release:
+    name: Exceptional protected publication
+    if: >-
+      github.repository == 'PyRo1121/TwitchDropsMiner' &&
+      github.ref == 'refs/heads/master' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.publish_private_runtime == true &&
+      vars.ENABLE_PRIVATE_RUNTIME_PUBLICATION == 'true'
+    needs:
+      - prepare_release_validation
+    runs-on: ubuntu-22.04
+    environment:
+      name: private-runtime-publication
     permissions:
       actions: read
       artifact-metadata: write
@@ -445,77 +589,105 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      - name: Verify protected-environment publication approval
+        env:
+          APPROVAL: ${{vars.APPROVE_PRIVATE_RUNTIME_PUBLICATION}}
+        run: test "$APPROVAL" = "true"
 
-      - name: Set up variables
-        id: vars
-        run: echo "date_now=$(date --rfc-3339=seconds)" >> "${GITHUB_OUTPUT}"
-
-      - name: Download build artifacts from previous jobs
+      - name: Download validated release bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          merge-multiple: true
+          name: release-validation-${{github.sha}}
           path: artifacts
 
-      - name: Stage release contents for SBOM discovery
+      - name: Resolve one-to-one attestation subjects
+        id: subjects
         run: |
-          mkdir -p sbom-input/locks sbom-input/artifacts
-          cp requirements*.txt sbom-input/locks/
-          for archive in artifacts/*.zip; do
-            destination="sbom-input/artifacts/$(basename "$archive" .zip)"
-            mkdir -p "$destination"
-            unzip -q "$archive" -d "$destination"
-          done
-
-      - name: Generate SPDX software bill of materials
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          format: spdx-json
-          output-file: artifacts/Twitch.Drops.Miner.spdx.json
-          path: sbom-input
-          upload-artifact: false
-          upload-release-assets: false
-
-      - name: Generate artifact checksums
-        run: |
-          cd artifacts
-          export LC_ALL=C
-          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-          sha256sum --check SHA256SUMS
+          record_subject() {
+            key="$1"
+            pattern="$2"
+            mapfile -t matches < <(compgen -G "artifacts/${pattern}" | sort)
+            test "${#matches[@]}" -eq 1
+            archive="${matches[0]}"
+            sbom="${archive%.zip}.spdx.json"
+            test -s "$archive"
+            test -s "$sbom"
+            echo "${key}_archive=${archive}" >> "${GITHUB_OUTPUT}"
+            echo "${key}_sbom=${sbom}" >> "${GITHUB_OUTPUT}"
+          }
+          record_subject windows '*-Windows-x86_64.zip'
+          record_subject macos_x86_64 '*-macOS-x86_64.zip'
+          record_subject macos_arm64 '*-macOS-arm64.zip'
+          record_subject pyinstaller_x86_64 '*-Linux-PyInstaller-x86_64.zip'
+          record_subject pyinstaller_aarch64 '*-Linux-PyInstaller-aarch64.zip'
+          record_subject appimage_x86_64 '*-Linux-AppImage-x86_64.zip'
+          record_subject appimage_aarch64 '*-Linux-AppImage-aarch64.zip'
 
       - name: Attest release artifact provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: artifacts/*.zip
 
-      - name: Attest release SBOM
+      - name: Attest Windows archive SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          sbom-path: artifacts/Twitch.Drops.Miner.spdx.json
-          subject-path: artifacts/*.zip
+          sbom-path: ${{steps.subjects.outputs.windows_sbom}}
+          subject-path: ${{steps.subjects.outputs.windows_archive}}
 
-      - name: Create an immutable development release
+      - name: Attest macOS x86-64 archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          sbom-path: ${{steps.subjects.outputs.macos_x86_64_sbom}}
+          subject-path: ${{steps.subjects.outputs.macos_x86_64_archive}}
+
+      - name: Attest macOS arm64 archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          sbom-path: ${{steps.subjects.outputs.macos_arm64_sbom}}
+          subject-path: ${{steps.subjects.outputs.macos_arm64_archive}}
+
+      - name: Attest Linux PyInstaller x86-64 archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          sbom-path: ${{steps.subjects.outputs.pyinstaller_x86_64_sbom}}
+          subject-path: ${{steps.subjects.outputs.pyinstaller_x86_64_archive}}
+
+      - name: Attest Linux PyInstaller aarch64 archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          sbom-path: ${{steps.subjects.outputs.pyinstaller_aarch64_sbom}}
+          subject-path: ${{steps.subjects.outputs.pyinstaller_aarch64_archive}}
+
+      - name: Attest Linux AppImage x86-64 archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          sbom-path: ${{steps.subjects.outputs.appimage_x86_64_sbom}}
+          subject-path: ${{steps.subjects.outputs.appimage_x86_64_archive}}
+
+      - name: Attest Linux AppImage aarch64 archive SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          sbom-path: ${{steps.subjects.outputs.appimage_aarch64_sbom}}
+          subject-path: ${{steps.subjects.outputs.appimage_aarch64_archive}}
+
+      - name: Create an immutable policy-exception prerelease
         env:
           GH_TOKEN: ${{github.token}}
-          RELEASE_DATE: ${{steps.vars.outputs.date_now}}
         run: |
           cat > release-notes.md <<EOF
-          **This is an automatically generated in-development pre-release version of the application, that includes the latest master branch changes.**
-          **⚠️ This build is not stable and may end up terminating with a fatal error. ⚠️**
-          **Use at your own risk.**
+          **Exceptional protected publication of the private-interface runtime.**
+          This publication required a manual workflow request, repository opt-in,
+          and approval through the protected release environment.
 
-          - Last build date: \`${RELEASE_DATE}\`
           - Reference commit: ${GITHUB_SHA}
           - Verify checksums: \`sha256sum --check SHA256SUMS\`
           - Verify provenance: \`gh attestation verify <artifact> --repo ${GITHUB_REPOSITORY}\`
+          - Each ZIP has a same-basename archive-specific SPDX JSON SBOM.
           EOF
           gh release create "dev-build-${GITHUB_SHA}" \
             artifacts/*.zip \
+            artifacts/*.spdx.json \
             artifacts/SHA256SUMS \
-            artifacts/Twitch.Drops.Miner.spdx.json \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
             --title "Development build ${GITHUB_SHA}" \
