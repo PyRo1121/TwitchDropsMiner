@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import stat
 import tempfile
 from collections.abc import Callable, Mapping
@@ -22,7 +23,8 @@ from utils import atomic_write_bytes, durable_unlink
 
 STORAGE_VERSION: Final = 2
 JOURNAL_VERSION: Final = 1
-_ARTIFACT_PLAN_VERSION: Final = 2
+_ARTIFACT_PLAN_VERSION: Final = 3
+_CAPTURE_TOKEN_HEX_LENGTH: Final = 32
 _MAX_METADATA_BYTES: Final = 64 * 1024
 _MAX_JOURNAL_BYTES: Final = 1024 * 1024
 _LEGACY_CREDENTIAL_COOKIE_NAMES: Final = frozenset(
@@ -614,6 +616,21 @@ def _new_artifact_record(spec: _ArtifactSpec) -> dict[str, Any]:
     }
 
 
+def _replan_artifact_record(
+    spec: _ArtifactSpec,
+    previous: Mapping[str, Any],
+) -> dict[str, Any]:
+    outputs = previous.get("outputs", [])
+    if not isinstance(outputs, list) or any(
+        not isinstance(output, dict) for output in outputs
+    ):
+        raise DataMigrationError(f"Migration outputs are invalid for {spec.key}")
+    record = _new_artifact_record(spec)
+    record["outputs"] = list(outputs)
+    record["quarantined"] = bool(previous.get("quarantined", False))
+    return record
+
+
 def _new_journal(legacy_dir: Path) -> dict[str, Any]:
     return {
         "version": JOURNAL_VERSION,
@@ -641,7 +658,7 @@ def _upgrade_artifact_record(
 
     state = record.get("state")
     if state == "pending":
-        return _new_artifact_record(spec)
+        return _replan_artifact_record(spec, record)
     if state == "installed":
         cleanup = record.get("cleanup", [])
         if not isinstance(cleanup, list) or any(
@@ -655,7 +672,10 @@ def _upgrade_artifact_record(
             raise DataMigrationError(
                 f"Legacy cleanup already began before migration plan upgrade for {spec.key}"
             )
-        return _new_artifact_record(spec)
+        if raw_plan_version == 1:
+            return _replan_artifact_record(spec, record)
+        record["plan_version"] = _ARTIFACT_PLAN_VERSION
+        return record
     if state == "complete":
         record["plan_version"] = _ARTIFACT_PLAN_VERSION
         return record
@@ -944,8 +964,67 @@ def _verify_outputs(
             raise DataMigrationError(f"Migration output changed before completion: {path}")
 
 
-def _cleanup_staging_path(path: Path, role: str, digest: str) -> Path:
+def _legacy_cleanup_staging_path(path: Path, role: str, digest: str) -> Path:
     return path.with_name(f".{path.name}.migration-{role}-{digest}.staged")
+
+
+def _capture_path(
+    path: Path,
+    role: str,
+    item: dict[str, Any],
+) -> tuple[Path, bool]:
+    prefix = f".{path.name}.migration-capture-{role}-"
+    suffix = ".quarantine"
+    capture_name = item.get("capture_name")
+    created = False
+    if capture_name is None:
+        capture_name = f"{prefix}{secrets.token_hex(16)}{suffix}"
+        item["capture_name"] = capture_name
+        created = True
+    if not isinstance(capture_name, str) or Path(capture_name).name != capture_name:
+        raise DataMigrationError(f"Migration capture path is invalid: {path}")
+    if not capture_name.startswith(prefix) or not capture_name.endswith(suffix):
+        raise DataMigrationError(f"Migration capture path is invalid: {path}")
+    token = capture_name[len(prefix) : -len(suffix)]
+    if (
+        len(token) != _CAPTURE_TOKEN_HEX_LENGTH
+        or token.lower() != token
+        or any(character not in "0123456789abcdef" for character in token)
+    ):
+        raise DataMigrationError(f"Migration capture path is invalid: {path}")
+    return path.with_name(capture_name), created
+
+
+def _regular_file_identity(path: Path) -> tuple[int, int, int, int]:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise DataMigrationError(f"Unable to inspect migration capture: {path}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise DataMigrationError(f"Migration capture is not a regular file: {path}")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _read_stable_capture(
+    path: Path,
+    maximum_bytes: int,
+) -> tuple[bytes, bytes, bool]:
+    before = _regular_file_identity(path)
+    first = _read_regular_file(path, maximum_bytes)
+    between = _regular_file_identity(path)
+    second = _read_regular_file(path, maximum_bytes)
+    after = _regular_file_identity(path)
+    return first, second, before == between == after and first == second
+
+
+def _make_capture_private(path: Path) -> None:
+    try:
+        if os.chmod in os.supports_follow_symlinks:
+            os.chmod(path, 0o600, follow_symlinks=False)
+        else:
+            os.chmod(path, 0o600)
+    except OSError as exc:
+        raise DataMigrationError(f"Unable to secure migration capture: {path}") from exc
 
 
 def _atomic_stage_source(source: Path, staging: Path) -> bool:
@@ -1063,32 +1142,59 @@ def _cleanup_sources(
         digest = item.get("sha256")
         removed = item.get("removed", False)
         staged = item.get("staged", False)
+        retained = item.get("retained", False)
         if (
             role not in source_paths
             or not isinstance(digest, str)
             or type(removed) is not bool
             or type(staged) is not bool
+            or type(retained) is not bool
         ):
             raise DataMigrationError(f"Migration cleanup metadata is invalid for {spec.key}")
         path = source_paths[role]
-        staging = _cleanup_staging_path(path, role, digest)
+        capture, capture_created = _capture_path(path, role, item)
+        if capture_created:
+            _write_json_file(journal_path, journal)
         if removed:
-            if _path_exists(path) or _path_exists(staging):
+            if _path_exists(path):
                 raise DataMigrationError(f"Removed migration source reappeared: {path}")
+            if retained and not _path_exists(capture):
+                raise DataMigrationError(f"Retained migration capture disappeared: {capture}")
             continue
-        if not _path_exists(staging):
-            if not _atomic_stage_source(path, staging):
-                item["removed"] = True
-                item["staged"] = False
-                _write_json_file(journal_path, journal)
-                continue
+
+        legacy_staging = _legacy_cleanup_staging_path(path, role, digest)
+        if not _path_exists(capture):
+            source_to_capture = (
+                legacy_staging if _path_exists(legacy_staging) else path
+            )
+            if not _atomic_stage_source(source_to_capture, capture):
+                raise DataMigrationError(
+                    f"Migration source disappeared before durable capture: {path}"
+                )
             item["staged"] = True
+            item["retained"] = True
             _write_json_file(journal_path, journal)
 
-        replacement_present = _path_exists(path)
-        current = _read_regular_file(staging, spec.maximum_bytes)
+        _make_capture_private(capture)
+        first, current, stable = _read_stable_capture(
+            capture,
+            spec.maximum_bytes,
+        )
+        first_digest = _digest(first)
         current_digest = _digest(current)
-        if current_digest != digest:
+        if first_digest == digest:
+            _preserve_generation(
+                outputs,
+                data_dir,
+                spec,
+                role=role,
+                reason="captured-source",
+                data=first,
+            )
+            record["outputs"] = outputs
+            _write_json_file(journal_path, journal)
+
+        if not stable or first_digest != digest or current_digest != digest:
             preserved = _preserve_generation(
                 outputs,
                 data_dir,
@@ -1097,22 +1203,45 @@ def _cleanup_sources(
                 reason="replacement-conflict",
                 data=current,
             )
+            record["outputs"] = outputs
+            record["quarantined"] = True
+            previous_replacement = item.get("replacement_sha256")
+            item["replacement_sha256"] = current_digest
+            _write_json_file(journal_path, journal)
+            if stable and previous_replacement == current_digest:
+                cleaned.append(f"{spec.key}:{role}")
+                item["removed"] = True
+                item["staged"] = True
+                item["retained"] = True
+                _write_json_file(journal_path, journal)
+                continue
+            raise DataMigrationError(
+                f"Migration capture changed during verification and was preserved at "
+                f"{preserved}"
+            )
+
+        if _path_exists(path):
+            replacement = _read_regular_file(path, spec.maximum_bytes)
+            preserved = _preserve_generation(
+                outputs,
+                data_dir,
+                spec,
+                role=role,
+                reason="replacement-conflict",
+                data=replacement,
+            )
+            record["outputs"] = outputs
             record["quarantined"] = True
             _write_json_file(journal_path, journal)
             raise DataMigrationError(
-                f"Migration source changed before cleanup and was preserved at {preserved}"
+                f"Migration source was replaced during cleanup and was preserved at "
+                f"{preserved}"
             )
-        try:
-            durable_unlink(staging)
-        except OSError as exc:
-            raise DataMigrationError(f"Unable to remove migrated source: {path}") from exc
-        if replacement_present or _path_exists(path):
-            raise DataMigrationError(
-                f"Migration source was replaced during cleanup and was not removed: {path}"
-            )
+
         cleaned.append(f"{spec.key}:{role}")
         item["removed"] = True
-        item["staged"] = False
+        item["staged"] = True
+        item["retained"] = True
         _write_json_file(journal_path, journal)
     return cleaned
 
@@ -1157,6 +1286,15 @@ def _prepare_artifact(
     if outputs:
         _verify_outputs(record, data_dir, spec.maximum_bytes)
     quarantined = bool(record.get("quarantined", False))
+    for snapshot in snapshots:
+        _preserve_generation(
+            outputs,
+            data_dir,
+            spec,
+            role=snapshot.role,
+            reason="captured-source",
+            data=snapshot.data,
+        )
     for snapshot in invalid:
         quarantine = _quarantine_path(data_dir, spec, f"{snapshot.role}.invalid")
         _write_preserved_bytes(quarantine, snapshot.data)
@@ -1365,11 +1503,14 @@ def migrate_legacy_data(
     _ensure_private_directory(data_dir / "migration-quarantine")
     journal_path = data_dir / "migration-journal.json"
     journal = _load_journal(journal_path, legacy_dir)
-    if version == STORAGE_VERSION and recovery_keys:
+    if recovery_keys:
         artifacts = journal["artifacts"]
         for spec in _ARTIFACTS:
             if spec.key in recovery_keys:
-                artifacts[spec.key] = _new_artifact_record(spec)
+                artifacts[spec.key] = _replan_artifact_record(
+                    spec,
+                    artifacts[spec.key],
+                )
         journal.pop("completed_at", None)
         _write_json_file(journal_path, journal)
     elif not _path_exists(journal_path):

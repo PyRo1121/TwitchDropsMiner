@@ -471,6 +471,60 @@ class DataMigrationTests(unittest.TestCase):
         self.assertFalse((legacy / "settings.json").exists())
         self.assertFalse((legacy / "settings.json.new").exists())
 
+    def test_old_complete_journal_replans_new_without_current_marker(self) -> None:
+        for marker_version in (None, 1):
+            with self.subTest(marker_version=marker_version), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory)
+                recovery_bytes = b'{"language":"recovered"}'
+                (data / "settings.json.new").write_bytes(recovery_bytes)
+                if marker_version is not None:
+                    (data / "storage.json").write_text(
+                        json.dumps({"version": marker_version}),
+                        encoding="utf8",
+                    )
+                quarantine = data / "migration-quarantine"
+                quarantine.mkdir()
+                prior_output = quarantine / "settings-prior-output"
+                prior_bytes = b"prior-journaled-output"
+                prior_output.write_bytes(prior_bytes)
+                journal = data_migration._new_journal(data)
+                for record in journal["artifacts"].values():
+                    record.pop("plan_version")
+                    record["state"] = "complete"
+                    record["result"] = "absent"
+                journal["artifacts"]["settings.json"]["outputs"] = [
+                    {
+                        "path": str(prior_output.relative_to(data)),
+                        "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                    }
+                ]
+                (data / "migration-journal.json").write_text(
+                    json.dumps(journal),
+                    encoding="utf8",
+                )
+
+                result = migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+                self.assertIn("settings.json", result.recovered)
+                self.assertEqual(
+                    self._read_json(data / "settings.json"),
+                    {"language": "recovered"},
+                )
+                self.assertFalse((data / "settings.json.new").exists())
+                self.assertTrue(prior_output.exists())
+                completed = self._read_json(data / "migration-journal.json")
+                settings_record = completed["artifacts"]["settings.json"]
+                self.assertEqual(settings_record["plan_version"], 3)
+                self.assertEqual(settings_record["state"], "complete")
+                self.assertIn(
+                    str(prior_output.relative_to(data)),
+                    [output["path"] for output in settings_record["outputs"]],
+                )
+                self.assertEqual(
+                    self._read_json(data / "storage.json")["version"],
+                    2,
+                )
+
     def test_destination_wins_preserves_both_distinct_source_generations(self) -> None:
         temporary, legacy, data = self._directories()
         self.addCleanup(temporary.cleanup)
@@ -574,30 +628,37 @@ class DataMigrationTests(unittest.TestCase):
         self.assertIn("settings.json", result.migrated)
         self.assertFalse(source.exists())
 
-    def test_cleanup_failure_resumes_after_durable_target_install(self) -> None:
+    def test_capture_failure_resumes_after_durable_target_install(self) -> None:
         temporary, legacy, data = self._directories()
         self.addCleanup(temporary.cleanup)
         source = legacy / "settings.json"
         source.write_text('{"language":"English"}', encoding="utf8")
-        real_unlink = data_migration.durable_unlink
+        real_secure = data_migration._make_capture_private
         failed = False
 
-        def fail_source_cleanup(path: Path, *, require_regular: bool = True) -> bool:
+        def interrupt_capture(path: Path) -> None:
             nonlocal failed
-            if path.name.startswith(".settings.json.migration-canonical-") and not failed:
+            if not failed:
                 failed = True
-                raise OSError("injected cleanup failure")
-            return real_unlink(path, require_regular=require_regular)
+                raise DataMigrationError("injected capture interruption")
+            real_secure(path)
 
         with (
-            patch.object(data_migration, "durable_unlink", side_effect=fail_source_cleanup),
-            self.assertRaisesRegex(DataMigrationError, "remove migrated source"),
+            patch.object(
+                data_migration,
+                "_make_capture_private",
+                side_effect=interrupt_capture,
+            ),
+            self.assertRaisesRegex(DataMigrationError, "capture interruption"),
         ):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
         self.assertTrue((data / "settings.json").exists())
         self.assertFalse(source.exists())
-        self.assertEqual(len(tuple(legacy.glob(".settings.json.migration-*.staged"))), 1)
+        captures = tuple(
+            legacy.glob(".settings.json.migration-capture-canonical-*.quarantine")
+        )
+        self.assertEqual(len(captures), 1)
         self.assertFalse((data / "storage.json").exists())
         journal = self._read_json(data / "migration-journal.json")
         self.assertEqual(
@@ -608,6 +669,7 @@ class DataMigrationTests(unittest.TestCase):
         result = migrate_legacy_data(legacy_dir=legacy, data_dir=data)
         self.assertIn("settings.json", result.migrated)
         self.assertFalse(source.exists())
+        self.assertEqual(captures[0].read_text(encoding="utf8"), '{"language":"English"}')
         self.assertTrue((data / "storage.json").exists())
 
     def test_changed_source_is_never_deleted_during_cleanup_recovery(self) -> None:
@@ -615,29 +677,49 @@ class DataMigrationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         source = legacy / "settings.json"
         source.write_text('{"language":"first"}', encoding="utf8")
-        real_unlink = data_migration.durable_unlink
         failed = False
 
-        def interrupt_cleanup(path: Path, *, require_regular: bool = True) -> bool:
+        def interrupt_capture(_path: Path) -> None:
             nonlocal failed
-            if path.name.startswith(".settings.json.migration-canonical-") and not failed:
+            if not failed:
                 failed = True
-                raise OSError("injected cleanup interruption")
-            return real_unlink(path, require_regular=require_regular)
+                raise DataMigrationError("injected capture interruption")
 
         with (
-            patch.object(data_migration, "durable_unlink", side_effect=interrupt_cleanup),
-            self.assertRaisesRegex(DataMigrationError, "remove migrated source"),
+            patch.object(
+                data_migration,
+                "_make_capture_private",
+                side_effect=interrupt_capture,
+            ),
+            self.assertRaisesRegex(DataMigrationError, "capture interruption"),
         ):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
         self.assertFalse(source.exists())
-        self.assertEqual(len(tuple(legacy.glob(".settings.json.migration-*.staged"))), 1)
-        source.write_text('{"language":"changed"}', encoding="utf8")
+        self.assertEqual(
+            len(
+                tuple(
+                    legacy.glob(
+                        ".settings.json.migration-capture-canonical-*.quarantine"
+                    )
+                )
+            ),
+            1,
+        )
+        changed = b'{"language":"changed"}'
+        source.write_bytes(changed)
         with self.assertRaisesRegex(DataMigrationError, "replaced during cleanup"):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
-        self.assertEqual(source.read_text(encoding="utf8"), '{"language":"changed"}')
+        self.assertEqual(source.read_bytes(), changed)
+        preserved = self._conflict_path(
+            data,
+            "settings.json",
+            "canonical",
+            "replacement-conflict",
+            changed,
+        )
+        self.assertEqual(preserved.read_bytes(), changed)
         self.assertFalse((data / "storage.json").exists())
 
     def test_replacement_after_snapshot_is_preserved_not_unlinked(self) -> None:
@@ -664,7 +746,7 @@ class DataMigrationTests(unittest.TestCase):
                 "_read_regular_file",
                 side_effect=replace_after_snapshot,
             ),
-            self.assertRaisesRegex(DataMigrationError, "changed before cleanup"),
+            self.assertRaisesRegex(DataMigrationError, "changed during verification"),
         ):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
@@ -677,10 +759,77 @@ class DataMigrationTests(unittest.TestCase):
             replacement,
         )
         self.assertEqual(preserved.read_bytes(), replacement)
-        staged = tuple(legacy.glob(".settings.json.migration-*.staged"))
-        self.assertEqual(len(staged), 1)
-        self.assertEqual(staged[0].read_bytes(), replacement)
+        captures = tuple(
+            legacy.glob(".settings.json.migration-capture-canonical-*.quarantine")
+        )
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), replacement)
         self.assertFalse((data / "storage.json").exists())
+
+    def test_replacement_of_capture_after_read_is_preserved_and_retryable(self) -> None:
+        temporary, legacy, data = self._directories()
+        self.addCleanup(temporary.cleanup)
+        source = legacy / "settings.json"
+        original = b'{"language":"original"}'
+        replacement = b'{"language":"replacement"}'
+        source.write_bytes(original)
+        real_read = data_migration._read_regular_file
+        replaced = False
+
+        def replace_capture_after_read(path: Path, maximum_bytes: int) -> bytes:
+            nonlocal replaced
+            contents = real_read(path, maximum_bytes)
+            if ".migration-capture-canonical-" in path.name and not replaced:
+                replaced = True
+                atomic_write_bytes(path, replacement)
+            return contents
+
+        with (
+            patch.object(
+                data_migration,
+                "_read_regular_file",
+                side_effect=replace_capture_after_read,
+            ),
+            self.assertRaisesRegex(DataMigrationError, "changed during verification"),
+        ):
+            migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        captures = tuple(
+            legacy.glob(".settings.json.migration-capture-canonical-*.quarantine")
+        )
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), replacement)
+        captured_original = self._conflict_path(
+            data,
+            "settings.json",
+            "canonical",
+            "captured-source",
+            original,
+        )
+        preserved_replacement = self._conflict_path(
+            data,
+            "settings.json",
+            "canonical",
+            "replacement-conflict",
+            replacement,
+        )
+        self.assertEqual(captured_original.read_bytes(), original)
+        self.assertEqual(preserved_replacement.read_bytes(), replacement)
+        journal = self._read_json(data / "migration-journal.json")
+        settings_record = journal["artifacts"]["settings.json"]
+        self.assertEqual(settings_record["state"], "installed")
+        journaled_outputs = {output["path"] for output in settings_record["outputs"]}
+        self.assertIn(str(captured_original.relative_to(data)), journaled_outputs)
+        self.assertIn(str(preserved_replacement.relative_to(data)), journaled_outputs)
+        self.assertFalse((data / "storage.json").exists())
+
+        result = migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        self.assertIn("settings.json", result.migrated)
+        self.assertEqual(captures[0].read_bytes(), replacement)
+        self.assertEqual(captured_original.read_bytes(), original)
+        self.assertEqual(preserved_replacement.read_bytes(), replacement)
+        self.assertTrue((data / "storage.json").exists())
 
     def test_replacement_created_after_staged_read_remains_at_source_path(self) -> None:
         temporary, legacy, data = self._directories()
@@ -694,7 +843,7 @@ class DataMigrationTests(unittest.TestCase):
         def replace_after_staged_read(path: Path, maximum_bytes: int) -> bytes:
             nonlocal replaced
             contents = real_read(path, maximum_bytes)
-            if ".migration-canonical-" in path.name and not replaced:
+            if ".migration-capture-canonical-" in path.name and not replaced:
                 replaced = True
                 atomic_write_bytes(source, replacement)
             return contents
@@ -710,7 +859,16 @@ class DataMigrationTests(unittest.TestCase):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
         self.assertEqual(source.read_bytes(), replacement)
-        self.assertFalse(tuple(legacy.glob(".settings.json.migration-*.staged")))
+        self.assertEqual(
+            len(
+                tuple(
+                    legacy.glob(
+                        ".settings.json.migration-capture-canonical-*.quarantine"
+                    )
+                )
+            ),
+            1,
+        )
         self.assertFalse((data / "storage.json").exists())
 
     def test_marker_failure_resumes_without_needing_deleted_sources(self) -> None:
