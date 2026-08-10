@@ -219,6 +219,107 @@ class InventoryValidationTests(unittest.TestCase):
         drop.update_minutes(3, 5)
         self.assertEqual((drop.current_minutes, drop.required_minutes), (4, 20))
 
+    def test_claimed_drop_ignores_irrelevant_malformed_progress(self) -> None:
+        for value in (None, "complete"):
+            with self.subTest(value=value):
+                data = _campaign_data()
+                self_data = data["timeBasedDrops"][0]["self"]
+                self_data["isClaimed"] = True
+                self_data["currentMinutesWatched"] = value
+
+                drop = next(iter(self._campaign(data).drops))
+
+                self.assertTrue(drop.is_claimed)
+                self.assertEqual(
+                    (drop.current_minutes, drop.required_minutes),
+                    (10, 10),
+                )
+
+    def test_unclaimed_drop_still_rejects_malformed_progress(self) -> None:
+        data = _campaign_data()
+        data["timeBasedDrops"][0]["self"]["currentMinutesWatched"] = None
+
+        with self.assertRaisesRegex(ValueError, "currentMinutesWatched"):
+            self._campaign(data)
+
+    def test_late_unambiguous_benefit_award_marks_drop_claimed(self) -> None:
+        data = _campaign_data()
+        drop_data = data["timeBasedDrops"][0]
+        del drop_data["self"]
+        drop_data["endAt"] = _stamp(-5)
+        awarded_at = datetime.now(timezone.utc)
+
+        drop = next(
+            iter(self._campaign(data, {"benefit-drop": awarded_at}).drops)
+        )
+
+        self.assertTrue(drop.is_claimed)
+        self.assertEqual(drop.current_minutes, drop.required_minutes)
+
+    def test_reused_benefit_award_is_not_guessed_between_drops(self) -> None:
+        data = _campaign_data()
+        first = data["timeBasedDrops"][0]
+        del first["self"]
+        first["benefitEdges"] = [_benefit("shared")]
+        second = _drop("second")
+        del second["self"]
+        second["benefitEdges"] = [_benefit("shared")]
+        data["timeBasedDrops"].append(second)
+
+        campaign = self._campaign(
+            data,
+            {"shared": datetime.now(timezone.utc)},
+        )
+
+        self.assertFalse(any(drop.is_claimed for drop in campaign.drops))
+
+    def test_rewardless_prerequisite_inherits_downstream_eligibility(self) -> None:
+        data = _campaign_data()
+        data["self"]["isAccountConnected"] = False
+        prerequisite = data["timeBasedDrops"][0]
+        prerequisite["benefitEdges"] = []
+        reward = _drop("reward")
+        reward["preconditionDrops"] = [{"id": "drop"}]
+        data["timeBasedDrops"].append(reward)
+
+        campaign = self._campaign(data)
+        drops = {drop.id: drop for drop in campaign.drops}
+
+        self.assertTrue(drops["drop"].eligible)
+        self.assertTrue(drops["drop"].can_earn())
+        self.assertTrue(campaign.can_earn())
+
+    def test_zero_minute_drop_has_consistent_finished_progress(self) -> None:
+        data = _campaign_data()
+        data["timeBasedDrops"][0]["requiredMinutesWatched"] = 0
+
+        campaign = self._campaign(data)
+        drop = next(iter(campaign.drops))
+
+        self.assertTrue(campaign.finished)
+        self.assertEqual(drop.progress, 1.0)
+        self.assertEqual(campaign.progress, 1.0)
+
+    def test_payload_identity_timeline_and_duplicate_benefits_are_strict(self) -> None:
+        invalid_id = _campaign_data()
+        invalid_id["timeBasedDrops"][0]["self"]["dropInstanceID"] = ""
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            self._campaign(invalid_id)
+
+        invalid_timeline = _campaign_data()
+        invalid_timeline["timeBasedDrops"][0]["endAt"] = _stamp(-20)
+        with self.assertRaisesRegex(ValueError, "start time"):
+            self._campaign(invalid_timeline)
+
+        duplicate_benefit = _campaign_data()
+        benefit = _benefit("duplicate")
+        duplicate_benefit["timeBasedDrops"][0]["benefitEdges"] = [
+            benefit,
+            copy.deepcopy(benefit),
+        ]
+        with self.assertRaisesRegex(ValueError, "duplicate benefit"):
+            self._campaign(duplicate_benefit)
+
 
 if __name__ == "__main__":
     unittest.main()

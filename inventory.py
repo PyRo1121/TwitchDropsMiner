@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import re
 import math
-import logging
 from enum import Enum
 from itertools import chain
 from typing import TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 
-from translate import _
 from channel import Channel
+from drop_claim_service import DropClaimService, DropClaimState
 from game import Game
 from utils import timestamp
-from exceptions import GQLException, RequestException
-from constants import GQL_QUERIES, URLType
+from constants import URLType
 
 if TYPE_CHECKING:
     from collections import abc
@@ -23,7 +20,6 @@ if TYPE_CHECKING:
     from constants import JsonType
 
 
-logger = logging.getLogger("TwitchDrops")
 DIMS_PATTERN = re.compile(r'-\d+x\d+(?=\.(?:jpg|png|gif)$)', re.I)
 
 
@@ -64,7 +60,14 @@ class Benefit:
         name = benefit_data.get("name")
         distribution_type = benefit_data.get("distributionType")
         image_url = benefit_data.get("imageAssetURL")
-        if not isinstance(benefit_id, str) or not isinstance(name, str) or not isinstance(image_url, str):
+        if (
+            not isinstance(benefit_id, str)
+            or not benefit_id
+            or not isinstance(name, str)
+            or not name
+            or not isinstance(image_url, str)
+            or not image_url
+        ):
             raise ValueError("Drop benefit data is incomplete")
         self.id: str = benefit_id
         self.name: str = name
@@ -78,18 +81,17 @@ class Benefit:
 
 
 class BaseDrop:
-    def __init__(
-        self, campaign: DropsCampaign, data: JsonType, claimed_benefits: dict[str, datetime]
-    ):
+    def __init__(self, campaign: DropsCampaign, data: JsonType):
         self._twitch: Twitch = campaign._twitch
-        self._claim_lock = asyncio.Lock()
         drop_id = data.get("id")
         name = data.get("name")
         start_at = data.get("startAt")
         end_at = data.get("endAt")
         if (
             not isinstance(drop_id, str)
+            or not drop_id
             or not isinstance(name, str)
+            or not name
             or not isinstance(start_at, str)
             or not isinstance(end_at, str)
         ):
@@ -103,34 +105,40 @@ class BaseDrop:
         if not isinstance(benefit_edges, list):
             raise ValueError("Drop benefitEdges must be a list")
         self.benefits: list[Benefit] = []
+        benefit_ids: set[str] = set()
         for benefit_data in benefit_edges:
             if not isinstance(benefit_data, dict):
                 raise ValueError("Drop benefitEdges contains invalid data")
-            self.benefits.append(Benefit(benefit_data))
+            benefit = Benefit(benefit_data)
+            if benefit.id in benefit_ids:
+                raise ValueError("Drop contains a duplicate benefit ID")
+            benefit_ids.add(benefit.id)
+            self.benefits.append(benefit)
         self.starts_at: datetime = timestamp(start_at)
         self.ends_at: datetime = timestamp(end_at)
-        self.claim_id: str | None = None
-        self.is_claimed = False
+        if self.starts_at >= self.ends_at:
+            raise ValueError("Drop start time must precede its end time")
+
         self_data = data.get("self")
-        if self_data is not None:
+        self._claim_state_authoritative = self_data is not None
+        if self_data is None:
+            claim_id = None
+            is_claimed = False
+        else:
             if not isinstance(self_data, dict):
                 raise ValueError("Drop self data must be an object")
             claim_id = self_data.get("dropInstanceID")
             if claim_id is not None and not isinstance(claim_id, str):
                 raise ValueError("Drop instance ID must be a string")
-            self.claim_id = claim_id
-            self.is_claimed = _strict_bool(
+            is_claimed = _strict_bool(
                 self_data.get("isClaimed", False),
                 "Drop isClaimed",
             )
-        elif self.benefits and all(
-            (awarded_at := claimed_benefits.get(benefit.id)) is not None
-            and self.starts_at <= awarded_at < self.ends_at
-            for benefit in self.benefits
-        ):
-            # In the absence of a self edge, every benefit must have been
-            # awarded during this drop's active window.
-            self.is_claimed = True
+        self._claim_state = DropClaimState.from_payload(
+            is_claimed=is_claimed,
+            claim_id=claim_id,
+        )
+
         precondition_data = data.get("preconditionDrops", [])
         if precondition_data is None:
             precondition_data = []
@@ -167,21 +175,24 @@ class BaseDrop:
     def _on_state_changed(self) -> None:
         raise NotImplementedError
 
-    @property
-    def eligible(self) -> bool:
+    def _benefits_are_eligible(self) -> bool:
         has_badge_or_emote = any(
             benefit.type.is_badge_or_emote() for benefit in self.benefits
         )
         has_direct_entitlement = any(
             not benefit.type.is_badge_or_emote() for benefit in self.benefits
         )
-        if not self.benefits:
-            has_direct_entitlement = True
         return (
             has_direct_entitlement and self.campaign.linked
             or has_badge_or_emote
             and self._twitch.settings.enable_badges_emotes
         )
+
+    @property
+    def eligible(self) -> bool:
+        if self.benefits:
+            return self._benefits_are_eligible()
+        return self.campaign._prerequisite_is_eligible(self.id)
 
     def _base_earn_conditions(self) -> bool:
         # define when a drop can be earned or not
@@ -217,122 +228,55 @@ class BaseDrop:
         )
 
     @property
+    def claim_id(self) -> str | None:
+        return self._claim_state.claim_id
+
+    @claim_id.setter
+    def claim_id(self, value: str | None) -> None:
+        # A failed synthetic claim is cleared by watch reconciliation before a
+        # later authoritative inventory refresh supplies another instance ID.
+        if value is None:
+            self._claim_state = self._claim_state.clear_instance()
+        else:
+            self.update_claim(value)
+
+    @property
+    def is_claimed(self) -> bool:
+        return self._claim_state.is_claimed
+
+    @property
     def can_claim(self) -> bool:
         # https://help.twitch.tv/s/article/mission-based-drops?language=en_US#claiming
         # "If you are unable to claim the Drop in time, you will be able to claim it
         # from the Drops Inventory page until 24 hours after the Drops campaign has ended."
         return (
-            self.claim_id is not None
-            and not self.is_claimed
+            self._claim_state.is_ready
             and datetime.now(timezone.utc) < self.campaign.ends_at + timedelta(hours=24)
         )
 
-    def update_claim(self, claim_id: str):
-        self.claim_id = claim_id
+    def update_claim(self, claim_id: str) -> None:
+        self._claim_state = self._claim_state.ready(claim_id)
 
     async def generate_claim(self) -> None:
-        # claim IDs now appear to be constructed from other IDs we have access to
-        # Format: UserID#CampaignID#DropID
-        # NOTE: This marks a drop as a ready-to-claim, so we may want to later ensure
-        # its mining progress is finished first
-        auth_state = await self.campaign._twitch.get_auth()
-        self.claim_id = f"{auth_state.user_id}#{self.campaign.id}#{self.id}"
+        await self.campaign._claim_service.generate_claim(self)
 
     def rewards_text(self, delim: str = ", ") -> str:
         return delim.join(benefit.name for benefit in self.benefits)
 
     async def claim(self) -> bool:
-        async with self._claim_lock:
-            if self.is_claimed:
-                return True
-            return await self._claim_once()
+        return await self.campaign._claim_service.claim(self)
 
-    async def _claim_once(self) -> bool:
-        claim_attempted = self.can_claim
-        result = await self._claim()
-        record_history = getattr(self._twitch, "history_event", None)
+    def _apply_claim_result(self, result: bool) -> None:
         if result:
-            self.is_claimed = result
-            if claim_attempted and record_history is not None:
-                record_history(
-                    "claim.succeeded",
-                    data={
-                        "campaign_id": self.campaign.id,
-                        "drop_id": self.id,
-                        "game": self.campaign.game.name,
-                        "reward": self.rewards_text(),
-                    },
-                )
-            claim_text = (
-                f"{self.campaign.game.name}\n"
-                f"{self.rewards_text()} "
-                f"({self.campaign.claimed_drops}/{self.campaign.total_drops})"
-            )
-            # two different claim texts, becase a new line after the game name
-            # looks ugly in the output window - replace it with a space
-            self._twitch.print(
-                _("status", "claimed_drop").format(drop=claim_text.replace('\n', ' '))
-            )
-            self._twitch.gui.tray.notify(claim_text, _("gui", "tray", "notification_title"))
-        else:
-            if claim_attempted and record_history is not None:
-                record_history(
-                    "claim.unconfirmed",
-                    severity="warning",
-                    data={
-                        "campaign_id": self.campaign.id,
-                        "drop_id": self.id,
-                        "game": self.campaign.game.name,
-                        "reward": self.rewards_text(),
-                    },
-                )
-            logger.error(f"Drop claim has potentially failed! Drop ID: {self.id}")
-        return result
+            self._claim_state = self._claim_state.claimed()
 
-    async def _claim(self) -> bool:
-        """
-        Returns True if the claim succeeded, False otherwise.
-        """
-        if self.is_claimed:
-            return True
-        if not self.can_claim:
-            return False
-        try:
-            response = await self._twitch.transport.gql_request(
-                GQL_QUERIES["ClaimDrop"].with_variables(
-                    {"input": {"dropInstanceID": self.claim_id}}
-                )
-            )
-        except (GQLException, RequestException):
-            # Regardless of the error, assume claiming potentially failed and
-            # let the next inventory/event reconciliation retry it.
-            return False
-        data = response.get("data") if isinstance(response, dict) else None
-        if not isinstance(data, dict):
-            logger.warning("Drop claim returned malformed GraphQL data: %s", self.id)
-            return False
-        if data.get("errors"):
-            return False
-        claim_result = data.get("claimDropRewards")
-        if not isinstance(claim_result, dict):
-            return False
-        return claim_result.get("status") in (
-            "ELIGIBLE_FOR_ALL",
-            "DROP_INSTANCE_ALREADY_CLAIMED",
-        )
+    def _present_claim_result(self) -> None:
+        self._on_state_changed()
 
 
 class TimedDrop(BaseDrop):
-    def __init__(
-        self, campaign: DropsCampaign, data: JsonType, claimed_benefits: dict[str, datetime]
-    ):
-        super().__init__(campaign, data, claimed_benefits)
-        self_data = data.get("self")
-        raw_minutes = (
-            self_data.get("currentMinutesWatched", 0)
-            if isinstance(self_data, dict)
-            else 0
-        )
+    def __init__(self, campaign: DropsCampaign, data: JsonType):
+        super().__init__(campaign, data)
         try:
             required_minutes = _nonnegative_int(
                 data["requiredMinutesWatched"],
@@ -340,6 +284,20 @@ class TimedDrop(BaseDrop):
             )
         except KeyError as exc:
             raise ValueError("Timed Drop minute data is invalid") from exc
+        self.required_minutes = required_minutes
+
+        if self.is_claimed:
+            # Claimed state is authoritative. Twitch can omit or return stale
+            # progress for claimed drops, so that irrelevant field is not parsed.
+            self.real_current_minutes = required_minutes
+            return
+
+        self_data = data.get("self")
+        raw_minutes = (
+            self_data.get("currentMinutesWatched", 0)
+            if isinstance(self_data, dict)
+            else 0
+        )
         current_minutes = _nonnegative_int(
             raw_minutes,
             "Timed Drop currentMinutesWatched",
@@ -347,11 +305,7 @@ class TimedDrop(BaseDrop):
         # Twitch occasionally reports completed progress beyond the advertised
         # requirement. Treat that as complete while preserving the domain
         # invariant that progress never exceeds its requirement.
-        self.required_minutes = required_minutes
         self.real_current_minutes = min(current_minutes, required_minutes)
-        if self.is_claimed:
-            # claimed drops may report inconsistent current minutes, so we need to overwrite them
-            self.real_current_minutes = self.required_minutes
 
     def __repr__(self) -> str:
         if 0 < self.current_minutes < self.required_minutes:
@@ -384,9 +338,11 @@ class TimedDrop(BaseDrop):
 
     @property
     def progress(self) -> float:
-        if self.current_minutes <= 0 or self.required_minutes <= 0:
+        if self.required_minutes <= 0:
+            return 1.0
+        if self.current_minutes <= 0:
             return 0.0
-        elif self.current_minutes >= self.required_minutes:
+        if self.current_minutes >= self.required_minutes:
             return 1.0
         return self.current_minutes / self.required_minutes
 
@@ -412,12 +368,10 @@ class TimedDrop(BaseDrop):
             self.real_current_minutes = self.required_minutes
         self._on_state_changed()
 
-    async def claim(self) -> bool:
-        result = await super().claim()
+    def _apply_claim_result(self, result: bool) -> None:
+        super()._apply_claim_result(result)
         if result:
             self.real_current_minutes = self.required_minutes
-        self._on_state_changed()
-        return result
 
     def display(self, *, countdown: bool = True, subone: bool = False):
         self._twitch.gui.display_drop(self, countdown=countdown, subone=subone)
@@ -458,7 +412,9 @@ class DropsCampaign:
         status = data.get("status")
         if (
             not isinstance(campaign_id, str)
+            or not campaign_id
             or not isinstance(name, str)
+            or not name
             or not isinstance(start_at, str)
             or not isinstance(end_at, str)
             or not isinstance(status, str)
@@ -499,7 +455,10 @@ class DropsCampaign:
         self.image_url: URLType = remove_dimensions(URLType(box_art_url))
         self.starts_at: datetime = timestamp(start_at)
         self.ends_at: datetime = timestamp(end_at)
+        if self.starts_at >= self.ends_at:
+            raise ValueError("Campaign start time must precede its end time")
         self._valid = status in {"ACTIVE", "UPCOMING"}
+        self._claim_service = DropClaimService(twitch)
 
         allowed = data.get("allow")
         if allowed is None:
@@ -544,12 +503,9 @@ class DropsCampaign:
                 raise ValueError("Campaign timed drop is missing an ID")
             if drop_id in self.timed_drops:
                 raise ValueError(f"Campaign contains duplicate drop ID: {drop_id}")
-            self.timed_drops[drop_id] = TimedDrop(
-                self,
-                drop_data,
-                claimed_benefits,
-            )
+            self.timed_drops[drop_id] = TimedDrop(self, drop_data)
         self._validate_preconditions()
+        self._resolve_claim_evidence(claimed_benefits)
 
     def _validate_preconditions(self) -> None:
         states: dict[str, int] = {}
@@ -572,6 +528,57 @@ class DropsCampaign:
 
         for drop_id in self.timed_drops:
             visit(drop_id)
+
+    def _resolve_claim_evidence(
+        self,
+        claimed_benefits: dict[str, datetime],
+    ) -> None:
+        """Conservatively assign non-authoritative benefit awards to drops.
+
+        An award remains valid through Twitch's campaign claim grace period.
+        Reused benefit IDs are intentionally left unresolved when one award can
+        belong to more than one drop; guessing would corrupt prerequisite state.
+        """
+        claim_deadline = self.ends_at + timedelta(hours=24)
+        candidates: dict[str, set[str]] = {}
+        for benefit_id, awarded_at in claimed_benefits.items():
+            candidates[benefit_id] = {
+                drop.id
+                for drop in self.drops
+                if drop.starts_at <= awarded_at < claim_deadline
+                and any(benefit.id == benefit_id for benefit in drop.benefits)
+            }
+
+        for drop in self.drops:
+            if drop._claim_state_authoritative or not drop.benefits:
+                continue
+            if all(
+                benefit.id in claimed_benefits
+                and candidates.get(benefit.id) == {drop.id}
+                for benefit in drop.benefits
+            ):
+                drop._claim_state = drop._claim_state.claimed()
+                if isinstance(drop, TimedDrop):
+                    drop.real_current_minutes = drop.required_minutes
+
+    def _precondition_ids(self, drop: TimedDrop) -> set[str]:
+        preconditions: set[str] = set()
+        pending = list(drop.precondition_drops)
+        while pending:
+            precondition_id = pending.pop()
+            if precondition_id in preconditions:
+                continue
+            preconditions.add(precondition_id)
+            pending.extend(self.timed_drops[precondition_id].precondition_drops)
+        return preconditions
+
+    def _prerequisite_is_eligible(self, drop_id: str) -> bool:
+        return any(
+            candidate._benefits_are_eligible()
+            and drop_id in self._precondition_ids(candidate)
+            for candidate in self.drops
+            if candidate.benefits
+        )
 
     def __repr__(self) -> str:
         return f"Campaign({self.game!s}, {self.name}, {self.claimed_drops}/{self.total_drops})"
@@ -670,7 +677,9 @@ class DropsCampaign:
     def preconditions_chain(self) -> set[str]:
         return set(
             chain.from_iterable(
-                drop.precondition_drops for drop in self.drops if not drop.is_claimed
+                self._precondition_ids(drop)
+                for drop in self.drops
+                if not drop.is_claimed
             )
         )
 
