@@ -23,8 +23,10 @@ class DropEventServiceTests(unittest.IsolatedAsyncioTestCase):
                 _inventory_generation=1,
                 _drops={},
                 watch_service=SimpleNamespace(
-                    assigned_channels=Mock(return_value=[]),
-                    adopt_unassigned_drop=Mock(return_value=[]),
+                    progress=SimpleNamespace(
+                        assigned_channels=Mock(return_value=[]),
+                        adopt_unassigned_drop=Mock(return_value=[]),
+                    ),
                 ),
             ),
         )
@@ -40,8 +42,8 @@ class DropEventServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(message=message):
                 await service.process_drops(42, cast(Any, message))
 
-        twitch.watch_service.assigned_channels.assert_not_called()
-        twitch.watch_service.adopt_unassigned_drop.assert_not_called()
+        twitch.watch_service.progress.assigned_channels.assert_not_called()
+        twitch.watch_service.progress.adopt_unassigned_drop.assert_not_called()
 
     async def test_unknown_assigned_drop_requests_inventory_refresh(self) -> None:
         channel = _Channel()
@@ -52,7 +54,9 @@ class DropEventServiceTests(unittest.IsolatedAsyncioTestCase):
                 _inventory_generation=1,
                 _drops={},
                 watch_service=SimpleNamespace(
-                    assigned_channels=Mock(return_value=[channel]),
+                    progress=SimpleNamespace(
+                        assigned_channels=Mock(return_value=[channel]),
+                    ),
                 ),
                 change_state=states.append,
             ),

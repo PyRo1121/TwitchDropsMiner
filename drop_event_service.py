@@ -84,8 +84,8 @@ class DropEventService:
             logger.info("Ignoring a claim result from a replaced inventory")
             return
         if claimed:
-            self._twitch.watch_service.mark_completed_drop(drop.id)
-        self._twitch.watch_service.display_primary_drop(drop)
+            self._twitch.watch_service.progress.mark_completed_drop(drop.id)
+        self._twitch.watch_service.progress.display_primary_drop(drop)
 
         await asyncio.sleep(4)
         if not self._inventory_drop_is_current(inventory_generation, drop):
@@ -102,7 +102,7 @@ class DropEventService:
         )
         if not self._inventory_drop_is_current(inventory_generation, drop):
             return
-        if self._twitch.watch_service.continue_after_claim(
+        if self._twitch.watch_service.progress.continue_after_claim(
             claimed,
             campaign,
             watching_channels,
@@ -140,7 +140,7 @@ class DropEventService:
         # PubSub does not include a channel ID; the assigned Drop ID is the
         # authoritative discriminator when two channels are being farmed.
         drop.update_minutes(current_progress, required_progress)
-        self._twitch.watch_service.display_primary_drop(drop)
+        self._twitch.watch_service.progress.display_primary_drop(drop)
 
     @task_wrapper
     async def process_drops(self, user_id: int, message: JsonType) -> None:
@@ -158,10 +158,14 @@ class DropEventService:
             logger.warning("Ignoring a drop event without a valid drop ID")
             return
         drop = self._twitch._drops.get(drop_id)
-        watching_channels = self._twitch.watch_service.assigned_channels(drop_id)
+        watching_channels = self._twitch.watch_service.progress.assigned_channels(
+            drop_id
+        )
         if not watching_channels:
-            watching_channels = self._twitch.watch_service.adopt_unassigned_drop(
-                drop_id, drop
+            watching_channels = (
+                self._twitch.watch_service.progress.adopt_unassigned_drop(
+                    drop_id, drop
+                )
             )
             if not watching_channels:
                 return

@@ -55,6 +55,7 @@ class _WatchAdapter:
     def __init__(self, claim_cooldowns: dict[str, float]) -> None:
         self.stops = 0
         self.claim_cooldowns = claim_cooldowns
+        self.progress = self
 
     async def stop_watching_and_wait(self) -> None:
         self.stops += 1

@@ -172,7 +172,7 @@ class InventoryService:
                 continue
             for drop in campaign.drops:
                 if drop.can_claim and await drop.claim():
-                    self._twitch.watch_service.mark_completed_drop(drop.id)
+                    self._twitch.watch_service.progress.mark_completed_drop(drop.id)
 
         exclude = self._twitch.settings.exclude
         priority = self._twitch.settings.priority
@@ -253,7 +253,7 @@ class InventoryService:
         if self._twitch.gui.close_requested:
             raise ExitRequest()
 
-        self._twitch.watch_service.retain_claim_cooldowns(drops)
+        self._twitch.watch_service.progress.retain_claim_cooldowns(drops)
         self._twitch._inventory_generation += 1
         self._twitch._drops = drops
         self._twitch.inventory = list(campaigns)

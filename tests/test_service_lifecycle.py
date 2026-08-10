@@ -202,6 +202,10 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state_change.is_set())
         self.assertFalse(hasattr(Twitch, "_handle_idle_state"))
         self.assertFalse(hasattr(Twitch, "_switch_channel"))
+        self.assertFalse(hasattr(service, "_reconcile_watch_progress"))
+        self.assertFalse(hasattr(service, "_claim_cooldowns"))
+        self.assertTrue(hasattr(service.progress, "reconcile"))
+        self.assertTrue(hasattr(service.progress, "_claim_cooldowns"))
 
     async def test_game_selection_is_atomic_and_does_not_reorder_inventory(self) -> None:
         class GameStub:
@@ -253,7 +257,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     priority_mode=PriorityMode.ENDING_SOONEST,
                 ),
                 watch_service=SimpleNamespace(
-                    mark_completed_drop=completed,
+                    progress=SimpleNamespace(mark_completed_drop=completed),
                 ),
             ),
         )

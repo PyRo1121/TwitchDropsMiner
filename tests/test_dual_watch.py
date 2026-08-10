@@ -112,20 +112,20 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner = cast(Any, Twitch.__new__(Twitch))
             service = _service(miner)
             service._channel_cooldowns = {}
-            service._claim_cooldowns = {"drop": 1.0}
-            service._resync_cooldowns = {"refresh": 1.0}
-            service._completed_drop_ids = {"drop"}
+            service.progress._claim_cooldowns = {"drop": 1.0}
+            service.progress._resync_cooldowns = {"refresh": 1.0}
+            service.progress._completed_drop_ids = {"drop"}
 
-            service._block_watch_channel(1, seconds=60)
+            service.block_channel(1, seconds=60)
             handle = service._cooldown_handles[1]
             service.reset()
 
             self.assertTrue(handle.cancelled())
             self.assertEqual(service._cooldown_handles, {})
             self.assertEqual(_service(miner)._channel_cooldowns, {})
-            self.assertEqual(_service(miner)._claim_cooldowns, {})
-            self.assertEqual(_service(miner)._resync_cooldowns, {})
-            self.assertEqual(_service(miner)._completed_drop_ids, set())
+            self.assertEqual(_service(miner).progress._claim_cooldowns, {})
+            self.assertEqual(_service(miner).progress._resync_cooldowns, {})
+            self.assertEqual(_service(miner).progress._completed_drop_ids, set())
 
         asyncio.run(exercise())
 
@@ -150,7 +150,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             _service(miner)._drop_ids = {2: "drop-a"}
             _service(miner)._watching_channels = OrderedDict(((2, channel),))
             _service(miner)._restart_events = {2: asyncio.Event()}
-            _service(miner)._claim_cooldowns = {}
+            _service(miner).progress._claim_cooldowns = {}
             miner._drops = {"drop-b": drop}
             _service(miner).primary_channel = AwaitableValue()
             _service(miner).primary_channel.set(channel)
@@ -172,7 +172,7 @@ class DualWatchSelectionTests(unittest.TestCase):
                 }
 
             miner.transport = SimpleNamespace(gql_request=gql_request)
-            await _service(miner)._reconcile_watch_progress(channel)
+            await _service(miner).progress.reconcile(channel)
 
             self.assertEqual(_service(miner)._drop_ids[2], "drop-b")
             self.assertEqual(drop.current_minutes, 3)
@@ -212,7 +212,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             _service(miner)._drop_ids = {2: "drop-a"}
             _service(miner)._watching_channels = OrderedDict(((2, channel),))
             _service(miner)._restart_events = {2: asyncio.Event()}
-            _service(miner)._claim_cooldowns = {}
+            _service(miner).progress._claim_cooldowns = {}
             miner._drops = {"drop-b": drop}
             _service(miner).primary_channel = AwaitableValue()
             _service(miner).primary_channel.set(channel)
@@ -234,14 +234,14 @@ class DualWatchSelectionTests(unittest.TestCase):
                 }
 
             miner.transport = SimpleNamespace(gql_request=gql_request)
-            await _service(miner)._reconcile_watch_progress(channel)
+            await _service(miner).progress.reconcile(channel)
 
             self.assertEqual(calls, ["generate", "claim"])
-            self.assertIn("drop-b", _service(miner)._completed_drop_ids)
+            self.assertIn("drop-b", _service(miner).progress._completed_drop_ids)
             self.assertEqual(states, [State.INVENTORY_FETCH])
             self.assertGreater(_service(miner)._channel_cooldowns[2], 0)
 
-            await _service(miner)._reconcile_watch_progress(channel)
+            await _service(miner).progress.reconcile(channel)
 
             self.assertEqual(calls, ["generate", "claim"])
             self.assertEqual(states, [State.INVENTORY_FETCH, State.CHANNEL_SWITCH])
@@ -279,10 +279,10 @@ class DualWatchSelectionTests(unittest.TestCase):
             _service(miner)._drop_ids = {2: "drop-b"}
             _service(miner)._watching_channels = OrderedDict(((2, channel),))
             _service(miner)._restart_events = {2: asyncio.Event()}
-            _service(miner)._claim_cooldowns = {}
-            _service(miner)._completed_drop_ids = set()
+            _service(miner).progress._claim_cooldowns = {}
+            _service(miner).progress._completed_drop_ids = set()
             _service(miner)._channel_cooldowns = {}
-            _service(miner)._resync_cooldowns = {}
+            _service(miner).progress._resync_cooldowns = {}
             miner._drops = {"drop-b": drop}
             _service(miner).primary_channel = AwaitableValue()
             _service(miner).primary_channel.set(channel)
@@ -302,7 +302,7 @@ class DualWatchSelectionTests(unittest.TestCase):
                 }
 
             miner.transport = SimpleNamespace(gql_request=gql_request)
-            await _service(miner)._reconcile_watch_progress(channel)
+            await _service(miner).progress.reconcile(channel)
 
             self.assertEqual(claims, 0)
             self.assertEqual(drop.current_minutes, 5)
@@ -317,10 +317,10 @@ class DualWatchSelectionTests(unittest.TestCase):
             _service(miner)._drop_ids = {2: "drop-a"}
             _service(miner)._watching_channels = OrderedDict(((2, channel),))
             _service(miner)._restart_events = {}
-            _service(miner)._claim_cooldowns = {}
-            _service(miner)._completed_drop_ids = set()
+            _service(miner).progress._claim_cooldowns = {}
+            _service(miner).progress._completed_drop_ids = set()
             _service(miner)._channel_cooldowns = {}
-            _service(miner)._resync_cooldowns = {}
+            _service(miner).progress._resync_cooldowns = {}
             miner._drops = {}
             _service(miner).primary_channel = AwaitableValue()
             _service(miner).primary_channel.set(channel)
@@ -342,7 +342,7 @@ class DualWatchSelectionTests(unittest.TestCase):
                 }
 
             miner.transport = SimpleNamespace(gql_request=gql_request)
-            await _service(miner)._reconcile_watch_progress(channel)
+            await _service(miner).progress.reconcile(channel)
 
             self.assertEqual(_service(miner)._drop_ids, {2: "drop-a"})
             self.assertEqual(_service(miner)._channel_cooldowns, {})
@@ -374,10 +374,10 @@ class DualWatchSelectionTests(unittest.TestCase):
             _service(miner)._drop_ids = {1: "drop-a", 2: "drop-b"}
             _service(miner)._watching_channels = OrderedDict(((1, channel_a), (2, channel_b)))
             _service(miner)._restart_events = {}
-            _service(miner)._claim_cooldowns = {}
-            _service(miner)._completed_drop_ids = set()
+            _service(miner).progress._claim_cooldowns = {}
+            _service(miner).progress._completed_drop_ids = set()
             _service(miner)._channel_cooldowns = {}
-            _service(miner)._resync_cooldowns = {}
+            _service(miner).progress._resync_cooldowns = {}
             miner._drops = {"drop-b": drop_b}
             _service(miner).primary_channel = AwaitableValue()
             _service(miner).primary_channel.set(channel_a)
@@ -401,7 +401,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner.transport = SimpleNamespace(
                 gql_request=gql_request,
             )
-            await _service(miner)._reconcile_watch_progress(channel_a)
+            await _service(miner).progress.reconcile(channel_a)
 
             self.assertEqual(drop_b.current_minutes, 4)
             self.assertEqual(_service(miner)._drop_ids[2], "drop-b")
@@ -437,8 +437,8 @@ class DualWatchSelectionTests(unittest.TestCase):
             _service(miner)._watching_channels = OrderedDict(((1, channel),))
             _service(miner)._drop_ids = {1: "drop-a"}
             _service(miner)._restart_events = {1: asyncio.Event()}
-            _service(miner)._completed_drop_ids = set()
-            _service(miner)._resync_cooldowns = {}
+            _service(miner).progress._completed_drop_ids = set()
+            _service(miner).progress._resync_cooldowns = {}
             _service(miner).primary_channel = AwaitableValue()
             _service(miner).primary_channel.set(channel)
             states: list[object] = []
@@ -656,7 +656,7 @@ class DualWatchSelectionTests(unittest.TestCase):
         )
         _service(miner)._dual_watch_enabled = True
 
-        _service(miner)._disable_dual_watch_if_secondary(channels[1])
+        _service(miner).disable_secondary(channels[1])
 
         self.assertFalse(_service(miner)._dual_watch_enabled)
 
