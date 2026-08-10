@@ -119,6 +119,36 @@ def lock_file(path: Path) -> tuple[bool, io.TextIOWrapper]:
     return True, file
 
 
+def lock_file_set(
+    paths: abc.Iterable[Path],
+) -> tuple[bool, tuple[io.TextIOWrapper, ...]]:
+    """Acquire distinct lock files in caller-supplied order or release all.
+
+    The order is part of the protocol. Startup uses the legacy lock first and
+    the per-user lock second so old and new binaries cannot run concurrently.
+    """
+    acquired: list[io.TextIOWrapper] = []
+    seen: set[str] = set()
+    try:
+        for path in paths:
+            identity = os.path.abspath(os.fspath(path))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            success, file = lock_file(path)
+            if not success:
+                file.close()
+                for held in reversed(acquired):
+                    held.close()
+                return False, ()
+            acquired.append(file)
+    except BaseException:
+        for held in reversed(acquired):
+            held.close()
+        raise
+    return True, tuple(acquired)
+
+
 def json_minify(data: JsonType | list[JsonType]) -> str:
     """
     Returns minified JSON for payload usage.
@@ -619,6 +649,11 @@ def _fsync_parent_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _replace_atomic_temp(path: Path, temporary_path: Path) -> None:
+    os.replace(temporary_path, path)
+    _fsync_parent_directory(path)
+
+
 def atomic_write(
     path: Path,
     writer: Callable[[io.TextIOWrapper], None],
@@ -631,8 +666,7 @@ def atomic_write(
             writer(file)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary_path, path)
-        _fsync_parent_directory(path)
+        _replace_atomic_temp(path, temporary_path)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -652,11 +686,40 @@ def atomic_write_path(path: Path, writer: Callable[[Path], None]) -> None:
         temporary_path.chmod(0o600)
         with temporary_path.open("rb") as file:
             os.fsync(file.fileno())
-        os.replace(temporary_path, path)
-        _fsync_parent_directory(path)
+        _replace_atomic_temp(path, temporary_path)
     finally:
         with suppress(OSError):
             temporary_path.unlink()
+
+
+def atomic_write_bytes(path: Path, contents: bytes) -> None:
+    """Durably replace ``path`` with private binary contents."""
+    descriptor, temporary_path = _new_atomic_temp(path)
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            descriptor = -1
+            file.write(contents)
+            file.flush()
+            os.fsync(file.fileno())
+        _replace_atomic_temp(path, temporary_path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with suppress(OSError):
+            temporary_path.unlink()
+
+
+def durable_unlink(path: Path, *, require_regular: bool = True) -> bool:
+    """Unlink a path and fsync its parent without following symlinks."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if require_regular and not stat.S_ISREG(info.st_mode):
+        raise OSError(f"Refusing to remove non-regular path: {path}")
+    path.unlink()
+    _fsync_parent_directory(path)
+    return True
 
 
 def quarantine_file(path: Path, *, reason: str = "invalid") -> Path | None:
@@ -734,7 +797,8 @@ class ExponentialBackoff:
             self.variance_max = 1 + variance
 
     def __iter__(self) -> abc.Iterator[float]:
-        return self
+        while True:
+            yield next(self)
 
     def __next__(self) -> float:
         value: float = (

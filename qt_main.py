@@ -17,17 +17,20 @@ import traceback
 from typing import NoReturn
 
 try:
-    import truststore
+    import truststore  # pyright: ignore[reportMissingImports]
 
     truststore.inject_into_ssl()
 except Exception:  # noqa: BLE001 - truststore is optional
     pass
 
-import qasync
+import qasync  # pyright: ignore[reportMissingImports]
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import (  # pyright: ignore[reportMissingImports]
+    QApplication,
+    QMessageBox,
+)
 
-from data_migration import (  # pyright: ignore[reportMissingImports]
+from data_migration import (
     DataMigrationError,
     migrate_legacy_data,
 )
@@ -36,8 +39,14 @@ from twitch import Twitch
 from gui_qt import QtGUIManager
 from settings import Settings
 from version import __version__
-from utils import lock_file
-from constants import LOGGING_LEVELS, LOG_PATH, FILE_FORMATTER, LOCK_PATH
+from utils import lock_file_set
+from constants import (
+    FILE_FORMATTER,
+    LOCK_PATH,
+    LOGGING_LEVELS,
+    LOG_PATH,
+    WORKING_DIR,
+)
 
 
 def _show_error(title: str, text: str) -> None:
@@ -213,13 +222,17 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args(namespace=ParsedArgs())
 
+    # Lock the executable-relative location first, then the per-user location.
+    # Older binaries know only the first path; retaining both locks for this
+    # process lifetime prevents old/new credential and settings writers from
+    # running concurrently during or after migration.
+    legacy_lock_path = WORKING_DIR / "lock.file"
     try:
-        success, file = lock_file(LOCK_PATH)
+        success, lock_files = lock_file_set((legacy_lock_path, LOCK_PATH))
     except OSError:
         _show_error(_("gui", "text", "startup_error"), traceback.format_exc())
         return 1
     if not success:
-        file.close()
         return 3
 
     try:
@@ -244,7 +257,8 @@ def main() -> int:
             coroutine = _self_test(settings) if args.self_test else _main(settings, args)
             return loop.run_until_complete(coroutine)
     finally:
-        file.close()
+        for lock in reversed(lock_files):
+            lock.close()
 
 
 if __name__ == "__main__":
