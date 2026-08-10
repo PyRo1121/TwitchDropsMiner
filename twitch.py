@@ -18,6 +18,7 @@ from websocket import WebsocketPool
 from watch_service import WatchService
 from inventory import DropsCampaign
 from inventory_service import InventoryService
+from drop_event_service import DropEventService
 from session_history import HistoryEvent, Scalar, SessionHistory, Severity
 from http_transport import HttpTransport
 from exceptions import (
@@ -102,6 +103,7 @@ class Twitch:
         self.transport = HttpTransport(self)
         self._auth_state = AuthState(self)
         self.inventory_service = InventoryService(self)
+        self.drop_event_service = DropEventService(self)
         self.gui: GuiPort = gui_factory(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
@@ -347,9 +349,17 @@ class Twitch:
         # Watch tasks are created per channel when the first targets are selected.
         # Add default topics
         self.websocket.add_topics([
-            WebsocketTopic("User", "Drops", auth_state.user_id, self.process_drops),
             WebsocketTopic(
-                "User", "Notifications", auth_state.user_id, self.process_notifications
+                "User",
+                "Drops",
+                auth_state.user_id,
+                self.drop_event_service.process_drops,
+            ),
+            WebsocketTopic(
+                "User",
+                "Notifications",
+                auth_state.user_id,
+                self.drop_event_service.process_notifications,
             ),
         ])
         full_cleanup: bool = False
@@ -825,183 +835,6 @@ class Twitch:
     @staticmethod
     def _drops_marker(stream: Stream | None) -> str:
         return "✔" if stream is not None and stream.drops_enabled else "❌"
-
-    def _inventory_drop_is_current(
-        self,
-        generation: int,
-        drop: TimedDrop,
-    ) -> bool:
-        return (
-            generation == self._inventory_generation
-            and self._drops.get(drop.id) is drop
-        )
-
-    @task_wrapper
-    async def process_drops(self, user_id: int, message: JsonType):
-        # Message examples:
-        # {"type": "drop-progress", data: {"current_progress_min": 3, "required_progress_min": 10}}
-        # {"type": "drop-claim", data: {"drop_instance_id": ...}}
-        inventory_generation = self._inventory_generation
-        msg_type: str = message["type"]
-        if msg_type not in ("drop-progress", "drop-claim"):
-            return
-        data = message.get("data")
-        if not isinstance(data, dict):
-            logger.warning("Ignoring a drop event without an object data payload")
-            return
-        drop_id = data.get("drop_id")
-        if not isinstance(drop_id, str):
-            logger.warning("Ignoring a drop event without a valid drop ID")
-            return
-        drop: TimedDrop | None = self._drops.get(drop_id)
-        watching_channels = [
-            channel
-            for channel in self._watching_channels.values()
-            if self._watch_drop_ids.get(channel.id) == drop_id
-        ]
-        if not watching_channels:
-            if drop_id in getattr(self, "_watch_completed_drop_ids", set()):
-                logger.log(CALL, "Ignoring an event for a previously completed drop: %s", drop_id)
-                return
-            candidates = (
-                [
-                    channel
-                    for channel in self._watching_channels.values()
-                    if drop.can_earn(channel)
-                ]
-                if drop is not None
-                else []
-            )
-            if drop is not None and len(candidates) == 1:
-                channel = candidates[0]
-                previous_drop_id = self._watch_drop_ids.get(channel.id)
-                self._watch_drop_ids[channel.id] = drop_id
-                restart_event = self._watch_restart_events.get(channel.id)
-                if restart_event is not None:
-                    restart_event.set()
-                watching_channels = [channel]
-                logger.info(
-                    "Adopted unassigned drop event for %s: %s -> %s",
-                    channel.name,
-                    previous_drop_id,
-                    drop_id,
-                )
-            else:
-                if self.watch_service._request_watch_resync(f"unassigned-drop:{drop_id}"):
-                    logger.warning("Ignoring an event for an unassigned drop: %s", drop_id)
-                return
-        if drop is None:
-            logger.error("Received an event for an unknown drop: %s", drop_id)
-            self.change_state(State.INVENTORY_FETCH)
-            return
-        if msg_type == "drop-claim":
-            claim_id = data.get("drop_instance_id")
-            if not isinstance(claim_id, str):
-                logger.warning("Ignoring a drop claim without a valid instance ID")
-                return
-            drop.update_claim(claim_id)
-            campaign = drop.campaign
-            claimed = await drop.claim()
-            if not self._inventory_drop_is_current(inventory_generation, drop):
-                logger.info("Ignoring a claim result from a replaced inventory")
-                return
-            if claimed:
-                self.watch_service._mark_watch_completed_drop(drop.id)
-            self.watch_service._display_primary_drop(drop)
-
-            async def wait_for_next_drop(channel: Channel) -> None:
-                # About 4-20s after claiming, Twitch starts the next drop after
-                # another watch payload. Check each assigned channel independently.
-                for _attempt in range(8):
-                    try:
-                        context = await self.transport.gql_request(
-                            GQL_QUERIES["CurrentDrop"].with_variables(
-                                {"channelID": str(channel.id)}
-                            )
-                        )
-                        current_data: JsonType | None = (
-                            context["data"]["currentUser"]["dropCurrentSession"]
-                        )
-                    except (GQLException, RequestException, KeyError, TypeError):
-                        return
-                    if not self._inventory_drop_is_current(
-                        inventory_generation,
-                        drop,
-                    ):
-                        return
-                    if (
-                        not isinstance(current_data, dict)
-                        or current_data.get("dropID") != drop.id
-                    ):
-                        return
-                    await asyncio.sleep(2)
-
-            await asyncio.sleep(4)
-            if not self._inventory_drop_is_current(inventory_generation, drop):
-                return
-            await asyncio.gather(
-                *(wait_for_next_drop(channel) for channel in watching_channels)
-            )
-            if not self._inventory_drop_is_current(inventory_generation, drop):
-                return
-            if claimed and any(self.watch_service.can_watch(channel) for channel in self._watching_channels.values()):
-                primary = self.watching_channel.get_with_default(None)
-                if primary is not None:
-                    self.watch_service.watch(primary, update_status=False)
-                    self.watch_service.restart_watching()
-                    return
-            elif not claimed and any(campaign.can_earn(channel) for channel in watching_channels):
-                self.watch_service.restart_watching()
-                return
-            self.change_state(State.INVENTORY_FETCH)
-            return
-        if msg_type != "drop-progress":
-            return
-        current_progress = data.get("current_progress_min")
-        required_progress = data.get("required_progress_min")
-        if (
-            type(current_progress) is not int
-            or type(required_progress) is not int
-            or current_progress < 0
-            or required_progress < 0
-            or current_progress > required_progress
-        ):
-            logger.warning("Ignoring a drop event with invalid progress: %s", drop_id)
-            return
-        current_progress_int = current_progress
-        required_progress_int = required_progress
-        logger.log(
-            CALL,
-            "Drop update from websocket: %s (%s/%s)",
-            drop.name,
-            current_progress_int,
-            required_progress_int,
-        )
-        # PubSub does not include a channel ID; the assigned drop ID is the
-        # authoritative discriminator when two channels are being farmed.
-        drop.update_minutes(current_progress_int, required_progress_int)
-        self.watch_service._display_primary_drop(drop)
-
-    @task_wrapper
-    async def process_notifications(self, user_id: int, message: JsonType):
-        if message["type"] == "create-notification":
-            data: JsonType = message["data"]["notification"]
-            if data["type"] in (
-                "user_drop_reward_reminder_notification",  # drop confirmation
-                "quests_viewer_reward_campaign_earned_emote",  # emote confirmation
-                # badge confirmation?
-            ):
-                self.change_state(State.INVENTORY_FETCH)
-                try:
-                    await self.transport.gql_request(
-                        GQL_QUERIES["NotificationsDelete"].with_variables(
-                            {"input": {"id": data["id"]}}
-                        )
-                    )
-                except (GQLException, RequestException):
-                    # Notifications can disappear or the delete request can fail
-                    # after the inventory refresh; the next event can retry it.
-                    logger.debug("Unable to delete Twitch notification")
 
     async def get_auth(self) -> AuthState:
         await self._auth_state.validate()

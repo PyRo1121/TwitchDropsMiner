@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from constants import State
+from drop_event_service import DropEventService
 from inventory_service import InventoryService
 from watch_service import WatchService
 from twitch import Twitch
@@ -20,6 +21,12 @@ def _service(miner: Twitch) -> Any:
         service = WatchService(miner)
         miner.watch_service = service
     return cast(Any, service)
+
+
+def _drop_events(miner: Twitch) -> DropEventService:
+    service = DropEventService(miner)
+    miner.drop_event_service = service
+    return service
 
 
 class _Game:
@@ -415,7 +422,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner.change_state = states.append
             _service(miner)
 
-            await miner.process_drops(
+            await _drop_events(miner).process_drops(
                 42,
                 {
                     "type": "drop-progress",
@@ -462,7 +469,7 @@ class DualWatchSelectionTests(unittest.TestCase):
             miner.watching_channel.set(channel_a)
             _service(miner)
 
-            await miner.process_drops(
+            await _drop_events(miner).process_drops(
                 42,
                 {
                     "type": "drop-progress",

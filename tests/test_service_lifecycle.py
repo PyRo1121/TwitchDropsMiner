@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from auth import AuthState
 from constants import State
+from drop_event_service import DropEventService
 from exceptions import MinerException, RequestException
 from http_transport import HttpTransport
 from twitch import Twitch
@@ -156,6 +157,7 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIsInstance(miner.transport, HttpTransport)
             self.assertIsInstance(miner._auth_state, AuthState)
+            self.assertIsInstance(miner.drop_event_service, DropEventService)
             gui = cast(_Gui, miner.gui)
 
             statuses: list[str] = []
