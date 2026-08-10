@@ -525,6 +525,103 @@ class DataMigrationTests(unittest.TestCase):
                     2,
                 )
 
+    def test_old_complete_replan_replaces_stale_destination_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            canonical_bytes = b'{"language":"canonical"}'
+            recovery_bytes = b'{"language":"recovered"}'
+            destination = data / "settings.json"
+            recovery = data / "settings.json.new"
+            destination.write_bytes(canonical_bytes)
+            recovery.write_bytes(recovery_bytes)
+            quarantine = data / "migration-quarantine"
+            quarantine.mkdir()
+            prior_output = quarantine / "settings-prior-conflict"
+            prior_bytes = b"immutable-prior-conflict"
+            prior_output.write_bytes(prior_bytes)
+            journal = data_migration._new_journal(data)
+            for record in journal["artifacts"].values():
+                record.pop("plan_version")
+                record["state"] = "complete"
+                record["result"] = "absent"
+            journal["artifacts"]["settings.json"].update(
+                {
+                    "result": "destination-wins",
+                    "outputs": [
+                        {
+                            "path": "settings.json",
+                            "sha256": hashlib.sha256(canonical_bytes).hexdigest(),
+                        },
+                        {
+                            "path": str(prior_output.relative_to(data)),
+                            "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                        },
+                    ],
+                }
+            )
+            (data / "migration-journal.json").write_text(
+                json.dumps(journal),
+                encoding="utf8",
+            )
+
+            result = migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            self.assertIn("settings.json", result.recovered)
+            self.assertIn("settings.json", result.quarantined)
+            self.assertEqual(
+                self._read_json(destination),
+                {"language": "recovered"},
+            )
+            self.assertFalse(recovery.exists())
+            loser = self._conflict_path(
+                data,
+                "settings.json",
+                "canonical",
+                "recovery-conflict",
+                canonical_bytes,
+            )
+            self.assertEqual(loser.read_bytes(), canonical_bytes)
+            self.assertEqual(prior_output.read_bytes(), prior_bytes)
+
+            completed = self._read_json(data / "migration-journal.json")
+            settings_record = completed["artifacts"]["settings.json"]
+            destination_outputs = [
+                output
+                for output in settings_record["outputs"]
+                if output["path"] == "settings.json"
+            ]
+            current_destination = destination.read_bytes()
+            self.assertEqual(
+                destination_outputs,
+                [
+                    {
+                        "path": "settings.json",
+                        "sha256": hashlib.sha256(current_destination).hexdigest(),
+                    }
+                ],
+            )
+            journaled_paths = {
+                output["path"] for output in settings_record["outputs"]
+            }
+            self.assertIn(str(loser.relative_to(data)), journaled_paths)
+            self.assertIn(str(prior_output.relative_to(data)), journaled_paths)
+            settings_spec = next(
+                spec for spec in data_migration._ARTIFACTS if spec.key == "settings.json"
+            )
+            data_migration._verify_outputs(
+                settings_record,
+                data,
+                settings_spec.maximum_bytes,
+            )
+            self.assertEqual(
+                self._read_json(data / "storage.json")["version"],
+                2,
+            )
+
+            rerun = migrate_legacy_data(legacy_dir=data, data_dir=data)
+            self.assertEqual(rerun.recovered, ())
+            self.assertEqual(rerun.cleaned, ())
+
     def test_destination_wins_preserves_both_distinct_source_generations(self) -> None:
         temporary, legacy, data = self._directories()
         self.addCleanup(temporary.cleanup)

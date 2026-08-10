@@ -625,8 +625,16 @@ def _replan_artifact_record(
         not isinstance(output, dict) for output in outputs
     ):
         raise DataMigrationError(f"Migration outputs are invalid for {spec.key}")
+    immutable_outputs = [
+        output
+        for output in outputs
+        if not (
+            isinstance(output.get("path"), str)
+            and Path(output["path"]) == spec.destination_relative
+        )
+    ]
     record = _new_artifact_record(spec)
-    record["outputs"] = list(outputs)
+    record["outputs"] = immutable_outputs
     record["quarantined"] = bool(previous.get("quarantined", False))
     return record
 
@@ -842,6 +850,24 @@ def _add_output(
         outputs.append(output)
 
 
+def _replace_output(
+    outputs: list[dict[str, str]],
+    data_dir: Path,
+    path: Path,
+    data: bytes,
+) -> None:
+    output = _output_record(data_dir, path, data)
+    outputs[:] = [
+        existing
+        for existing in outputs
+        if not (
+            isinstance(existing.get("path"), str)
+            and Path(existing["path"]) == Path(output["path"])
+        )
+    ]
+    outputs.append(output)
+
+
 def _preserve_generation(
     outputs: list[dict[str, str]],
     data_dir: Path,
@@ -939,7 +965,7 @@ def _preserve_losers_and_install(
         selected.parsed.payload,
         work_dir,
     )
-    _add_output(outputs, data_dir, destination, installed_data)
+    _replace_output(outputs, data_dir, destination, installed_data)
     return preserved
 
 
@@ -1349,12 +1375,12 @@ def _prepare_artifact(
             selected.parsed.payload,
             work_dir,
         )
-        _add_output(outputs, data_dir, destination, installed_data)
+        _replace_output(outputs, data_dir, destination, installed_data)
         quarantined = True
         result = "recovered"
     elif destination_state is not None:
         destination_result, destination_data = destination_state
-        _add_output(outputs, data_dir, destination, destination_data)
+        _replace_output(outputs, data_dir, destination, destination_data)
         quarantined = (
             _preserve_distinct_losers(
                 outputs,
