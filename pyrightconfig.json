@@ -1,5 +1,5 @@
 {
-  "include": ["*.py", "gui_qt", "tests"],
+  "include": ["*.py", "build_tools", "gui_qt", "tests"],
   "exclude": [".venv", "build", "dist", "docs"],
   "venvPath": ".",
   "venv": ".venv",

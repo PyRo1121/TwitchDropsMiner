@@ -164,6 +164,7 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertEqual(workflow.count("git rev-parse --short=12 HEAD"), 4)
         pyright_config = (ROOT / "pyrightconfig.json").read_text(encoding="utf8")
         self.assertIn('"pythonVersion": "3.10"', pyright_config)
+        self.assertIn('"build_tools"', pyright_config)
         self.assertIn("tests.test_translation_schema", workflow)
         self.assertIn("github.repository == 'PyRo1121/TwitchDropsMiner'", workflow)
         self.assertIn("github.ref == 'refs/heads/master'", workflow)
@@ -228,13 +229,35 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertNotIn("Twitch.Drops.Miner.spdx.json", workflow)
         self.assertNotIn("cp requirements*.txt", workflow)
         self.assertNotIn("sbom-input/locks", workflow)
-        self.assertIn("Copy-Item requirements-release.txt", workflow)
-        self.assertEqual(
-            workflow.count(
-                "cp requirements-release.txt sbom-input/runtime/requirements.txt"
-            ),
-            3,
+        self.assertNotIn("Copy-Item requirements-release.txt", workflow)
+        self.assertNotIn(
+            "cp requirements-release.txt sbom-input/runtime/requirements.txt",
+            workflow,
         )
+        self.assertEqual(workflow.count("build_tools/resolve_runtime_manifest.py"), 4)
+        self.assertEqual(workflow.count("build_tools/validate_spdx_runtime.py"), 4)
+        self.assertEqual(
+            workflow.count("Validate target-resolved SPDX runtime inventory"),
+            4,
+        )
+        sbom_blocks = workflow.split(
+            "      - name: Stage archive-specific runtime SBOM input\n"
+        )[1:]
+        self.assertEqual(len(sbom_blocks), 4)
+        for block in sbom_blocks:
+            block = block.split("      - name: Upload build artifact\n", 1)[0]
+            self.assertIn("--input requirements-release.txt", block)
+            self.assertIn("--output sbom-input", block)
+            self.assertIn("Generate archive-specific SPDX SBOM", block)
+            self.assertIn("validate_spdx_runtime.py", block)
+            self.assertIn("--manifest sbom-input", block)
+            self.assertNotIn("requirements-bootstrap.txt", block)
+            self.assertNotIn("requirements-build.txt", block)
+            self.assertNotIn("requirements-appimage.txt", block)
+            self.assertLess(
+                block.index("Generate archive-specific SPDX SBOM"),
+                block.index("validate_spdx_runtime.py"),
+            )
         self.assertIn("Verify one-to-one archive and runtime SBOM mapping", workflow)
         self.assertIn("test \"${#archives[@]}\" -eq 7", workflow)
         self.assertIn("subject-path: artifacts/*.zip", workflow)
@@ -366,6 +389,8 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn("not notarized", release)
         self.assertIn("not carry an embedded PGP signature", release)
         self.assertIn("--require-hashes", release)
+        self.assertIn("PEP 508 markers evaluate true on the", release)
+        self.assertIn("validates the actual SPDX JSON", release)
         self.assertIn("Public binary publication is **disabled by default**", release)
         self.assertIn("private-runtime-publication", release)
         self.assertIn("official-API-only", release)

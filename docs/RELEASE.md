@@ -107,9 +107,12 @@ reviewed in Git.
 ## Checksums, SBOM, and provenance
 
 Each native build emits one ZIP and one same-basename SPDX JSON SBOM. Syft scans
-only that archive's expanded payload plus `requirements-release.txt` copied as
-the target-resolved runtime inventory. Bootstrap, PyInstaller, and
-appimage-builder toolchains are excluded from runtime SBOM inputs. No aggregate
+only that archive's expanded payload plus a generated runtime manifest containing
+those `requirements-release.txt` pins whose PEP 508 markers evaluate true on the
+native job platform. The generated manifest keeps exact versions and hashes but
+never includes bootstrap, PyInstaller, or appimage-builder toolchains. After
+Syft runs, CI validates the actual SPDX JSON against that manifest and rejects
+inactive keyring backend graphs or a missing active backend graph. No aggregate
 cross-platform or build-environment SBOM is currently published.
 
 The unprivileged `prepare_release_validation` job downloads all seven ZIP/SBOM

@@ -177,7 +177,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force sbom-input\archive, sbom-input\runtime
           python -m zipfile -e "$env:ARTIFACT_NAME.zip" sbom-input\archive
-          Copy-Item requirements-release.txt sbom-input\runtime\requirements.txt
+          python build_tools/resolve_runtime_manifest.py `
+            --input requirements-release.txt `
+            --output sbom-input\runtime\requirements.txt
 
       - name: Generate archive-specific SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -187,6 +189,14 @@ jobs:
           path: sbom-input
           upload-artifact: false
           upload-release-assets: false
+
+      - name: Validate target-resolved SPDX runtime inventory
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          python build_tools/validate_spdx_runtime.py `
+            --spdx "$($env:ARTIFACT_NAME).spdx.json" `
+            --manifest sbom-input\runtime\requirements.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -286,7 +296,9 @@ jobs:
         run: |
           mkdir -p sbom-input/archive sbom-input/runtime
           python3 -m zipfile -e "${ARTIFACT_NAME}.zip" sbom-input/archive
-          cp requirements-release.txt sbom-input/runtime/requirements.txt
+          python3 build_tools/resolve_runtime_manifest.py \
+            --input requirements-release.txt \
+            --output sbom-input/runtime/requirements.txt
 
       - name: Generate archive-specific SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -296,6 +308,14 @@ jobs:
           path: sbom-input
           upload-artifact: false
           upload-release-assets: false
+
+      - name: Validate target-resolved SPDX runtime inventory
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          python3 build_tools/validate_spdx_runtime.py \
+            --spdx "${ARTIFACT_NAME}.spdx.json" \
+            --manifest sbom-input/runtime/requirements.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -397,7 +417,9 @@ jobs:
         run: |
           mkdir -p sbom-input/archive sbom-input/runtime
           python3 -m zipfile -e "${ARTIFACT_NAME}.zip" sbom-input/archive
-          cp requirements-release.txt sbom-input/runtime/requirements.txt
+          python3 build_tools/resolve_runtime_manifest.py \
+            --input requirements-release.txt \
+            --output sbom-input/runtime/requirements.txt
 
       - name: Generate archive-specific SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -407,6 +429,14 @@ jobs:
           path: sbom-input
           upload-artifact: false
           upload-release-assets: false
+
+      - name: Validate target-resolved SPDX runtime inventory
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          python3 build_tools/validate_spdx_runtime.py \
+            --spdx "${ARTIFACT_NAME}.spdx.json" \
+            --manifest sbom-input/runtime/requirements.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -535,7 +565,9 @@ jobs:
         run: |
           mkdir -p sbom-input/archive sbom-input/runtime
           python3 -m zipfile -e "${ARTIFACT_NAME}.zip" sbom-input/archive
-          cp requirements-release.txt sbom-input/runtime/requirements.txt
+          python3 build_tools/resolve_runtime_manifest.py \
+            --input requirements-release.txt \
+            --output sbom-input/runtime/requirements.txt
 
       - name: Generate archive-specific SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -545,6 +577,14 @@ jobs:
           path: sbom-input
           upload-artifact: false
           upload-release-assets: false
+
+      - name: Validate target-resolved SPDX runtime inventory
+        env:
+          ARTIFACT_NAME: ${{steps.vars.outputs.artifact_name}}
+        run: |
+          python3 build_tools/validate_spdx_runtime.py \
+            --spdx "${ARTIFACT_NAME}.spdx.json" \
+            --manifest sbom-input/runtime/requirements.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
