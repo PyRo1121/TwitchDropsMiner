@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from collections import abc
 from typing import Any, Literal, Callable, Generic, Mapping, TypeVar, ParamSpec, cast
 
-from yarl import URL
+from yarl import URL  # pyright: ignore[reportMissingImports]
 
 from exceptions import ExitRequest, ReloadRequest
 from constants import DUMP_PATH, IS_PACKAGED, JsonType, PriorityMode
@@ -622,10 +622,15 @@ def json_save(path: Path, contents: Mapping[Any, Any], *, sort: bool = False) ->
     atomic_write(path, writer)
 
 
-def _new_atomic_temp(path: Path) -> tuple[int, Path]:
+def _new_atomic_temp(
+    path: Path,
+    *,
+    remove_legacy_new: bool = True,
+) -> tuple[int, Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with suppress(OSError):
-        path.with_name(f"{path.name}.new").unlink()
+    if remove_legacy_new:
+        with suppress(OSError):
+            path.with_name(f"{path.name}.new").unlink()
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
         suffix=".tmp",
@@ -692,9 +697,17 @@ def atomic_write_path(path: Path, writer: Callable[[Path], None]) -> None:
             temporary_path.unlink()
 
 
-def atomic_write_bytes(path: Path, contents: bytes) -> None:
+def atomic_write_bytes(
+    path: Path,
+    contents: bytes,
+    *,
+    remove_legacy_new: bool = True,
+) -> None:
     """Durably replace ``path`` with private binary contents."""
-    descriptor, temporary_path = _new_atomic_temp(path)
+    descriptor, temporary_path = _new_atomic_temp(
+        path,
+        remove_legacy_new=remove_legacy_new,
+    )
     try:
         with os.fdopen(descriptor, "wb") as file:
             descriptor = -1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import pickle
@@ -37,6 +38,22 @@ class DataMigrationTests(unittest.TestCase):
         data = root / "data"
         legacy.mkdir()
         return temporary, legacy, data
+
+    @staticmethod
+    def _conflict_path(
+        data: Path,
+        artifact: str,
+        role: str,
+        reason: str,
+        contents: bytes,
+    ) -> Path:
+        digest = hashlib.sha256(contents).hexdigest()
+        safe_artifact = artifact.replace("/", "-")
+        return (
+            data
+            / "migration-quarantine"
+            / f"{safe_artifact}.{role}.{reason}.{digest}"
+        )
 
     def _read_json(self, path: Path) -> dict[str, Any]:
         try:
@@ -142,7 +159,7 @@ class DataMigrationTests(unittest.TestCase):
         self.assertEqual(metadata["version"], data_migration.STORAGE_VERSION)
         self.assertEqual(
             metadata["artifacts"]["cookies.jar"]["source_format"],
-            "cookie-pickle-v1",
+            "cookie-pickle-v1-exact-host-credentials",
         )
 
     def test_recovers_cookie_from_version_one_misclassified_quarantine(self) -> None:
@@ -166,15 +183,31 @@ class DataMigrationTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         canonical = legacy / "settings.json"
         recovery = legacy / "settings.json.new"
-        canonical.write_text('{"language":"old"}', encoding="utf8")
-        recovery.write_text('{"language":"recovered"}', encoding="utf8")
+        canonical_bytes = b'{"language":"old"}'
+        recovery_bytes = b'{"language":"recovered"}'
+        canonical.write_bytes(canonical_bytes)
+        recovery.write_bytes(recovery_bytes)
 
         result = migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
         self.assertIn("settings.json", result.recovered)
+        self.assertIn("settings.json", result.quarantined)
         self.assertEqual(
             self._read_json(data / "settings.json"),
             {"language": "recovered"},
+        )
+        conflict = self._conflict_path(
+            data,
+            "settings.json",
+            "canonical",
+            "source-conflict",
+            canonical_bytes,
+        )
+        self.assertEqual(conflict.read_bytes(), canonical_bytes)
+        journal = self._read_json(data / "migration-journal.json")
+        self.assertIn(
+            str(conflict.relative_to(data)),
+            [item["path"] for item in journal["artifacts"]["settings.json"]["outputs"]],
         )
         self.assertFalse(canonical.exists())
         self.assertFalse(recovery.exists())
@@ -202,6 +235,137 @@ class DataMigrationTests(unittest.TestCase):
         self.assertFalse(canonical.exists())
         self.assertFalse(recovery.exists())
 
+    def test_same_location_recovers_new_only_before_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            recovery = data / "settings.json.new"
+            recovery.write_bytes(b'{"language":"recovered"}')
+
+            result = migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            self.assertIn("settings.json", result.recovered)
+            self.assertEqual(
+                self._read_json(data / "settings.json"),
+                {"language": "recovered"},
+            )
+            self.assertFalse(recovery.exists())
+            self.assertTrue((data / "storage.json").exists())
+
+    def test_same_location_equal_canonical_and_new_keeps_canonical(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            contents = b'{"language":"same"}'
+            canonical = data / "settings.json"
+            recovery = data / "settings.json.new"
+            canonical.write_bytes(contents)
+            recovery.write_bytes(contents)
+
+            result = migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            self.assertIn("settings.json", result.destination_wins)
+            self.assertEqual(canonical.read_bytes(), contents)
+            self.assertFalse(recovery.exists())
+            self.assertNotIn("settings.json", result.quarantined)
+
+    def test_same_location_conflicting_new_wins_and_preserves_canonical(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            canonical = data / "settings.json"
+            recovery = data / "settings.json.new"
+            canonical_bytes = b'{"language":"canonical"}'
+            recovery_bytes = b'{"language":"recovery"}'
+            canonical.write_bytes(canonical_bytes)
+            recovery.write_bytes(recovery_bytes)
+
+            result = migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            self.assertIn("settings.json", result.recovered)
+            self.assertIn("settings.json", result.quarantined)
+            self.assertEqual(self._read_json(canonical), {"language": "recovery"})
+            preserved = self._conflict_path(
+                data,
+                "settings.json",
+                "canonical",
+                "recovery-conflict",
+                canonical_bytes,
+            )
+            self.assertEqual(preserved.read_bytes(), canonical_bytes)
+            self.assertFalse(recovery.exists())
+
+    def test_same_location_recovery_conflict_is_journaled_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            canonical = data / "settings.json"
+            recovery = data / "settings.json.new"
+            canonical_bytes = b'{"language":"canonical"}'
+            recovery_bytes = b'{"language":"recovery"}'
+            canonical.write_bytes(canonical_bytes)
+            recovery.write_bytes(recovery_bytes)
+            real_install = data_migration._install_payload
+            interrupted = False
+
+            def interrupt_after_install(*args: Any, **kwargs: Any) -> bytes:
+                nonlocal interrupted
+                installed = real_install(*args, **kwargs)
+                if not interrupted:
+                    interrupted = True
+                    raise DataMigrationError("injected post-install interruption")
+                return installed
+
+            with (
+                patch.object(
+                    data_migration,
+                    "_install_payload",
+                    side_effect=interrupt_after_install,
+                ),
+                self.assertRaisesRegex(DataMigrationError, "post-install interruption"),
+            ):
+                migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            preserved = self._conflict_path(
+                data,
+                "settings.json",
+                "canonical",
+                "recovery-conflict",
+                canonical_bytes,
+            )
+            journal = self._read_json(data / "migration-journal.json")
+            self.assertEqual(preserved.read_bytes(), canonical_bytes)
+            self.assertIn(
+                str(preserved.relative_to(data)),
+                [
+                    item["path"]
+                    for item in journal["artifacts"]["settings.json"]["outputs"]
+                ],
+            )
+            self.assertEqual(self._read_json(canonical), {"language": "recovery"})
+            self.assertTrue(recovery.exists())
+
+            migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            self.assertEqual(preserved.read_bytes(), canonical_bytes)
+            self.assertFalse(recovery.exists())
+            self.assertTrue((data / "storage.json").exists())
+
+    def test_same_location_current_marker_does_not_strand_new_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            (data / "storage.json").write_text(
+                json.dumps({"version": data_migration.STORAGE_VERSION}),
+                encoding="utf8",
+            )
+            recovery = data / "settings.json.new"
+            recovery.write_bytes(b'{"language":"late-recovery"}')
+
+            result = migrate_legacy_data(legacy_dir=data, data_dir=data)
+
+            self.assertIn("settings.json", result.recovered)
+            self.assertEqual(
+                self._read_json(data / "settings.json"),
+                {"language": "late-recovery"},
+            )
+            self.assertFalse(recovery.exists())
+
     def test_destination_wins_byte_for_byte_and_conflict_is_preserved(self) -> None:
         temporary, legacy, data = self._directories()
         self.addCleanup(temporary.cleanup)
@@ -218,10 +382,12 @@ class DataMigrationTests(unittest.TestCase):
         self.assertIn("settings.json", result.quarantined)
         self.assertEqual(destination.read_bytes(), destination_bytes)
         self.assertEqual(
-            (
-                data
-                / "migration-quarantine"
-                / "settings.json.canonical.destination-conflict"
+            self._conflict_path(
+                data,
+                "settings.json",
+                "canonical",
+                "destination-conflict",
+                source_bytes,
             ).read_bytes(),
             source_bytes,
         )
@@ -243,15 +409,139 @@ class DataMigrationTests(unittest.TestCase):
         self.assertIn("oauth.json", result.destination_wins)
         self.assertIn("oauth.json", result.quarantined)
         self.assertEqual(destination.read_bytes(), destination_bytes)
-        preserved = (
-            data
-            / "migration-quarantine"
-            / "oauth.json.canonical.destination-conflict"
+        preserved = self._conflict_path(
+            data,
+            "oauth.json",
+            "canonical",
+            "destination-conflict",
+            source_bytes,
         )
         self.assertEqual(preserved.read_bytes(), source_bytes)
         self.assertFalse(source.exists())
         if os.name != "nt":
             self.assertEqual(preserved.stat().st_mode & 0o777, 0o600)
+
+    def test_legacy_installed_journal_replans_before_source_cleanup(self) -> None:
+        temporary, legacy, data = self._directories()
+        self.addCleanup(temporary.cleanup)
+        data.mkdir()
+        canonical_bytes = b'{"language":"canonical"}'
+        recovery_bytes = b'{"language":"recovery"}'
+        (legacy / "settings.json").write_bytes(canonical_bytes)
+        (legacy / "settings.json.new").write_bytes(recovery_bytes)
+        (data / "settings.json").write_bytes(recovery_bytes + b"\n")
+        journal = data_migration._new_journal(legacy)
+        for record in journal["artifacts"].values():
+            record.pop("plan_version")
+            record["state"] = "complete"
+        journal["artifacts"]["settings.json"].update(
+            {
+                "state": "installed",
+                "outputs": [],
+                "cleanup": [
+                    {
+                        "role": "canonical",
+                        "sha256": hashlib.sha256(canonical_bytes).hexdigest(),
+                        "removed": False,
+                    },
+                    {
+                        "role": "new",
+                        "sha256": hashlib.sha256(recovery_bytes).hexdigest(),
+                        "removed": False,
+                    },
+                ],
+            }
+        )
+        (data / "migration-journal.json").write_text(
+            json.dumps(journal),
+            encoding="utf8",
+        )
+
+        result = migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        self.assertIn("settings.json", result.destination_wins)
+        preserved = self._conflict_path(
+            data,
+            "settings.json",
+            "canonical",
+            "destination-conflict",
+            canonical_bytes,
+        )
+        self.assertEqual(preserved.read_bytes(), canonical_bytes)
+        self.assertFalse((legacy / "settings.json").exists())
+        self.assertFalse((legacy / "settings.json.new").exists())
+
+    def test_destination_wins_preserves_both_distinct_source_generations(self) -> None:
+        temporary, legacy, data = self._directories()
+        self.addCleanup(temporary.cleanup)
+        data.mkdir()
+        destination = data / "settings.json"
+        destination.write_bytes(b'{"language":"destination"}')
+        canonical_bytes = b'{"language":"canonical"}'
+        recovery_bytes = b'{"language":"recovery"}'
+        (legacy / "settings.json").write_bytes(canonical_bytes)
+        (legacy / "settings.json.new").write_bytes(recovery_bytes)
+
+        result = migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        self.assertIn("settings.json", result.destination_wins)
+        self.assertIn("settings.json", result.quarantined)
+        for role, contents in (
+            ("canonical", canonical_bytes),
+            ("new", recovery_bytes),
+        ):
+            with self.subTest(role=role):
+                preserved = self._conflict_path(
+                    data,
+                    "settings.json",
+                    role,
+                    "destination-conflict",
+                    contents,
+                )
+                self.assertEqual(preserved.read_bytes(), contents)
+        self.assertFalse((legacy / "settings.json").exists())
+        self.assertFalse((legacy / "settings.json.new").exists())
+
+    def test_destination_wins_preserves_all_distinct_oauth_generations(self) -> None:
+        temporary, legacy, data = self._directories()
+        self.addCleanup(temporary.cleanup)
+        data.mkdir()
+        destination_bytes = b'{"client_id":"client","refresh_token":"current"}'
+        canonical_bytes = b'{"client_id":"client","refresh_token":"canonical"}'
+        recovery_bytes = b'{"client_id":"client","refresh_token":"recovery"}'
+        quarantine_bytes = b'{"client_id":"client","refresh_token":"quarantine"}'
+        (data / "oauth.json").write_bytes(destination_bytes)
+        (legacy / "oauth.json").write_bytes(canonical_bytes)
+        (legacy / "oauth.json.new").write_bytes(recovery_bytes)
+        quarantine = data / "migration-quarantine"
+        quarantine.mkdir()
+        (quarantine / "oauth.json.legacy-corrupt").write_bytes(quarantine_bytes)
+
+        result = migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        self.assertIn("oauth.json", result.destination_wins)
+        self.assertEqual((data / "oauth.json").read_bytes(), destination_bytes)
+        journal = self._read_json(data / "migration-journal.json")
+        journaled_outputs = {
+            item["path"] for item in journal["artifacts"]["oauth.json"]["outputs"]
+        }
+        for role, contents in (
+            ("canonical", canonical_bytes),
+            ("new", recovery_bytes),
+            ("v1-quarantine", quarantine_bytes),
+        ):
+            with self.subTest(role=role):
+                preserved = self._conflict_path(
+                    data,
+                    "oauth.json",
+                    role,
+                    "destination-conflict",
+                    contents,
+                )
+                self.assertEqual(preserved.read_bytes(), contents)
+                self.assertIn(str(preserved.relative_to(data)), journaled_outputs)
+                if os.name != "nt":
+                    self.assertEqual(preserved.stat().st_mode & 0o777, 0o600)
 
     def test_transient_install_failure_keeps_source_and_does_not_complete(self) -> None:
         temporary, legacy, data = self._directories()
@@ -260,10 +550,14 @@ class DataMigrationTests(unittest.TestCase):
         source.write_text('{"language":"English"}', encoding="utf8")
         real_write = data_migration.atomic_write_bytes
 
-        def fail_target(path: Path, contents: bytes) -> None:
+        def fail_target(
+            path: Path,
+            contents: bytes,
+            **kwargs: Any,
+        ) -> None:
             if path == data / "settings.json":
                 raise OSError("injected target failure")
-            real_write(path, contents)
+            real_write(path, contents, **kwargs)
 
         with (
             patch.object(data_migration, "atomic_write_bytes", side_effect=fail_target),
@@ -290,7 +584,7 @@ class DataMigrationTests(unittest.TestCase):
 
         def fail_source_cleanup(path: Path, *, require_regular: bool = True) -> bool:
             nonlocal failed
-            if path == source and not failed:
+            if path.name.startswith(".settings.json.migration-canonical-") and not failed:
                 failed = True
                 raise OSError("injected cleanup failure")
             return real_unlink(path, require_regular=require_regular)
@@ -302,7 +596,8 @@ class DataMigrationTests(unittest.TestCase):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
         self.assertTrue((data / "settings.json").exists())
-        self.assertTrue(source.exists())
+        self.assertFalse(source.exists())
+        self.assertEqual(len(tuple(legacy.glob(".settings.json.migration-*.staged"))), 1)
         self.assertFalse((data / "storage.json").exists())
         journal = self._read_json(data / "migration-journal.json")
         self.assertEqual(
@@ -325,7 +620,7 @@ class DataMigrationTests(unittest.TestCase):
 
         def interrupt_cleanup(path: Path, *, require_regular: bool = True) -> bool:
             nonlocal failed
-            if path == source and not failed:
+            if path.name.startswith(".settings.json.migration-canonical-") and not failed:
                 failed = True
                 raise OSError("injected cleanup interruption")
             return real_unlink(path, require_regular=require_regular)
@@ -336,11 +631,86 @@ class DataMigrationTests(unittest.TestCase):
         ):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
+        self.assertFalse(source.exists())
+        self.assertEqual(len(tuple(legacy.glob(".settings.json.migration-*.staged"))), 1)
         source.write_text('{"language":"changed"}', encoding="utf8")
-        with self.assertRaisesRegex(DataMigrationError, "changed before cleanup"):
+        with self.assertRaisesRegex(DataMigrationError, "replaced during cleanup"):
             migrate_legacy_data(legacy_dir=legacy, data_dir=data)
 
         self.assertEqual(source.read_text(encoding="utf8"), '{"language":"changed"}')
+        self.assertFalse((data / "storage.json").exists())
+
+    def test_replacement_after_snapshot_is_preserved_not_unlinked(self) -> None:
+        temporary, legacy, data = self._directories()
+        self.addCleanup(temporary.cleanup)
+        source = legacy / "settings.json"
+        original = b'{"language":"original"}'
+        replacement = b'{"language":"replacement"}'
+        source.write_bytes(original)
+        real_read = data_migration._read_regular_file
+        replaced = False
+
+        def replace_after_snapshot(path: Path, maximum_bytes: int) -> bytes:
+            nonlocal replaced
+            contents = real_read(path, maximum_bytes)
+            if path == source and not replaced:
+                replaced = True
+                atomic_write_bytes(source, replacement)
+            return contents
+
+        with (
+            patch.object(
+                data_migration,
+                "_read_regular_file",
+                side_effect=replace_after_snapshot,
+            ),
+            self.assertRaisesRegex(DataMigrationError, "changed before cleanup"),
+        ):
+            migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        self.assertEqual(self._read_json(data / "settings.json"), {"language": "original"})
+        preserved = self._conflict_path(
+            data,
+            "settings.json",
+            "canonical",
+            "replacement-conflict",
+            replacement,
+        )
+        self.assertEqual(preserved.read_bytes(), replacement)
+        staged = tuple(legacy.glob(".settings.json.migration-*.staged"))
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_bytes(), replacement)
+        self.assertFalse((data / "storage.json").exists())
+
+    def test_replacement_created_after_staged_read_remains_at_source_path(self) -> None:
+        temporary, legacy, data = self._directories()
+        self.addCleanup(temporary.cleanup)
+        source = legacy / "settings.json"
+        source.write_bytes(b'{"language":"original"}')
+        replacement = b'{"language":"replacement"}'
+        real_read = data_migration._read_regular_file
+        replaced = False
+
+        def replace_after_staged_read(path: Path, maximum_bytes: int) -> bytes:
+            nonlocal replaced
+            contents = real_read(path, maximum_bytes)
+            if ".migration-canonical-" in path.name and not replaced:
+                replaced = True
+                atomic_write_bytes(source, replacement)
+            return contents
+
+        with (
+            patch.object(
+                data_migration,
+                "_read_regular_file",
+                side_effect=replace_after_staged_read,
+            ),
+            self.assertRaisesRegex(DataMigrationError, "replaced during cleanup"),
+        ):
+            migrate_legacy_data(legacy_dir=legacy, data_dir=data)
+
+        self.assertEqual(source.read_bytes(), replacement)
+        self.assertFalse(tuple(legacy.glob(".settings.json.migration-*.staged")))
         self.assertFalse((data / "storage.json").exists())
 
     def test_marker_failure_resumes_without_needing_deleted_sources(self) -> None:
@@ -349,10 +719,14 @@ class DataMigrationTests(unittest.TestCase):
         (legacy / "settings.json").write_text("{}", encoding="utf8")
         real_write = data_migration.atomic_write_bytes
 
-        def fail_marker(path: Path, contents: bytes) -> None:
+        def fail_marker(
+            path: Path,
+            contents: bytes,
+            **kwargs: Any,
+        ) -> None:
             if path == data / "storage.json":
                 raise OSError("injected marker failure")
-            real_write(path, contents)
+            real_write(path, contents, **kwargs)
 
         with (
             patch.object(data_migration, "atomic_write_bytes", side_effect=fail_marker),

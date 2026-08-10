@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import stat
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.cookies import CookieError
 from pathlib import Path
 from pickle import UnpicklingError
 from typing import Any, Final, Literal
@@ -20,8 +22,40 @@ from utils import atomic_write_bytes, durable_unlink
 
 STORAGE_VERSION: Final = 2
 JOURNAL_VERSION: Final = 1
+_ARTIFACT_PLAN_VERSION: Final = 2
 _MAX_METADATA_BYTES: Final = 64 * 1024
 _MAX_JOURNAL_BYTES: Final = 1024 * 1024
+_LEGACY_CREDENTIAL_COOKIE_NAMES: Final = frozenset(
+    {"auth-token", "login", "name", "persistent", "twilight-user"}
+)
+_COOKIE_JSON_REQUIRED_FIELDS: Final = frozenset({"key", "value", "coded_value"})
+_COOKIE_PARSER_ERRORS: Final = (
+    AttributeError,
+    CookieError,
+    EOFError,
+    IndexError,
+    KeyError,
+    OverflowError,
+    RecursionError,
+    TypeError,
+    UnpicklingError,
+    ValueError,
+)
+_COOKIE_JSON_OPTIONAL_FIELDS: Final = frozenset(
+    {
+        "comment",
+        "domain",
+        "expires",
+        "expires_timestamp",
+        "host_only",
+        "httponly",
+        "max-age",
+        "path",
+        "samesite",
+        "secure",
+        "version",
+    }
+)
 
 
 class DataMigrationError(RuntimeError):
@@ -211,6 +245,96 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
     return text.encode("utf8") + b"\n"
 
 
+def _validate_cookie_json(value: Mapping[str, Any]) -> None:
+    """Validate the exact JSON shape emitted by the pinned aiohttp CookieJar."""
+    for compound_key, cookie_group in value.items():
+        if not isinstance(compound_key, str) or "|" not in compound_key:
+            raise _InvalidArtifact("Cookie JSON has an invalid domain/path key")
+        domain, _storage_path = compound_key.split("|", 1)
+        if not isinstance(cookie_group, dict):
+            raise _InvalidArtifact("Cookie JSON domain entry must be an object")
+        for name, raw_morsel in cookie_group.items():
+            if not isinstance(name, str) or not name:
+                raise _InvalidArtifact("Cookie JSON has an invalid cookie name")
+            if not isinstance(raw_morsel, dict):
+                raise _InvalidArtifact("Cookie JSON cookie entry must be an object")
+            fields = set(raw_morsel)
+            missing = _COOKIE_JSON_REQUIRED_FIELDS - fields
+            unknown = fields - (
+                _COOKIE_JSON_REQUIRED_FIELDS | _COOKIE_JSON_OPTIONAL_FIELDS
+            )
+            if missing or unknown:
+                raise _InvalidArtifact("Cookie JSON cookie fields are invalid")
+            for field in _COOKIE_JSON_REQUIRED_FIELDS:
+                if not isinstance(raw_morsel[field], str):
+                    raise _InvalidArtifact("Cookie JSON cookie value is invalid")
+            if raw_morsel["key"] != name:
+                raise _InvalidArtifact("Cookie JSON cookie key does not match its name")
+            for field in fields - _COOKIE_JSON_REQUIRED_FIELDS:
+                raw_value = raw_morsel[field]
+                if field == "host_only":
+                    if type(raw_value) is not bool:
+                        raise _InvalidArtifact("Cookie JSON host-only flag is invalid")
+                elif field == "expires_timestamp":
+                    if (
+                        isinstance(raw_value, bool)
+                        or not isinstance(raw_value, (int, float))
+                        or not math.isfinite(raw_value)
+                    ):
+                        raise _InvalidArtifact("Cookie JSON expiry is invalid")
+                elif not isinstance(raw_value, str):
+                    raise _InvalidArtifact("Cookie JSON attribute is invalid")
+            morsel_domain = raw_morsel.get("domain")
+            if (
+                isinstance(morsel_domain, str)
+                and morsel_domain.lstrip(".").lower() != domain.lower()
+            ):
+                raise _InvalidArtifact("Cookie JSON domain metadata is inconsistent")
+            if raw_morsel.get("host_only") and not domain:
+                raise _InvalidArtifact("Cookie JSON host-only cookie has no host")
+
+
+def _apply_legacy_cookie_policy(jar: aiohttp.CookieJar) -> None:
+    """Conservatively scope legacy credentials whose host-only bit was lost.
+
+    aiohttp's old pickle contained only ``_cookies``. An explicit Domain equal
+    to the response host and a host-only cookie are therefore indistinguishable.
+    Credential names are restricted to their exact stored host; non-credential
+    cookies retain inferable domain-cookie behavior.
+    """
+    try:
+        cookies = jar._cookies
+        host_only = jar._host_only_cookies
+        if not isinstance(cookies, Mapping) or not isinstance(host_only, set):
+            raise _InvalidArtifact("Legacy cookie jar has an invalid container")
+        for domain_path, cookie_group in cookies.items():
+            if (
+                not isinstance(domain_path, tuple)
+                or len(domain_path) != 2
+                or not all(isinstance(item, str) for item in domain_path)
+                or not isinstance(cookie_group, Mapping)
+            ):
+                raise _InvalidArtifact("Legacy cookie jar has an invalid domain entry")
+            domain, _path = domain_path
+            for name, morsel in cookie_group.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or getattr(morsel, "key", None) != name
+                ):
+                    raise _InvalidArtifact("Legacy cookie jar has an invalid cookie")
+                if name.casefold() in _LEGACY_CREDENTIAL_COOKIE_NAMES:
+                    if not domain:
+                        raise _InvalidArtifact(
+                            "Legacy credential cookie has no exact host"
+                        )
+                    host_only.add((domain, name))
+    except _InvalidArtifact:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise _InvalidArtifact("Legacy cookie jar has an invalid shape") from exc
+
+
 def _document_version(
     value: Mapping[str, Any],
     *,
@@ -291,53 +415,105 @@ def _private_temp_file(work_dir: Path, prefix: str, data: bytes) -> Path:
     return path
 
 
+def _decode_cookie_source_json(data: bytes) -> dict[str, Any] | None:
+    appears_to_be_json = data.lstrip().startswith((b"{", b"["))
+    try:
+        text = data.decode("utf8")
+        value = json.loads(text, parse_constant=_reject_json_constant)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        if appears_to_be_json:
+            raise DataMigrationError("Legacy cookie JSON is malformed") from exc
+        return None
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise DataMigrationError("Legacy cookie JSON is malformed") from exc
+    if not isinstance(value, dict):
+        raise DataMigrationError(
+            "Legacy cookie JSON is malformed: root must be an object"
+        )
+    try:
+        _validate_cookie_json(value)
+    except _InvalidArtifact as exc:
+        raise DataMigrationError("Legacy cookie JSON is malformed") from exc
+    return value
+
+
+def _load_cookie_source(
+    jar: aiohttp.CookieJar,
+    source_path: Path,
+    *,
+    source_is_json: bool,
+) -> None:
+    try:
+        jar.load(source_path)
+        if not source_is_json:
+            _apply_legacy_cookie_policy(jar)
+    except Exception as exc:
+        if isinstance(exc, _InvalidArtifact):
+            raise
+        if isinstance(exc, OSError):
+            raise DataMigrationError("Unable to read cookie conversion input") from exc
+        if isinstance(exc, _COOKIE_PARSER_ERRORS):
+            if source_is_json:
+                raise DataMigrationError("Legacy cookie JSON is malformed") from exc
+            raise _InvalidArtifact("Legacy cookie pickle is invalid") from exc
+        raise DataMigrationError("Unexpected cookie parser failure") from exc
+
+
+def _serialize_cookie_jar(
+    jar: aiohttp.CookieJar,
+    output_path: Path,
+    *,
+    source_is_json: bool,
+) -> dict[str, Any]:
+    try:
+        jar.save(output_path)
+        output = _read_regular_file(output_path, 8 * 1024 * 1024)
+        value = _decode_json_object(output, "Converted cookie jar")
+        _validate_cookie_json(value)
+        return value
+    except Exception as exc:
+        if isinstance(exc, DataMigrationError):
+            raise
+        if isinstance(exc, _InvalidArtifact):
+            if source_is_json:
+                raise DataMigrationError("Legacy cookie JSON is malformed") from exc
+            raise
+        if isinstance(exc, OSError):
+            raise DataMigrationError("Unable to persist converted cookie jar") from exc
+        if isinstance(exc, _COOKIE_PARSER_ERRORS):
+            if source_is_json:
+                raise DataMigrationError("Legacy cookie JSON is malformed") from exc
+            raise _InvalidArtifact("Legacy cookie pickle is invalid") from exc
+        raise DataMigrationError("Unexpected cookie serialization failure") from exc
+
+
 def _read_cookies_v2(data: bytes, work_dir: Path) -> _ReadResult:
     """Convert current JSON or legacy pickle through aiohttp's restricted reader.
 
-    The pinned aiohttp CookieJar first validates its JSON format and otherwise
-    uses its restricted legacy-cookie unpickler. No general pickle loader is
-    imported or invoked here. Input is bounded before reaching aiohttp.
+    Current JSON is shape-validated before aiohttp sees it so malformed JSON
+    cannot fall through into pickle parsing. Legacy pickle uses aiohttp's
+    restricted unpickler; no general pickle loader is imported or invoked.
     """
     source_format = "cookie-json-v2"
-    try:
-        _decode_json_object(data, "Legacy cookie jar")
-    except _InvalidArtifact:
-        source_format = "cookie-pickle-v1"
+    source_json = _decode_cookie_source_json(data)
+    if source_json is None:
+        source_format = "cookie-pickle-v1-exact-host-credentials"
 
     source_path = _private_temp_file(work_dir, "cookie-input-", data)
     output_path = _private_temp_file(work_dir, "cookie-output-", b"")
     loop = asyncio.new_event_loop()
     try:
         jar = aiohttp.CookieJar(loop=loop)
-        try:
-            jar.load(source_path)
-        except (
-            AttributeError,
-            EOFError,
-            RecursionError,
-            TypeError,
-            UnpicklingError,
-            ValueError,
-        ) as exc:
-            # CookieJar.load owns both JSON validation and its restricted
-            # legacy unpickler; parser failures are quarantinable. Importing
-            # UnpicklingError does not invoke Python's general pickle loader.
-            raise _InvalidArtifact("Legacy cookie jar is invalid") from exc
-        except OSError as exc:
-            raise DataMigrationError("Unable to read cookie conversion input") from exc
-        try:
-            jar.save(output_path)
-            output = _read_regular_file(output_path, 8 * 1024 * 1024)
-            value = _decode_json_object(output, "Converted cookie jar")
-        except _InvalidArtifact:
-            raise
-        except (AttributeError, RecursionError, TypeError, ValueError) as exc:
-            raise _InvalidArtifact("Legacy cookie jar is invalid") from exc
-        except OSError as exc:
-            raise DataMigrationError("Unable to persist converted cookie jar") from exc
+        source_is_json = source_json is not None
+        _load_cookie_source(jar, source_path, source_is_json=source_is_json)
+        value = _serialize_cookie_jar(
+            jar,
+            output_path,
+            source_is_json=source_is_json,
+        )
         return _ReadResult(
             _canonical_json(value),
-            1 if source_format == "cookie-pickle-v1" else 2,
+            1 if source_json is None else 2,
             source_format,
         )
     finally:
@@ -429,20 +605,61 @@ def _metadata_version(metadata_path: Path) -> int | None:
     return version
 
 
+def _new_artifact_record(spec: _ArtifactSpec) -> dict[str, Any]:
+    return {
+        "state": "pending",
+        "plan_version": _ARTIFACT_PLAN_VERSION,
+        "reader_version": spec.reader_version,
+        "credential": spec.credential,
+    }
+
+
 def _new_journal(legacy_dir: Path) -> dict[str, Any]:
     return {
         "version": JOURNAL_VERSION,
         "target_storage_version": STORAGE_VERSION,
         "legacy_source": os.path.abspath(os.fspath(legacy_dir)),
-        "artifacts": {
-            spec.key: {
-                "state": "pending",
-                "reader_version": spec.reader_version,
-                "credential": spec.credential,
-            }
-            for spec in _ARTIFACTS
-        },
+        "artifacts": {spec.key: _new_artifact_record(spec) for spec in _ARTIFACTS},
     }
+
+
+def _upgrade_artifact_record(
+    spec: _ArtifactSpec,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    raw_plan_version = record.get("plan_version", 1)
+    if (
+        isinstance(raw_plan_version, bool)
+        or not isinstance(raw_plan_version, int)
+        or raw_plan_version < 1
+    ):
+        raise DataMigrationError(f"Migration plan is invalid for {spec.key}")
+    if raw_plan_version > _ARTIFACT_PLAN_VERSION:
+        raise DataMigrationError(f"Migration plan is newer than supported for {spec.key}")
+    if raw_plan_version == _ARTIFACT_PLAN_VERSION:
+        return record
+
+    state = record.get("state")
+    if state == "pending":
+        return _new_artifact_record(spec)
+    if state == "installed":
+        cleanup = record.get("cleanup", [])
+        if not isinstance(cleanup, list) or any(
+            not isinstance(item, dict) for item in cleanup
+        ):
+            raise DataMigrationError(f"Legacy cleanup state is invalid for {spec.key}")
+        removed_values = [item.get("removed", False) for item in cleanup]
+        if any(type(removed) is not bool for removed in removed_values):
+            raise DataMigrationError(f"Legacy cleanup state is invalid for {spec.key}")
+        if any(removed_values):
+            raise DataMigrationError(
+                f"Legacy cleanup already began before migration plan upgrade for {spec.key}"
+            )
+        return _new_artifact_record(spec)
+    if state == "complete":
+        record["plan_version"] = _ARTIFACT_PLAN_VERSION
+        return record
+    raise DataMigrationError(f"Migration journal state is invalid for {spec.key}")
 
 
 def _load_journal(path: Path, legacy_dir: Path) -> dict[str, Any]:
@@ -479,6 +696,7 @@ def _load_journal(path: Path, legacy_dir: Path) -> dict[str, Any]:
             raise DataMigrationError(f"Migration journal trust class changed for {spec.key}")
         if record.get("state") not in {"pending", "installed", "complete"}:
             raise DataMigrationError(f"Migration journal state is invalid for {spec.key}")
+        artifacts[spec.key] = _upgrade_artifact_record(spec, record)
     return value
 
 
@@ -527,7 +745,7 @@ def _read_source_snapshots(
     data_dir: Path,
     work_dir: Path,
     *,
-    include_legacy_paths: bool,
+    same_location: bool,
 ) -> list[_SourceSnapshot]:
     canonical = legacy_dir / spec.source_relative
     old_quarantine = (
@@ -540,13 +758,18 @@ def _read_source_snapshots(
         ("new", canonical.with_name(f"{canonical.name}.new"), legacy_dir),
     )
     candidates: tuple[tuple[_SourceRole, Path, Path], ...]
-    if include_legacy_paths:
+    if same_location:
+        # The canonical path is the destination in this mode. Its `.new`
+        # sibling is still a recovery generation and must never be stranded.
+        candidates = (
+            legacy_candidates[1],
+            ("v1-quarantine", old_quarantine, data_dir),
+        )
+    else:
         candidates = (
             *legacy_candidates,
             ("v1-quarantine", old_quarantine, data_dir),
         )
-    else:
-        candidates = (("v1-quarantine", old_quarantine, data_dir),)
     snapshots: list[_SourceSnapshot] = []
     for role, path, root in candidates:
         if not _validate_directory_chain(root, path.parent):
@@ -588,6 +811,118 @@ def _output_record(data_dir: Path, path: Path, data: bytes) -> dict[str, str]:
     }
 
 
+def _add_output(
+    outputs: list[dict[str, str]],
+    data_dir: Path,
+    path: Path,
+    data: bytes,
+) -> None:
+    output = _output_record(data_dir, path, data)
+    if output not in outputs:
+        outputs.append(output)
+
+
+def _preserve_generation(
+    outputs: list[dict[str, str]],
+    data_dir: Path,
+    spec: _ArtifactSpec,
+    *,
+    role: str,
+    reason: str,
+    data: bytes,
+) -> Path:
+    path = _quarantine_path(
+        data_dir,
+        spec,
+        f"{role}.{reason}.{_digest(data)}",
+    )
+    _write_preserved_bytes(path, data)
+    _add_output(outputs, data_dir, path, data)
+    return path
+
+
+def _preserve_distinct_losers(
+    outputs: list[dict[str, str]],
+    data_dir: Path,
+    spec: _ArtifactSpec,
+    snapshots: list[_SourceSnapshot],
+    *,
+    winner_payload: bytes,
+    reason: str,
+) -> bool:
+    seen_payloads = {_digest(winner_payload)}
+    preserved = False
+    for snapshot in snapshots:
+        if snapshot.parsed is None:
+            continue
+        payload_digest = _digest(snapshot.parsed.payload)
+        if payload_digest in seen_payloads:
+            continue
+        _preserve_generation(
+            outputs,
+            data_dir,
+            spec,
+            role=snapshot.role,
+            reason=reason,
+            data=snapshot.data,
+        )
+        seen_payloads.add(payload_digest)
+        preserved = True
+    return preserved
+
+
+def _install_payload(
+    spec: _ArtifactSpec,
+    destination: Path,
+    payload: bytes,
+    work_dir: Path,
+) -> bytes:
+    try:
+        atomic_write_bytes(
+            destination,
+            payload,
+            remove_legacy_new=False,
+        )
+    except OSError as exc:
+        raise DataMigrationError(f"Unable to install migrated file: {destination}") from exc
+    installed_state = _validate_destination(spec, destination, work_dir)
+    if installed_state is None:
+        raise DataMigrationError(f"Migrated file verification failed: {destination}")
+    installed, installed_data = installed_state
+    if installed.payload != payload:
+        raise DataMigrationError(f"Migrated file verification failed: {destination}")
+    return installed_data
+
+
+def _preserve_losers_and_install(
+    outputs: list[dict[str, str]],
+    data_dir: Path,
+    spec: _ArtifactSpec,
+    destination: Path,
+    work_dir: Path,
+    valid: list[_SourceSnapshot],
+    selected: _SourceSnapshot,
+) -> bool:
+    if selected.parsed is None:
+        raise DataMigrationError("Selected migration source is invalid")
+    preserved = _preserve_distinct_losers(
+        outputs,
+        data_dir,
+        spec,
+        valid,
+        winner_payload=selected.parsed.payload,
+        reason="source-conflict",
+    )
+    installed_data = _install_payload(
+        spec,
+        destination,
+        selected.parsed.payload,
+        work_dir,
+    )
+    _add_output(outputs, data_dir, destination, installed_data)
+    return preserved
+
+
 def _verify_outputs(
     record: Mapping[str, Any],
     data_dir: Path,
@@ -609,6 +944,93 @@ def _verify_outputs(
             raise DataMigrationError(f"Migration output changed before completion: {path}")
 
 
+def _cleanup_staging_path(path: Path, role: str, digest: str) -> Path:
+    return path.with_name(f".{path.name}.migration-{role}-{digest}.staged")
+
+
+def _atomic_stage_source(source: Path, staging: Path) -> bool:
+    """Atomically move the current source name to a no-follow staging name."""
+    if source.parent != staging.parent:
+        raise DataMigrationError("Migration cleanup staging escaped its directory")
+    if _path_exists(staging):
+        return True
+
+    use_directory_fd = (
+        os.name != "nt"
+        and os.rename in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
+    )
+    if use_directory_fd:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            directory_fd = os.open(source.parent, flags)
+        except OSError as exc:
+            raise DataMigrationError(
+                f"Unable to open migration source directory: {source.parent}"
+            ) from exc
+        try:
+            try:
+                info = os.stat(source.name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISREG(info.st_mode):
+                raise DataMigrationError(
+                    f"Migration path is not a regular file: {source}"
+                )
+            try:
+                os.stat(staging.name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                staging_exists = False
+            else:
+                staging_exists = True
+            if staging_exists:
+                raise DataMigrationError(
+                    f"Migration cleanup staging path already exists: {staging}"
+                )
+            try:
+                os.rename(
+                    source.name,
+                    staging.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                return False
+            os.fsync(directory_fd)
+            return True
+        except OSError as exc:
+            raise DataMigrationError(
+                f"Unable to stage migrated source: {source}"
+            ) from exc
+        finally:
+            os.close(directory_fd)
+
+    try:
+        info = source.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DataMigrationError(f"Unable to inspect migration source: {source}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise DataMigrationError(f"Migration path is not a regular file: {source}")
+    if _path_exists(staging):
+        raise DataMigrationError(
+            f"Migration cleanup staging path already exists: {staging}"
+        )
+    try:
+        os.rename(source, staging)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DataMigrationError(f"Unable to stage migrated source: {source}") from exc
+    return True
+
+
 def _cleanup_sources(
     record: dict[str, Any],
     spec: _ArtifactSpec,
@@ -620,6 +1042,9 @@ def _cleanup_sources(
     cleanup = record.get("cleanup", [])
     if not isinstance(cleanup, list):
         raise DataMigrationError(f"Migration cleanup state is invalid for {spec.key}")
+    outputs = record.get("outputs", [])
+    if not isinstance(outputs, list):
+        raise DataMigrationError(f"Migration outputs are invalid for {spec.key}")
     cleaned: list[str] = []
     canonical = legacy_dir / spec.source_relative
     source_paths = {
@@ -637,23 +1062,57 @@ def _cleanup_sources(
         role = item.get("role")
         digest = item.get("sha256")
         removed = item.get("removed", False)
-        if role not in source_paths or not isinstance(digest, str) or type(removed) is not bool:
+        staged = item.get("staged", False)
+        if (
+            role not in source_paths
+            or not isinstance(digest, str)
+            or type(removed) is not bool
+            or type(staged) is not bool
+        ):
             raise DataMigrationError(f"Migration cleanup metadata is invalid for {spec.key}")
         path = source_paths[role]
+        staging = _cleanup_staging_path(path, role, digest)
         if removed:
-            if _path_exists(path):
+            if _path_exists(path) or _path_exists(staging):
                 raise DataMigrationError(f"Removed migration source reappeared: {path}")
             continue
-        if _path_exists(path):
-            current = _read_regular_file(path, spec.maximum_bytes)
-            if _digest(current) != digest:
-                raise DataMigrationError(f"Migration source changed before cleanup: {path}")
-            try:
-                durable_unlink(path)
-            except OSError as exc:
-                raise DataMigrationError(f"Unable to remove migrated source: {path}") from exc
-            cleaned.append(f"{spec.key}:{role}")
+        if not _path_exists(staging):
+            if not _atomic_stage_source(path, staging):
+                item["removed"] = True
+                item["staged"] = False
+                _write_json_file(journal_path, journal)
+                continue
+            item["staged"] = True
+            _write_json_file(journal_path, journal)
+
+        replacement_present = _path_exists(path)
+        current = _read_regular_file(staging, spec.maximum_bytes)
+        current_digest = _digest(current)
+        if current_digest != digest:
+            preserved = _preserve_generation(
+                outputs,
+                data_dir,
+                spec,
+                role=role,
+                reason="replacement-conflict",
+                data=current,
+            )
+            record["quarantined"] = True
+            _write_json_file(journal_path, journal)
+            raise DataMigrationError(
+                f"Migration source changed before cleanup and was preserved at {preserved}"
+            )
+        try:
+            durable_unlink(staging)
+        except OSError as exc:
+            raise DataMigrationError(f"Unable to remove migrated source: {path}") from exc
+        if replacement_present or _path_exists(path):
+            raise DataMigrationError(
+                f"Migration source was replaced during cleanup and was not removed: {path}"
+            )
+        cleaned.append(f"{spec.key}:{role}")
         item["removed"] = True
+        item["staged"] = False
         _write_json_file(journal_path, journal)
     return cleaned
 
@@ -666,6 +1125,8 @@ def _prepare_artifact(
     data_dir: Path,
     work_dir: Path,
     same_location: bool,
+    journal: dict[str, Any],
+    journal_path: Path,
 ) -> None:
     destination = data_dir / spec.destination_relative
     _ensure_private_directory(destination.parent)
@@ -675,7 +1136,7 @@ def _prepare_artifact(
         legacy_dir,
         data_dir,
         work_dir,
-        include_legacy_paths=not same_location,
+        same_location=same_location,
     )
     valid = [snapshot for snapshot in snapshots if snapshot.parsed is not None]
     invalid = [snapshot for snapshot in snapshots if snapshot.parsed is None]
@@ -687,51 +1148,100 @@ def _prepare_artifact(
         ),
     )
 
-    outputs: list[dict[str, str]] = []
-    quarantined = False
+    raw_outputs = record.get("outputs", [])
+    if not isinstance(raw_outputs, list) or any(
+        not isinstance(output, dict) for output in raw_outputs
+    ):
+        raise DataMigrationError(f"Migration journal outputs are invalid for {spec.key}")
+    outputs: list[dict[str, str]] = list(raw_outputs)
+    if outputs:
+        _verify_outputs(record, data_dir, spec.maximum_bytes)
+    quarantined = bool(record.get("quarantined", False))
     for snapshot in invalid:
-        quarantine = _quarantine_path(
-            data_dir,
-            spec,
-            f"{snapshot.role}.invalid",
-        )
+        quarantine = _quarantine_path(data_dir, spec, f"{snapshot.role}.invalid")
         _write_preserved_bytes(quarantine, snapshot.data)
-        outputs.append(_output_record(data_dir, quarantine, snapshot.data))
+        _add_output(outputs, data_dir, quarantine, snapshot.data)
         quarantined = True
 
     result = "absent"
     source_format: str | None = None
     source_version: int | None = None
-    if destination_state is not None:
-        destination_result, destination_data = destination_state
-        result = "destination-wins"
-        outputs.append(_output_record(data_dir, destination, destination_data))
-        if selected is not None and selected.parsed is not None:
-            source_format = selected.parsed.source_format
-            source_version = selected.parsed.source_version
-            if selected.parsed.payload != destination_result.payload:
-                conflict = _quarantine_path(
-                    data_dir,
-                    spec,
-                    f"{selected.role}.destination-conflict",
-                )
-                _write_preserved_bytes(conflict, selected.data)
-                outputs.append(_output_record(data_dir, conflict, selected.data))
-                quarantined = True
-    elif selected is not None and selected.parsed is not None:
+    if selected is not None and selected.parsed is not None:
         source_format = selected.parsed.source_format
         source_version = selected.parsed.source_version
-        try:
-            atomic_write_bytes(destination, selected.parsed.payload)
-        except OSError as exc:
-            raise DataMigrationError(f"Unable to install migrated file: {destination}") from exc
-        installed_state = _validate_destination(spec, destination, work_dir)
-        if installed_state is None:
-            raise DataMigrationError(f"Migrated file verification failed: {destination}")
-        installed, installed_data = installed_state
-        if installed.payload != selected.parsed.payload:
-            raise DataMigrationError(f"Migrated file verification failed: {destination}")
-        outputs.append(_output_record(data_dir, destination, installed_data))
+
+    recover_new_over_destination = (
+        same_location
+        and destination_state is not None
+        and selected is not None
+        and selected.role == "new"
+        and selected.parsed is not None
+        and selected.parsed.payload != destination_state[0].payload
+    )
+    if recover_new_over_destination:
+        if (
+            destination_state is None
+            or selected is None
+            or selected.parsed is None
+        ):
+            raise DataMigrationError("Same-location recovery state is inconsistent")
+        _destination_result, destination_data = destination_state
+        _preserve_generation(
+            outputs,
+            data_dir,
+            spec,
+            role="canonical",
+            reason="recovery-conflict",
+            data=destination_data,
+        )
+        _preserve_distinct_losers(
+            outputs,
+            data_dir,
+            spec,
+            valid,
+            winner_payload=selected.parsed.payload,
+            reason="source-conflict",
+        )
+        record["outputs"] = outputs
+        record["quarantined"] = True
+        _write_json_file(journal_path, journal)
+        installed_data = _install_payload(
+            spec,
+            destination,
+            selected.parsed.payload,
+            work_dir,
+        )
+        _add_output(outputs, data_dir, destination, installed_data)
+        quarantined = True
+        result = "recovered"
+    elif destination_state is not None:
+        destination_result, destination_data = destination_state
+        _add_output(outputs, data_dir, destination, destination_data)
+        quarantined = (
+            _preserve_distinct_losers(
+                outputs,
+                data_dir,
+                spec,
+                valid,
+                winner_payload=destination_result.payload,
+                reason="destination-conflict",
+            )
+            or quarantined
+        )
+        result = "destination-wins"
+    elif selected is not None and selected.parsed is not None:
+        quarantined = (
+            _preserve_losers_and_install(
+                outputs,
+                data_dir,
+                spec,
+                destination,
+                work_dir,
+                valid,
+                selected,
+            )
+            or quarantined
+        )
         result = (
             "recovered"
             if selected.role in {"new", "v1-quarantine"}
@@ -753,6 +1263,7 @@ def _prepare_artifact(
                     "role": snapshot.role,
                     "sha256": snapshot.digest,
                     "removed": False,
+                    "staged": False,
                 }
                 for snapshot in snapshots
             ],
@@ -782,6 +1293,8 @@ def _migrate_artifact(
             data_dir=data_dir,
             work_dir=work_dir,
             same_location=same_location,
+            journal=journal,
+            journal_path=journal_path,
         )
         _write_json_file(journal_path, journal)
     _verify_outputs(record, data_dir, spec.maximum_bytes)
@@ -807,6 +1320,18 @@ def _remove_empty_legacy_cache(legacy_dir: Path, data_dir: Path) -> None:
         return
 
 
+def _same_location_recovery_keys(data_dir: Path) -> tuple[str, ...]:
+    keys: list[str] = []
+    for spec in _ARTIFACTS:
+        canonical = data_dir / spec.source_relative
+        recovery = canonical.with_name(f"{canonical.name}.new")
+        if not _validate_directory_chain(data_dir, recovery.parent):
+            continue
+        if _path_exists(recovery):
+            keys.append(spec.key)
+    return tuple(keys)
+
+
 def migrate_legacy_data(
     *,
     legacy_dir: Path = WORKING_DIR,
@@ -820,6 +1345,10 @@ def migrate_legacy_data(
     every obsolete source path is durably removed.
     """
     _ensure_private_directory(data_dir)
+    same_location = os.path.abspath(os.fspath(legacy_dir)) == os.path.abspath(
+        os.fspath(data_dir)
+    )
+    recovery_keys = _same_location_recovery_keys(data_dir) if same_location else ()
     metadata_path = data_dir / "storage.json"
     version = _metadata_version(metadata_path)
     if version is not None:
@@ -828,7 +1357,7 @@ def migrate_legacy_data(
                 f"Mutable data version {version} is newer than supported version "
                 f"{STORAGE_VERSION}"
             )
-        if version == STORAGE_VERSION:
+        if version == STORAGE_VERSION and not recovery_keys:
             return MigrationResult((), (), (), (), ())
 
     work_dir = data_dir / "migration-work"
@@ -836,13 +1365,17 @@ def migrate_legacy_data(
     _ensure_private_directory(data_dir / "migration-quarantine")
     journal_path = data_dir / "migration-journal.json"
     journal = _load_journal(journal_path, legacy_dir)
-    if not _path_exists(journal_path):
+    if version == STORAGE_VERSION and recovery_keys:
+        artifacts = journal["artifacts"]
+        for spec in _ARTIFACTS:
+            if spec.key in recovery_keys:
+                artifacts[spec.key] = _new_artifact_record(spec)
+        journal.pop("completed_at", None)
+        _write_json_file(journal_path, journal)
+    elif not _path_exists(journal_path):
         _write_json_file(journal_path, journal)
 
     try:
-        same_location = os.path.abspath(os.fspath(legacy_dir)) == os.path.abspath(
-            os.fspath(data_dir)
-        )
         cleaned: list[str] = []
         for spec in _ARTIFACTS:
             cleaned.extend(
