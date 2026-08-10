@@ -22,6 +22,8 @@ script:
   - >-
     ./env/bin/python3 -m pip install --require-hashes --only-binary=:all: --ignore-installed --prefix=/usr --root="$TARGET_APPDIR" -r "$SOURCE_DIR/../requirements-release.txt"
   - >-
+    PYTHONPATH="$TARGET_APPDIR/usr/lib/python3.10/site-packages" ./env/bin/python3 -c "from keyring.backends.SecretService import Keyring; import cffi, cryptography, jeepney, secretstorage; assert Keyring.__module__ == 'keyring.backends.SecretService'"
+  - >-
     python3 -m compileall "$TARGET_APPDIR/usr/src"
   - >-
     find "$TARGET_APPDIR" -type f -print0 | xargs -0 file | grep -F 'not stripped' | cut -f1 -d':' | sort -V | xargs -r strip -s -v

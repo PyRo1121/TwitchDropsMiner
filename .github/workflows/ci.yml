@@ -133,6 +133,18 @@ jobs:
           -Replace '^__version__\s*=\s*"[^"]+', "`$0.$env:SHA_SHORT" |`
           Out-File version.py -Encoding utf8
 
+      - name: Validate native release lock in a clean environment
+        run: |
+          Remove-Item -Recurse -Force .release-lock-check, .release-wheelhouse -ErrorAction SilentlyContinue
+          python -m venv .release-lock-check
+          $LockPython = (Resolve-Path '.release-lock-check\Scripts\python.exe').Path
+          & $LockPython -m pip install --require-hashes --only-binary=:all: -r requirements-bootstrap.txt
+          & $LockPython -m pip download --require-hashes --only-binary=:all: --dest .release-wheelhouse -r requirements-release.txt
+          & $LockPython -m pip install --dry-run --ignore-installed --require-hashes --only-binary=:all: -r requirements-release.txt
+          & $LockPython -m pip install --ignore-installed --no-index --find-links .release-wheelhouse --require-hashes --only-binary=:all: -r requirements-release.txt
+          & $LockPython -m pip check
+          & $LockPython -c "from keyring.backends.Windows import WinVaultKeyring; from win32ctypes.pywin32 import win32cred; assert WinVaultKeyring.__module__ == 'keyring.backends.Windows'; assert win32cred.__name__"
+
       - name: Install hash-locked build dependencies
         run: |
           python -m pip install --require-hashes --only-binary=:all: -r requirements-bootstrap.txt
@@ -226,6 +238,18 @@ jobs:
         env:
           SHA_SHORT: ${{steps.vars.outputs.sha_short}}
         run: sed -i '' -E "s/^(__version__\s*=\s*\"[^\"]+)/\1.${SHA_SHORT}/" version.py
+
+      - name: Validate native release lock in a clean environment
+        run: |
+          rm -rf .release-lock-check .release-wheelhouse
+          python3 -m venv .release-lock-check
+          lock_python=".release-lock-check/bin/python"
+          "$lock_python" -m pip install --require-hashes --only-binary=:all: -r requirements-bootstrap.txt
+          "$lock_python" -m pip download --require-hashes --only-binary=:all: --dest .release-wheelhouse -r requirements-release.txt
+          "$lock_python" -m pip install --dry-run --ignore-installed --require-hashes --only-binary=:all: -r requirements-release.txt
+          "$lock_python" -m pip install --ignore-installed --no-index --find-links .release-wheelhouse --require-hashes --only-binary=:all: -r requirements-release.txt
+          "$lock_python" -m pip check
+          "$lock_python" -c "from keyring.backends.macOS import Keyring, api; assert Keyring.__module__ == 'keyring.backends.macOS'; assert api.__name__"
 
       - name: Install hash-locked build dependencies
         run: |
@@ -328,6 +352,18 @@ jobs:
         run: |
           sudo apt update
           sudo apt install xvfb libdbus-1-3 libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+
+      - name: Validate native release lock in a clean environment
+        run: |
+          rm -rf .release-lock-check .release-wheelhouse
+          python3 -m venv .release-lock-check
+          lock_python=".release-lock-check/bin/python"
+          "$lock_python" -m pip install --require-hashes --only-binary=:all: -r requirements-bootstrap.txt
+          "$lock_python" -m pip download --require-hashes --only-binary=:all: --dest .release-wheelhouse -r requirements-release.txt
+          "$lock_python" -m pip install --dry-run --ignore-installed --require-hashes --only-binary=:all: -r requirements-release.txt
+          "$lock_python" -m pip install --ignore-installed --no-index --find-links .release-wheelhouse --require-hashes --only-binary=:all: -r requirements-release.txt
+          "$lock_python" -m pip check
+          "$lock_python" -c "from keyring.backends.SecretService import Keyring; import cffi, cryptography, jeepney, secretstorage; assert Keyring.__module__ == 'keyring.backends.SecretService'"
 
       - name: Install hash-locked build dependencies
         run: |

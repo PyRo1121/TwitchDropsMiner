@@ -94,6 +94,42 @@ class BuildConfigurationTests(unittest.TestCase):
             release_lock,
         )
 
+        vault_packages = {
+            "backports-tarfile",
+            "cffi",
+            "cryptography",
+            "importlib-metadata",
+            "jaraco-classes",
+            "jaraco-context",
+            "jaraco-functools",
+            "jeepney",
+            "keyring",
+            "more-itertools",
+            "pycparser",
+            "pywin32-ctypes",
+            "secretstorage",
+            "zipp",
+        }
+        self.assertTrue(vault_packages.issubset(runtime_pins))
+        self.assertIn('cffi==2.1.1; sys_platform == "linux"', release_lock)
+        self.assertIn('cryptography==50.0.0; sys_platform == "linux"', release_lock)
+        self.assertIn('jeepney==0.9.0; sys_platform == "linux"', release_lock)
+        self.assertIn('pycparser==3.0; sys_platform == "linux"', release_lock)
+        self.assertIn('SecretStorage==3.5.0; sys_platform == "linux"', release_lock)
+        self.assertIn('pywin32-ctypes==0.2.3; sys_platform == "win32"', release_lock)
+        self.assertIn(
+            "sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f",
+            release_lock,
+        )
+        self.assertIn(
+            "sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137",
+            release_lock,
+        )
+        self.assertIn(
+            "sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8",
+            release_lock,
+        )
+
     def test_ci_uses_hash_locks_and_real_frozen_self_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf8")
 
@@ -107,8 +143,20 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertEqual(workflow.count("build_tools/package_release.py"), 4)
         self.assertIn("pyright@1.1.409", workflow)
         self.assertIn("python -m venv .release-lock-check", workflow)
-        self.assertIn("--dry-run --ignore-installed", workflow)
+        self.assertGreaterEqual(workflow.count("--dry-run --ignore-installed"), 4)
         self.assertIn("Resolve release lock metadata in clean CPython 3.10", workflow)
+        self.assertEqual(
+            workflow.count("Validate native release lock in a clean environment"),
+            3,
+        )
+        self.assertEqual(
+            workflow.count("pip download --require-hashes --only-binary=:all:"),
+            3,
+        )
+        self.assertEqual(workflow.count(" -m pip check"), 3)
+        self.assertIn("keyring.backends.Windows", workflow)
+        self.assertIn("keyring.backends.macOS", workflow)
+        self.assertIn("keyring.backends.SecretService", workflow)
         self.assertIn("python -m venv .venv", workflow)
         self.assertIn('${PWD}/.venv/bin', workflow)
         self.assertIn('PYTHONHASHSEED: "0"', workflow)
@@ -304,6 +352,10 @@ class BuildConfigurationTests(unittest.TestCase):
         self.assertIn('LD_LIBRARY_PATH="$runtime_library_path" ldd', workflow)
         self.assertEqual(workflow.count("runner: ubuntu-24.04-arm"), 2)
         self.assertIn("PySide6==6.11.1", runtime)
+        self.assertIn(
+            "from keyring.backends.SecretService import Keyring; import cffi, cryptography, jeepney, secretstorage",
+            recipe,
+        )
         self.assertNotIn("pip install --upgrade", recipe)
 
     def test_release_documentation_is_honest_about_unsigned_artifacts(self) -> None:
