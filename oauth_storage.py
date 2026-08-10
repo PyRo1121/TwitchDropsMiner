@@ -132,6 +132,29 @@ class _StorageState:
     cleanup: str = _CLEANUP_NONE
 
 
+@dataclass(frozen=True)
+class _CleanupTombstones:
+    """Durable logout evidence grouped by its availability boundary."""
+
+    state: bool = False
+    file: bool = False
+    vault: bool = False
+
+    def safe_to_close(
+        self,
+        *,
+        fallback_credential_pending: bool,
+    ) -> bool:
+        # A vault-only marker can disappear in the same provider outage that
+        # makes a retained fallback credential eligible for use. File-backed
+        # evidence remains visible wherever that credential remains readable.
+        return (
+            self.state
+            or self.file
+            or (self.vault and not fallback_credential_pending)
+        )
+
+
 _SYSTEM_VAULT_TYPES: Final[dict[str, type[KeyringBackend]]] = {
     "linux": SecretServiceKeyring,
     "darwin": MacOSKeyring,
@@ -221,7 +244,7 @@ class OAuthTokenStore:
     def clear(self) -> None:
         """Durably tombstone logout, then confirm vault and file deletion."""
         with self._transaction():
-            state, tombstone_persisted = self._read_cleanup_state()
+            state, tombstones = self._read_cleanup_state()
             pending = replace(state, cleanup=_CLEANUP_PENDING)
             file_marker_written = False
             try:
@@ -231,7 +254,7 @@ class OAuthTokenStore:
             else:
                 file_marker_written = True
             if file_marker_written:
-                tombstone_persisted = True
+                tombstones = replace(tombstones, file=True)
 
             state_marker_written = False
             try:
@@ -241,7 +264,7 @@ class OAuthTokenStore:
             else:
                 state_marker_written = True
             if state_marker_written:
-                tombstone_persisted = True
+                tombstones = replace(tombstones, state=True)
 
             vault_marker_written = False
             try:
@@ -251,10 +274,10 @@ class OAuthTokenStore:
             else:
                 vault_marker_written = True
             if vault_marker_written:
-                tombstone_persisted = True
+                tombstones = replace(tombstones, vault=True)
             self._complete_cleanup(
                 pending,
-                tombstone_persisted=tombstone_persisted,
+                tombstones=tombstones,
             )
 
     @contextmanager
@@ -284,11 +307,11 @@ class OAuthTokenStore:
                 lock_handle.close()
 
     def _load_locked(self, client_id: str) -> str | None:
-        state, tombstone_persisted = self._read_cleanup_state()
+        state, tombstones = self._read_cleanup_state()
         if state.cleanup != _CLEANUP_NONE:
             self._complete_cleanup(
                 state,
-                tombstone_persisted=tombstone_persisted,
+                tombstones=tombstones,
             )
             return None
 
@@ -363,11 +386,11 @@ class OAuthTokenStore:
         *,
         new_session: bool,
     ) -> None:
-        state, tombstone_persisted = self._read_cleanup_state()
+        state, tombstones = self._read_cleanup_state()
         if state.cleanup != _CLEANUP_NONE:
             state = self._complete_cleanup(
                 state,
-                tombstone_persisted=tombstone_persisted,
+                tombstones=tombstones,
             )
             if not new_session:
                 raise CredentialLoggedOutError(
@@ -502,22 +525,29 @@ class OAuthTokenStore:
         self._write_state(eligible)
         return eligible
 
-    def _read_cleanup_state(self) -> tuple[_StorageState, bool]:
+    def _read_cleanup_state(
+        self,
+    ) -> tuple[_StorageState, _CleanupTombstones]:
         state = self._read_state()
-        marker_exists = self._read_logout_marker()
+        file_marker_exists = self._read_logout_marker()
         try:
             vault_marker_exists = self._read_vault_logout_marker()
         except CredentialVaultUnavailableError:
             vault_marker_exists = False
-        if marker_exists or vault_marker_exists:
-            return replace(state, cleanup=_CLEANUP_PENDING), True
-        return state, state.cleanup != _CLEANUP_NONE
+        tombstones = _CleanupTombstones(
+            state=state.cleanup != _CLEANUP_NONE,
+            file=file_marker_exists,
+            vault=vault_marker_exists,
+        )
+        if file_marker_exists or vault_marker_exists:
+            state = replace(state, cleanup=_CLEANUP_PENDING)
+        return state, tombstones
 
     def _complete_cleanup(
         self,
         state: _StorageState,
         *,
-        tombstone_persisted: bool,
+        tombstones: _CleanupTombstones,
     ) -> _StorageState:
         pending = replace(state, cleanup=_CLEANUP_PENDING)
 
@@ -555,7 +585,7 @@ class OAuthTokenStore:
         except (CredentialStorageError, OSError):
             state_pending = True
         else:
-            tombstone_persisted = True
+            tombstones = replace(tombstones, state=True)
 
         marker_pending = False
         if not state_pending:
@@ -580,11 +610,16 @@ class OAuthTokenStore:
                     marker_pending = True
 
         if vault_pending or file_pending or state_pending or marker_pending:
+            fallback_credential_pending = (
+                file_pending and not state.vault_provisioned
+            )
             raise CredentialCleanupError(
                 vault_pending=vault_pending,
                 file_pending=file_pending,
                 marker_pending=marker_pending or state_pending,
-                tombstone_persisted=tombstone_persisted,
+                tombstone_persisted=tombstones.safe_to_close(
+                    fallback_credential_pending=fallback_credential_pending,
+                ),
             )
         return final_state
 

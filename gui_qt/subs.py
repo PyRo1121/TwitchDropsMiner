@@ -407,8 +407,9 @@ class QtHelp:
         try:
             await auth_state.logout()
         except CredentialCleanupError as exc:
-            # A persisted tombstone makes exit/relaunch safe; without one the
-            # current process must stay available for an explicit retry.
+            # Storage reports a tombstone as persisted only when its
+            # availability boundary covers every retained credential. Without
+            # that guarantee, this process must remain available for retry.
             retry_logout = not exc.tombstone_persisted
             if retry_logout:
                 block_exit_until_retry = exc.vault_pending

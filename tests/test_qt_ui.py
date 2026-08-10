@@ -16,6 +16,7 @@ from queue import SimpleQueue
 from types import SimpleNamespace
 
 import aiohttp
+import oauth_storage
 from PIL import Image
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
@@ -595,51 +596,133 @@ class QtUiTests(unittest.TestCase):
 
     def test_real_manager_blocks_close_until_logout_retry_is_safe(self) -> None:
         manager = self.make_manager()
-        auth_state = SimpleNamespace(
-            _access_token=None,
-            logout=AsyncMock(
-                side_effect=CredentialCleanupError(
-                    vault_pending=True,
-                    file_pending=False,
-                    marker_pending=True,
-                    tombstone_persisted=False,
-                )
-            ),
-        )
         twitch = cast(Any, manager._twitch)
-        twitch._auth_state = auth_state
 
-        with patch.object(manager, "print"):
-            asyncio.run(manager.help._invalidate_token())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oauth.json"
+            provider = SimpleNamespace(available=False)
+            vault_values: dict[str, str] = {}
 
-        auth_state.logout.assert_awaited_once_with()
-        self.assertEqual(twitch.state_changes, [])
-        self.assertTrue(
-            manager.help._invalidate_button.widget.isEnabled()
-        )
-        self.assertTrue(manager.close_inhibited)
+            def require_provider() -> None:
+                if not provider.available:
+                    raise oauth_storage.NoKeyringError(
+                        "provider unavailable"
+                    )
 
-        manager.tray.start()
-        with patch.object(manager, "grab_attention") as grab_attention:
-            self.assertFalse(manager.close())
+            def get_password(_service: str, account: str) -> str | None:
+                require_provider()
+                return vault_values.get(account)
+
+            def set_password(
+                _service: str,
+                account: str,
+                value: str,
+            ) -> None:
+                require_provider()
+                vault_values[account] = value
+
+            def delete_password(_service: str, account: str) -> None:
+                require_provider()
+                vault_values.pop(account, None)
+
+            vault = SimpleNamespace(
+                get_password=get_password,
+                set_password=set_password,
+                delete_password=delete_password,
+            )
+            store = oauth_storage.OAuthTokenStore(
+                path,
+                vault=cast(Any, vault),
+                allow_file_fallback=True,
+            )
+            store.save("client-a", "fallback-secret")
+            provider.available = True
+
+            async def logout() -> None:
+                store.clear()
+
+            auth_state = SimpleNamespace(
+                _access_token=None,
+                logout=AsyncMock(side_effect=logout),
+            )
+            twitch._auth_state = auth_state
+
+            with (
+                patch.object(manager, "print"),
+                patch.object(
+                    store,
+                    "_write_logout_marker",
+                    side_effect=OSError("directory read-only"),
+                ),
+                patch.object(
+                    store,
+                    "_write_state",
+                    side_effect=OSError("directory read-only"),
+                ),
+                patch.object(
+                    store,
+                    "_delete_file",
+                    side_effect=OSError("directory read-only"),
+                ),
+            ):
+                asyncio.run(manager.help._invalidate_token())
+
+            auth_state.logout.assert_awaited_once_with()
+            self.assertEqual(twitch.state_changes, [])
+            self.assertTrue(
+                manager.help._invalidate_button.widget.isEnabled()
+            )
+            self.assertTrue(manager.close_inhibited)
+            self.assertIn(
+                oauth_storage.VAULT_LOGOUT_ACCOUNT,
+                vault_values,
+            )
+            self.assertTrue(path.exists())
+
+            provider.available = False
+            self.assertEqual(
+                oauth_storage.OAuthTokenStore(
+                    path,
+                    vault=cast(Any, vault),
+                ).load("client-a"),
+                "fallback-secret",
+            )
+
+            manager.tray.start()
+            with patch.object(manager, "grab_attention") as grab_attention:
+                self.assertFalse(manager.close())
+                self.assertFalse(manager.close_requested)
+                self.assertNotIn(State.EXIT, twitch.state_changes)
+
+                close_event = Mock()
+                manager.closeEvent(close_event)
+                close_event.ignore.assert_called_once_with()
+                close_event.accept.assert_not_called()
+                manager.tray.quit()
+                self.assertEqual(grab_attention.call_count, 3)
+            manager.tray.stop()
             self.assertFalse(manager.close_requested)
             self.assertNotIn(State.EXIT, twitch.state_changes)
 
-            close_event = Mock()
-            manager.closeEvent(close_event)
-            close_event.ignore.assert_called_once_with()
-            close_event.accept.assert_not_called()
-            manager.tray.quit()
-            self.assertEqual(grab_attention.call_count, 3)
-        manager.tray.stop()
-        self.assertFalse(manager.close_requested)
-        self.assertNotIn(State.EXIT, twitch.state_changes)
-
-        auth_state.logout.side_effect = None
-        auth_state.logout.return_value = None
-        asyncio.run(manager.help._invalidate_token())
-        self.assertFalse(manager.close_inhibited)
-        self.assertIn(State.RESTART, twitch.state_changes)
+            provider.available = True
+            asyncio.run(manager.help._invalidate_token())
+            self.assertEqual(auth_state.logout.await_count, 2)
+            self.assertFalse(manager.close_inhibited)
+            self.assertFalse(
+                manager.help._invalidate_button.widget.isEnabled()
+            )
+            self.assertEqual(twitch.state_changes, [State.RESTART])
+            self.assertFalse(path.exists())
+            self.assertNotIn(
+                oauth_storage.VAULT_LOGOUT_ACCOUNT,
+                vault_values,
+            )
+            self.assertIsNone(
+                oauth_storage.OAuthTokenStore(
+                    path,
+                    vault=cast(Any, vault),
+                ).load("client-a")
+            )
 
         self.assertTrue(manager.close())
         self.assertTrue(manager.close_requested)
