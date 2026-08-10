@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from constants import CALL, MAX_WATCH_CHANNELS, State
+from constants import MAX_WATCH_CHANNELS, State
 from translate import _
-from utils import AwaitableValue, cancel_tasks, task_wrapper, timestamp
+from utils import AwaitableValue, cancel_tasks
 from watch_progress_service import WatchProgressService
 
 if TYPE_CHECKING:
@@ -40,10 +39,10 @@ class WatchService:
 
     def start_session(self) -> None:
         self._history_signature = None
-        settings = getattr(self._twitch, "settings", None)
-        self._dual_watch_enabled = bool(
-            getattr(settings, "experimental_dual_watch", False)
-        )
+        self._dual_watch_enabled = self._twitch.settings.experimental_dual_watch
+
+    def _target_limit(self) -> int:
+        return MAX_WATCH_CHANNELS if self._dual_watch_enabled else 1
 
     async def close(self) -> None:
         await self.stop_watching_and_wait()
@@ -168,17 +167,21 @@ class WatchService:
             blocked_until = channel_cooldowns.get(candidate.id)
             if blocked_until is not None and blocked_until <= now:
                 del channel_cooldowns[candidate.id]
-        options = [
-            (candidate, self.progress.eligible_drops_for_channel(candidate))
-            for candidate in ordered
-            if candidate.game is not None
-            and self.can_watch(candidate)
-            and channel_cooldowns.get(candidate.id, 0) <= now
-        ]
+        options: list[tuple[Channel, list[TimedDrop]]] = []
+        for candidate in ordered:
+            if (
+                candidate.game is None
+                or not self.can_watch(candidate)
+                or channel_cooldowns.get(candidate.id, 0) > now
+            ):
+                continue
+            eligible_drops = self.progress.eligible_drops_for_channel(candidate)
+            if eligible_drops:
+                options.append((candidate, eligible_drops))
         for first_index, (first_channel, first_drops) in enumerate(options):
             for first_drop in first_drops:
                 first_assignment = (first_channel, first_drop)
-                if MAX_WATCH_CHANNELS == 1 or not self._dual_watch_enabled:
+                if self._target_limit() == 1:
                     return [first_assignment]
                 for second_channel, second_drops in options[first_index + 1:]:
                     if second_channel.game == first_channel.game:
@@ -199,10 +202,7 @@ class WatchService:
         *,
         update_status: bool = True,
     ) -> None:
-        max_targets = (
-            MAX_WATCH_CHANNELS if self._dual_watch_enabled else 1
-        )
-        assignments = assignments[:max_targets]
+        assignments = assignments[:self._target_limit()]
         channels = [channel for channel, _drop in assignments]
         targets = OrderedDict((channel.id, channel) for channel in channels)
         target_drop_ids = {channel.id: drop.id for channel, drop in assignments}
@@ -246,13 +246,12 @@ class WatchService:
             )
             self._history_signature = signature
         self.primary_channel.set(primary)
-        set_watching_channels = getattr(self._twitch.gui.channels, "set_watching_channels", None)
-        if set_watching_channels is not None:
-            set_watching_channels(channels)
-        else:
-            self._twitch.gui.channels.set_watching(primary)
-        if getattr(self._twitch.gui, "display_drop", None) is not None:
-            assignments[0][1].display(countdown=False, subone=True)
+        self._twitch.gui.channels.set_watching_channels(channels)
+        self._twitch.gui.display_drop(
+            assignments[0][1],
+            countdown=False,
+            subone=True,
+        )
         if update_status:
             status_text = _("status", "watching").format(channel=primary.name)
             self._twitch.print(status_text)
@@ -265,38 +264,6 @@ class WatchService:
                 assignments[1][0].name,
                 assignments[1][1].id,
             )
-
-    @task_wrapper(critical=True)
-    async def _maintenance_task(self) -> None:
-        now = datetime.now(timezone.utc)
-        next_period = now + timedelta(hours=1)
-        while True:
-            # exit if there's no need to repeat the loop
-            now = datetime.now(timezone.utc)
-            if now >= next_period:
-                break
-            next_trigger = next_period
-            while self._twitch._mnt_triggers and self._twitch._mnt_triggers[0] <= next_trigger:
-                next_trigger = self._twitch._mnt_triggers.popleft()
-            trigger_type: str = "Reload" if next_trigger == next_period else "Cleanup"
-            logger.log(
-                CALL,
-                (
-                    "Maintenance task waiting until: "
-                    f"{next_trigger.astimezone().strftime('%X')} ({trigger_type})"
-                )
-            )
-            await asyncio.sleep((next_trigger - now).total_seconds())
-            # exit after waiting, before the actions
-            now = datetime.now(timezone.utc)
-            if now >= next_period:
-                break
-            if next_trigger != next_period:
-                logger.log(CALL, "Maintenance task requests channels cleanup")
-                self._twitch.change_state(State.CHANNELS_CLEANUP)
-        # this triggers a restart of this task every (up to) 60 minutes
-        logger.log(CALL, "Maintenance task requests a reload")
-        self._twitch.change_state(State.INVENTORY_FETCH)
 
     def can_watch(self, channel: Channel) -> bool:
         """
@@ -330,7 +297,7 @@ class WatchService:
         selected = self._select_watch_channels(preferred=channel)
         if channel.id not in {candidate.id for candidate in selected}:
             return False
-        if len(self._watching_channels) < MAX_WATCH_CHANNELS:
+        if len(self._watching_channels) < self._target_limit():
             return True
         get_priority = self._twitch.channel_directory_service.get_priority
         current_worst = max(
@@ -351,7 +318,6 @@ class WatchService:
         self._twitch.gui.tray.change_icon("idle")
         self._twitch.gui.status.update(_("gui", "status", "idle"))
         self.stop_watching()
-        self._twitch._state_change.clear()
         return False
 
     def switch_channel(self, channels: OrderedDict[int, Channel]) -> bool:
@@ -375,13 +341,11 @@ class WatchService:
         watching_channel = self.primary_channel.get_with_default(None)
         if new_watching is not None:
             self.watch(new_watching)
-            self._twitch._state_change.clear()
         elif watching_channel is not None and self.can_watch(watching_channel):
             self.watch(watching_channel, update_status=False)
             self._twitch.gui.status.update(
                 _("status", "watching").format(channel=watching_channel.name)
             )
-            self._twitch._state_change.clear()
         else:
             self._twitch.print(_("status", "no_channel"))
             self._twitch.history_event(

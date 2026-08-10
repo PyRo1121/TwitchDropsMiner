@@ -34,8 +34,6 @@ class ChannelsPort(Protocol):
 
     def get_selection(self) -> Channel | None: ...
 
-    def set_watching(self, channel: Channel) -> None: ...
-
     def set_watching_channels(
         self,
         channels: abc.Iterable[Channel],

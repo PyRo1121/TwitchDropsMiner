@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from math import floor
 from typing import TYPE_CHECKING, Any
 
 from constants import (
+    CALL,
     GQL_BATCH_SIZE,
     GQL_QUERIES,
     INVENTORY_RETRY_BASE,
@@ -33,7 +35,7 @@ from inventory_snapshot import (
     prepare_inventory,
 )
 from translate import _
-from utils import cancel_tasks, chunk, open_dump
+from utils import cancel_tasks, chunk, open_dump, task_wrapper
 
 if TYPE_CHECKING:
     from constants import JsonType
@@ -49,14 +51,23 @@ class InventoryService:
         self._twitch = twitch
         self._retry_attempt = 0
         self._retry_task: asyncio.Task[None] | None = None
+        self._maintenance_task: asyncio.Task[None] | None = None
+        self._maintenance_triggers: deque[datetime] = deque()
         self._deadline_alerts: set[str] = set()
 
     def start_session(self) -> None:
         self._deadline_alerts.clear()
 
     async def close(self) -> None:
+        await self._cancel_maintenance_task()
         await self._cancel_retry_task()
+        self._maintenance_triggers.clear()
         self._retry_attempt = 0
+
+    @property
+    def maintenance_running(self) -> bool:
+        task = self._maintenance_task
+        return task is not None and not task.done()
 
     async def _cancel_retry_task(self) -> None:
         retry_task = self._retry_task
@@ -79,6 +90,53 @@ class InventoryService:
             and self._twitch._state is State.INVENTORY_FETCH
         ):
             self._twitch.change_state(State.INVENTORY_FETCH)
+
+    async def _cancel_maintenance_task(self) -> None:
+        maintenance_task = self._maintenance_task
+        self._maintenance_task = None
+        if maintenance_task is None or maintenance_task is asyncio.current_task():
+            return
+        await cancel_tasks((maintenance_task,))
+
+    async def restart_maintenance(
+        self,
+        maintenance_triggers: Iterable[datetime],
+    ) -> None:
+        """Replace the inventory-derived maintenance schedule atomically."""
+        await self._cancel_maintenance_task()
+        self._maintenance_triggers = deque(maintenance_triggers)
+        self._maintenance_task = asyncio.create_task(self._run_maintenance())
+
+    @task_wrapper(critical=True)
+    async def _run_maintenance(self) -> None:
+        now = datetime.now(timezone.utc)
+        next_period = now + timedelta(hours=1)
+        while True:
+            now = datetime.now(timezone.utc)
+            if now >= next_period:
+                break
+            next_trigger = next_period
+            if (
+                self._maintenance_triggers
+                and self._maintenance_triggers[0] <= next_period
+            ):
+                next_trigger = self._maintenance_triggers.popleft()
+            trigger_type = "Reload" if next_trigger == next_period else "Cleanup"
+            logger.log(
+                CALL,
+                (
+                    "Maintenance task waiting until: "
+                    f"{next_trigger.astimezone().strftime('%X')} ({trigger_type})"
+                ),
+            )
+            await asyncio.sleep(max(0, (next_trigger - now).total_seconds()))
+            now = datetime.now(timezone.utc)
+            if now >= next_period:
+                break
+            logger.log(CALL, "Maintenance task requests channels cleanup")
+            self._twitch.change_state(State.CHANNELS_CLEANUP)
+        logger.log(CALL, "Maintenance task requests an inventory refresh")
+        self._twitch.change_state(State.INVENTORY_FETCH)
 
     def _record_campaign_deadlines(self) -> None:
         now = datetime.now(timezone.utc)
@@ -246,50 +304,47 @@ class InventoryService:
             )
         )
 
-        # Quiesce tasks that can mutate the old snapshot, then commit the core
-        # data before starting any optional presentation or image work.
-        await self._twitch.watch_service.stop_watching_and_wait()
-        await self._twitch.websocket.cancel_topic_tasks()
-        if self._twitch.gui.close_requested:
-            raise ExitRequest()
-
-        self._twitch.watch_service.progress.retain_claim_cooldowns(drops)
-        self._twitch._inventory_generation += 1
-        self._twitch._drops = drops
-        self._twitch.inventory = list(campaigns)
-        self._twitch._campaigns = campaigns_by_id
-        self._twitch._mnt_triggers = maintenance_triggers
-
+        # Retire both state and websocket producers before stopping consumers,
+        # so neither can recreate work while the old snapshot is being replaced.
+        await self._cancel_maintenance_task()
+        await self._twitch.websocket.pause_topic_dispatch()
         try:
-            await self._twitch.gui.inv.replace_campaigns(campaigns)
-        except ExitRequest:
-            raise
-        except Exception as exc:
-            logger.exception("Inventory presentation replacement failed")
-            self._twitch.history_event(
-                "inventory.presentation_failed",
-                severity="warning",
-                data={"error_type": type(exc).__name__},
-            )
-            # Do not leave cards bound to retired drop objects. An empty
-            # presentation is safer than rolling back the committed core state.
+            await self._twitch.watch_service.stop_watching_and_wait()
+            if self._twitch.gui.close_requested:
+                raise ExitRequest()
+
+            self._twitch.watch_service.progress.retain_claim_cooldowns(drops)
+            self._twitch._inventory_generation += 1
+            self._twitch._drops = drops
+            self._twitch.inventory = list(campaigns)
+            self._twitch._campaigns = campaigns_by_id
+
             try:
-                await self._twitch.gui.inv.replace_campaigns(())
-            except Exception:
-                logger.exception("Unable to clear stale inventory presentation")
+                await self._twitch.gui.inv.replace_campaigns(campaigns)
+            except ExitRequest:
+                raise
+            except Exception as exc:
+                logger.exception("Inventory presentation replacement failed")
+                self._twitch.history_event(
+                    "inventory.presentation_failed",
+                    severity="warning",
+                    data={"error_type": type(exc).__name__},
+                )
+                # Do not leave cards bound to retired drop objects. An empty
+                # presentation is safer than rolling back the committed core state.
+                try:
+                    await self._twitch.gui.inv.replace_campaigns(())
+                except Exception:
+                    logger.exception("Unable to clear stale inventory presentation")
 
-        status_update(
-            _("gui", "status", "adding_campaigns").format(
-                counter=f"({len(campaigns)}/{len(campaigns)})"
+            status_update(
+                _("gui", "status", "adding_campaigns").format(
+                    counter=f"({len(campaigns)}/{len(campaigns)})"
+                )
             )
-        )
-
-        # NOTE: maintenance task is restarted at the end of each inventory fetch
-        if self._twitch._mnt_task is not None and not self._twitch._mnt_task.done():
-            await cancel_tasks([self._twitch._mnt_task])
-        self._twitch._mnt_task = asyncio.create_task(
-            self._twitch.watch_service._maintenance_task()
-        )
+            await self.restart_maintenance(maintenance_triggers)
+        finally:
+            await self._twitch.websocket.resume_topic_dispatch()
 
     def _dump_inventory(
         self, inventory_data: dict[str, JsonType], inventory: JsonType

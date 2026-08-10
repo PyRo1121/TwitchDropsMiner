@@ -224,7 +224,13 @@ class WebsocketLifecycleTests(unittest.TestCase):
                 wait_until_login=wait_until_login,
             )
             websocket = Websocket(
-                cast(Any, SimpleNamespace(_twitch=twitch)),
+                cast(
+                    Any,
+                    SimpleNamespace(
+                        _twitch=twitch,
+                        topic_dispatch_paused=False,
+                    ),
+                ),
                 0,
             )
             socket = SimpleNamespace(close_code=1000)
@@ -350,6 +356,7 @@ class WebsocketLifecycleTests(unittest.TestCase):
             websocket._topic_tasks = set()
             websocket._pending_topic_messages = deque()
             websocket._topic_generation = 0
+            websocket._topic_dispatch_paused = False
 
             with patch("websocket.WS_TOPIC_TASK_LIMIT", 1):
                 await websocket._handle_message(message)
@@ -371,6 +378,56 @@ class WebsocketLifecycleTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_topic_pause_drains_handlers_and_blocks_resurrection_until_resume(self) -> None:
+        async def exercise() -> None:
+            first_started = asyncio.Event()
+            second_completed = asyncio.Event()
+            calls = 0
+
+            async def process(_target_id: int, _payload: dict[str, Any]) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    first_started.set()
+                    await asyncio.Event().wait()
+                second_completed.set()
+
+            topic = WebsocketTopic("User", "Drops", 1, process)
+            message = {
+                "data": {
+                    "topic": str(topic),
+                    "message": json.dumps({"type": "drop-progress"}),
+                }
+            }
+            websocket = Websocket.__new__(Websocket)
+            websocket._idx = 0
+            websocket.topics = {str(topic): topic}
+            websocket._topic_tasks = set()
+            websocket._pending_topic_messages = deque()
+            websocket._topic_generation = 0
+            websocket._topic_dispatch_paused = False
+            pool = WebsocketPool(cast(Any, SimpleNamespace()))
+            pool.websockets.append(websocket)
+
+            await websocket._handle_message(message)
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            await pool.pause_topic_dispatch()
+
+            self.assertTrue(pool.topic_dispatch_paused)
+            self.assertEqual(websocket._topic_tasks, set())
+            await websocket._handle_message(message)
+            await asyncio.sleep(0)
+            self.assertEqual(calls, 1)
+
+            await pool.resume_topic_dispatch()
+            self.assertFalse(pool.topic_dispatch_paused)
+            await websocket._handle_message(message)
+            await asyncio.wait_for(second_completed.wait(), timeout=1)
+            await websocket.cancel_topic_tasks()
+            self.assertEqual(calls, 2)
+
+        asyncio.run(exercise())
+
     def test_start_propagates_handler_failure_before_connection(self) -> None:
         async def exercise() -> None:
             async def coro_unless_closed(awaitable: Any) -> Any:
@@ -381,7 +438,13 @@ class WebsocketLifecycleTests(unittest.TestCase):
                 coro_unless_closed=coro_unless_closed,
             )
             websocket = Websocket(
-                cast(Any, SimpleNamespace(_twitch=SimpleNamespace(gui=gui))),
+                cast(
+                    Any,
+                    SimpleNamespace(
+                        _twitch=SimpleNamespace(gui=gui),
+                        topic_dispatch_paused=False,
+                    ),
+                ),
                 0,
             )
 
@@ -401,7 +464,13 @@ class WebsocketLifecycleTests(unittest.TestCase):
             rows = _WebsocketRows()
             gui = SimpleNamespace(websockets=rows)
             websocket = Websocket(
-                cast(Any, SimpleNamespace(_twitch=SimpleNamespace(gui=gui))),
+                cast(
+                    Any,
+                    SimpleNamespace(
+                        _twitch=SimpleNamespace(gui=gui),
+                        topic_dispatch_paused=False,
+                    ),
+                ),
                 0,
             )
             socket = SimpleNamespace(close=AsyncMock(side_effect=OSError("close failed")))
@@ -449,7 +518,10 @@ class WebsocketLifecycleTests(unittest.TestCase):
                 coro_unless_closed=coro_unless_closed,
             )
             twitch = SimpleNamespace(gui=gui)
-            pool = SimpleNamespace(_twitch=twitch)
+            pool = SimpleNamespace(
+                _twitch=twitch,
+                topic_dispatch_paused=False,
+            )
             websocket = Websocket(cast(Any, pool), 0)
 
             async def wait_until_stopped() -> None:

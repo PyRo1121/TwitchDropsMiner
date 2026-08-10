@@ -75,6 +75,7 @@ class Websocket:
             tuple[WebsocketTopic, JsonType, int]
         ] = deque()
         self._topic_generation = 0
+        self._topic_dispatch_paused = pool.topic_dispatch_paused
         # topics stuff
         self.topics: dict[str, WebsocketTopic] = {}
         self._submitted: set[WebsocketTopic] = set()
@@ -185,6 +186,15 @@ class Websocket:
         tasks = tuple(self._topic_tasks)
         self._topic_tasks.clear()
         await cancel_tasks(tasks)
+
+    async def pause_topic_dispatch(self) -> None:
+        """Prevent new topic work and drain every currently owned handler."""
+        self._topic_dispatch_paused = True
+        await self.cancel_topic_tasks()
+
+    async def resume_topic_dispatch(self) -> None:
+        """Allow topic dispatch after an awaited quiescence barrier."""
+        self._topic_dispatch_paused = False
 
     def stop_nowait(self, *, remove: bool = False) -> asyncio.Task[None]:
         # Make retirement visible to the receive loop before yielding to the
@@ -423,6 +433,8 @@ class Websocket:
             )
             return
 
+        if self._topic_dispatch_paused:
+            return
         generation = self._topic_generation
         if len(self._topic_tasks) >= WS_TOPIC_TASK_LIMIT:
             if len(self._pending_topic_messages) >= WS_TOPIC_PENDING_LIMIT:
@@ -441,13 +453,16 @@ class Websocket:
         payload: JsonType,
         generation: int,
     ) -> None:
-        if generation != self._topic_generation:
+        if self._topic_dispatch_paused or generation != self._topic_generation:
             return
         task = asyncio.create_task(self._dispatch_topic(topic, payload, generation))
         self._topic_tasks.add(task)
         task.add_done_callback(self._topic_task_done)
 
     def _drain_pending_topic_messages(self) -> None:
+        if self._topic_dispatch_paused:
+            self._pending_topic_messages.clear()
+            return
         while (
             self._pending_topic_messages
             and len(self._topic_tasks) < WS_TOPIC_TASK_LIMIT
@@ -462,7 +477,7 @@ class Websocket:
         payload: JsonType,
         generation: int,
     ) -> None:
-        if generation != self._topic_generation:
+        if self._topic_dispatch_paused or generation != self._topic_generation:
             return
         await topic(payload)
 
@@ -570,10 +585,16 @@ class WebsocketPool:
         self._running = asyncio.Event()
         self.websockets: list[Websocket] = []
         self._retirement_tasks: set[asyncio.Task[None]] = set()
+        self._topic_pause_depth = 0
+        self._topic_pause_lock = asyncio.Lock()
 
     @property
     def running(self) -> bool:
         return self._running.is_set()
+
+    @property
+    def topic_dispatch_paused(self) -> bool:
+        return self._topic_pause_depth > 0
 
     async def start(self):
         self._running.set()
@@ -596,8 +617,37 @@ class WebsocketPool:
                     type(result).__name__,
                 )
 
-    async def cancel_topic_tasks(self) -> None:
-        await asyncio.gather(*(ws.cancel_topic_tasks() for ws in self.websockets))
+    @staticmethod
+    async def _complete_topic_barrier(barrier: asyncio.Future[Any]) -> None:
+        try:
+            await asyncio.shield(barrier)
+        except (asyncio.CancelledError,):
+            # Finish changing every socket before propagating cancellation; a
+            # half-paused pool would violate the ownership boundary.
+            await asyncio.shield(barrier)
+            raise
+
+    async def pause_topic_dispatch(self) -> None:
+        """Pause all current/future dispatch and drain in-flight topic handlers."""
+        async with self._topic_pause_lock:
+            self._topic_pause_depth += 1
+            if self._topic_pause_depth == 1:
+                barrier = asyncio.gather(
+                    *(ws.pause_topic_dispatch() for ws in self.websockets)
+                )
+                await self._complete_topic_barrier(barrier)
+
+    async def resume_topic_dispatch(self) -> None:
+        """Release one pause lease and resume dispatch after the final lease."""
+        async with self._topic_pause_lock:
+            if self._topic_pause_depth == 0:
+                raise RuntimeError("Topic dispatch is not paused")
+            self._topic_pause_depth -= 1
+            if self._topic_pause_depth == 0:
+                barrier = asyncio.gather(
+                    *(ws.resume_topic_dispatch() for ws in self.websockets)
+                )
+                await self._complete_topic_barrier(barrier)
 
     def add_topics(self, topics: abc.Iterable[WebsocketTopic]):
         # ensure no topics end up duplicated

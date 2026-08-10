@@ -4,9 +4,8 @@ import asyncio
 import logging
 from time import monotonic
 from functools import partial
-from collections import abc, deque, OrderedDict
+from collections import abc, OrderedDict
 from collections.abc import Callable, Mapping
-from datetime import datetime
 from typing import Any, Literal, Final, TYPE_CHECKING
 
 import aiohttp
@@ -30,10 +29,8 @@ from exceptions import (
     RequestException,
 )
 from utils import (
-    timestamp,
     cancel_tasks,
     open_dump,
-    redact_log_value,
 )
 from constants import (
     State,
@@ -73,7 +70,6 @@ class Twitch:
         self._drops: dict[str, TimedDrop] = {}
         self._campaigns: dict[str, DropsCampaign] = {}
         self._inventory_generation = 0
-        self._mnt_triggers: deque[datetime] = deque()
         # Client type, transport, and auth
         self._client_type: ClientInfo = ClientType.ANDROID_APP
         self.transport = HttpTransport(self)
@@ -89,41 +85,39 @@ class Twitch:
         self.watch_service: WatchService = WatchService(self)
         # Websocket
         self.websocket = WebsocketPool(self)
-        # Maintenance task
-        self._mnt_task: asyncio.Task[None] | None = None
 
     async def shutdown(self) -> None:
         start_time = monotonic()
         self._inventory_generation += 1
-        background_tasks: list[asyncio.Task[Any]] = []
-        await self.watch_service.close()
-        if self._mnt_task is not None:
-            background_tasks.append(self._mnt_task)
-            self._mnt_task = None
-        pending_channel_tasks = [
-            channel._pending_stream_up
-            for channel in self.channels.values()
-            if channel._pending_stream_up is not None
-        ]
-        for channel in self.channels.values():
-            channel.remove()
-        await cancel_tasks((*background_tasks, *pending_channel_tasks))
-        await self.inventory_service.close()
-        # stop websocket, close transport, and persist cookies
-        await self.websocket.stop(clear_topics=True)
-        await self.transport.close()
+        await self.websocket.pause_topic_dispatch()
         try:
-            await self.gui.inv.replace_campaigns(())
-            self.gui.set_games(set())
-        except Exception:
-            logger.exception("Unable to clear account presentation during shutdown")
-        self._drops.clear()
-        self.channels.clear()
-        self.inventory.clear()
-        self._campaigns.clear()
-        self._auth_state.clear()
-        self.wanted_games.clear()
-        self._mnt_triggers.clear()
+            # Stop event production before canceling any work that topic handlers
+            # can recreate. The pool remains reusable after a reload.
+            await self.websocket.stop(clear_topics=True)
+            await self.inventory_service.close()
+            await self.watch_service.close()
+            pending_channel_tasks = [
+                channel._pending_stream_up
+                for channel in self.channels.values()
+                if channel._pending_stream_up is not None
+            ]
+            for channel in self.channels.values():
+                channel.remove()
+            await cancel_tasks(pending_channel_tasks)
+            await self.transport.close()
+            try:
+                await self.gui.inv.replace_campaigns(())
+                self.gui.set_games(set())
+            except Exception:
+                logger.exception("Unable to clear account presentation during shutdown")
+            self._drops.clear()
+            self.channels.clear()
+            self.inventory.clear()
+            self._campaigns.clear()
+            self._auth_state.clear()
+            self.wanted_games.clear()
+        finally:
+            await self.websocket.resume_topic_dispatch()
         # wait at least half a second + whatever it takes to complete the closing
         # this allows aiohttp to safely close the session
         await asyncio.sleep(max(0, start_time + 0.5 - monotonic()))
@@ -285,35 +279,39 @@ class Twitch:
         channels: Final[OrderedDict[int, Channel]] = self.channels
         self.change_state(State.INVENTORY_FETCH)
         while True:
-            if self._state is State.IDLE:
+            # Consume exactly one coalesced transition before dispatch. Any
+            # transition requested while a handler awaits sets the event again
+            # and is therefore preserved for the next iteration.
+            await self._state_change.wait()
+            self._state_change.clear()
+            state = self._state
+            if state is State.IDLE:
                 if self.watch_service.handle_idle_state():
                     continue
-            elif self._state is State.INVENTORY_FETCH:
+            elif state is State.INVENTORY_FETCH:
                 await self.inventory_service.sync_state()
-            elif self._state is State.GAMES_UPDATE:
+            elif state is State.GAMES_UPDATE:
                 await self.inventory_service.update_wanted_games()
                 full_cleanup = True
                 self.watch_service.restart_watching()
                 self.change_state(State.CHANNELS_CLEANUP)
-            elif self._state is State.CHANNELS_CLEANUP:
+            elif state is State.CHANNELS_CLEANUP:
                 await self.channel_directory_service.cleanup_channels(
                     channels,
                     full_cleanup=full_cleanup,
                 )
                 full_cleanup = False
-            elif self._state is State.CHANNELS_FETCH:
+            elif state is State.CHANNELS_FETCH:
                 await self.channel_directory_service.fetch_channels(channels)
-            elif self._state is State.CHANNEL_SWITCH:
+            elif state is State.CHANNEL_SWITCH:
                 if self.watch_service.switch_channel(channels):
                     continue
-            elif self._state is State.RESTART:
+            elif state is State.RESTART:
                 raise ReloadRequest()
-            elif self._state is State.EXIT:
+            elif state is State.EXIT:
                 self.gui.tray.change_icon("pickaxe")
                 self.gui.status.update(_("gui", "status", "exiting"))
-                # we've been requested to exit the application
                 break
-            await self._state_change.wait()
 
     async def get_auth(self) -> AuthState:
         await self._auth_state.validate()

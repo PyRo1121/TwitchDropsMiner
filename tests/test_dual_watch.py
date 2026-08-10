@@ -4,6 +4,7 @@ import asyncio
 import unittest
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from math import inf
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -36,6 +37,8 @@ class _Directory:
 
 
 def _service(miner: Twitch) -> Any:
+    if not hasattr(miner, "settings"):
+        cast(Any, miner).settings = SimpleNamespace(experimental_dual_watch=False)
     directory_service = getattr(miner, "channel_directory_service", None)
     if directory_service is None:
         cast(Any, miner).channel_directory_service = _Directory(miner)
@@ -518,10 +521,18 @@ class DualWatchSelectionTests(unittest.TestCase):
                 tray = SimpleNamespace(change_icon=lambda _value: None)
                 channels = SimpleNamespace(
                     set_watching_channels=lambda _channels: None,
-                    set_watching=lambda _channel: None,
                     clear_watching=lambda: None,
                 )
                 status = SimpleNamespace(update=lambda _value: None)
+
+                def display_drop(
+                    self,
+                    _drop: object,
+                    *,
+                    countdown: bool,
+                    subone: bool,
+                ) -> None:
+                    del countdown, subone
 
                 def clear_drop(self) -> None:
                     return None
@@ -562,10 +573,18 @@ class DualWatchSelectionTests(unittest.TestCase):
                 tray = SimpleNamespace(change_icon=lambda _value: None)
                 channels = SimpleNamespace(
                     set_watching_channels=lambda _channels: None,
-                    set_watching=lambda _channel: None,
                     clear_watching=lambda: None,
                 )
                 status = SimpleNamespace(update=lambda _value: None)
+
+                def display_drop(
+                    self,
+                    _drop: object,
+                    *,
+                    countdown: bool,
+                    subone: bool,
+                ) -> None:
+                    del countdown, subone
 
                 def clear_drop(self) -> None:
                     return None
@@ -659,6 +678,46 @@ class DualWatchSelectionTests(unittest.TestCase):
         _service(miner).disable_secondary(channels[1])
 
         self.assertFalse(_service(miner)._dual_watch_enabled)
+
+    def test_selection_ignores_channels_without_an_eligible_drop(self) -> None:
+        game = _Game("Game")
+        channel = _Channel(1, game, 100)
+        campaign = _Campaign(game, "drop")
+        miner = cast(Any, Twitch.__new__(Twitch))
+        miner.channels = OrderedDict(((channel.id, channel),))
+        miner.inventory = [campaign]
+        miner.wanted_games = [game]
+        service = _service(miner)
+
+        service.progress._claim_cooldowns = {"drop": inf}
+        self.assertEqual(service._select_watch_assignments(), [])
+
+        service.progress._claim_cooldowns.clear()
+        service.progress._completed_drop_ids = {"drop"}
+        self.assertEqual(service._select_watch_assignments(), [])
+
+    def test_single_watch_uses_one_effective_target_for_switch_policy(self) -> None:
+        preferred_game = _Game("Preferred")
+        lower_game = _Game("Lower")
+        current = _Channel(1, preferred_game, 100)
+        candidate = _Channel(2, lower_game, 90)
+        miner = cast(Any, Twitch.__new__(Twitch))
+        miner.settings = SimpleNamespace(experimental_dual_watch=False)
+        miner.channels = OrderedDict(((current.id, current), (candidate.id, candidate)))
+        miner.inventory = [
+            _Campaign(preferred_game, "preferred-drop"),
+            _Campaign(lower_game, "lower-drop"),
+        ]
+        miner.wanted_games = [preferred_game, lower_game]
+        service = _service(miner)
+        service._watching_channels = OrderedDict(((current.id, current),))
+        service.primary_channel = AwaitableValue()
+        service.primary_channel.set(current)
+
+        self.assertFalse(service.should_switch(candidate))
+
+        miner.wanted_games = [lower_game, preferred_game]
+        self.assertTrue(service.should_switch(candidate))
 
     def test_selection_uses_two_distinct_games_and_drops(self) -> None:
         game_a = _Game("Game A")
