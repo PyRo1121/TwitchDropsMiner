@@ -32,3 +32,11 @@ session_history.json
 
 # local dev venv
 /.venv
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# IDE / Editor
+.vscode/
+.idea/
